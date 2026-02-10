@@ -38,9 +38,10 @@ export interface MessagesResponse {
 
 export interface ProviderConfig {
   id: string
+  name: string
   provider: string
   endpoint_url: string | null
-  model_name: string | null
+  models: string[]
   is_default: boolean
   has_api_key: boolean
 }

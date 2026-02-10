@@ -59,6 +59,18 @@ impl DockerManager {
 
         let container_name = format!("claude-chat-agent-{}", &conversation_id[..8]);
 
+        // Remove any existing container with the same name (e.g. from a previous crash)
+        let _ = self
+            .docker
+            .remove_container(
+                &container_name,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+
         let container_config = Config {
             image: Some(self.config.container_image.clone()),
             env: Some(vec![
@@ -71,6 +83,9 @@ impl DockerManager {
                     "{}:/workspace",
                     workspace_path.to_string_lossy()
                 )]),
+                extra_hosts: Some(vec![
+                    "host.docker.internal:host-gateway".to_string(),
+                ]),
                 memory: Some(512 * 1024 * 1024), // 512MB
                 nano_cpus: Some(1_000_000_000),   // 1 CPU
                 ..Default::default()

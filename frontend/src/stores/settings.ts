@@ -11,13 +11,13 @@ export const useSettingsStore = defineStore('settings', () => {
     providers.value = await usersApi.listProviders()
   }
 
-  async function saveProvider(provider: string, apiKey: string, endpointUrl?: string, modelName?: string, isDefault = false) {
-    await usersApi.upsertProvider(provider, apiKey, endpointUrl, modelName, isDefault)
+  async function saveProvider(name: string, providerType: string, apiKey: string, endpointUrl?: string, models: string[] = [], isDefault = false) {
+    await usersApi.upsertProvider(name, providerType, apiKey, endpointUrl, models, isDefault)
     await loadProviders()
   }
 
-  async function removeProvider(provider: string) {
-    await usersApi.deleteProvider(provider)
+  async function removeProvider(name: string) {
+    await usersApi.deleteProvider(name)
     await loadProviders()
   }
 

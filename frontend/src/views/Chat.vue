@@ -21,7 +21,20 @@
 
     <!-- Main chat area -->
     <el-main style="padding: 0; display: flex; flex-direction: column">
-      <template v-if="chatStore.currentConversationId">
+      <template v-if="chatStore.currentConversationId && currentConversation">
+        <div style="padding: 8px 16px; border-bottom: 1px solid #e4e7ed; display: flex; align-items: center; gap: 8px; flex-shrink: 0">
+          <span style="color: #606266; font-size: 13px">Model:</span>
+          <el-cascader
+            :model-value="cascaderValue"
+            :options="cascaderOptions"
+            :props="{ expandTrigger: 'hover' }"
+            placeholder="Select provider / model"
+            clearable
+            size="small"
+            style="width: 360px"
+            @change="handleCascaderChange"
+          />
+        </div>
         <div style="flex: 1; overflow-y: auto; padding: 20px">
           <ChatMessage
             v-for="msg in chatStore.messages"
@@ -45,18 +58,28 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, onUnmounted, computed } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
+import { useSettingsStore } from '../stores/settings'
 import ConversationList from '../components/ConversationList.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
 
 const auth = useAuthStore()
 const chatStore = useChatStore()
+const settingsStore = useSettingsStore()
 
 onMounted(async () => {
   await chatStore.loadConversations()
+  await settingsStore.loadProviders()
+  if (auth.accessToken) {
+    chatStore.connectWs(auth.accessToken)
+  }
+})
+
+onUnmounted(() => {
+  chatStore.disconnectWs()
 })
 
 async function handleNewChat() {
@@ -73,16 +96,44 @@ async function handleDeleteConversation(id: string) {
 }
 
 function handleSend(content: string) {
-  // Will be wired to WebSocket in Phase 4
-  // For now, just add the message locally
-  chatStore.addMessage({
-    id: crypto.randomUUID(),
-    role: 'user',
-    content,
-    tool_calls: null,
-    tool_call_id: null,
-    token_count: null,
-    created_at: new Date().toISOString(),
-  })
+  chatStore.sendMessage(content)
+}
+
+const currentConversation = computed(() =>
+  chatStore.conversations.find(c => c.id === chatStore.currentConversationId)
+)
+
+const cascaderOptions = computed(() => {
+  return settingsStore.providers.map(p => ({
+    value: p.provider,
+    label: p.name || p.provider,
+    children: p.models.map(m => ({
+      value: m,
+      label: m,
+    })),
+  }))
+})
+
+const cascaderValue = computed(() => {
+  const conv = currentConversation.value
+  if (conv?.provider && conv?.model_name) {
+    return [conv.provider, conv.model_name]
+  }
+  return []
+})
+
+async function handleCascaderChange(val: string[] | null) {
+  if (!chatStore.currentConversationId) return
+  if (val && val.length === 2) {
+    await chatStore.updateConversation(chatStore.currentConversationId, {
+      provider: val[0],
+      model_name: val[1],
+    })
+  } else {
+    await chatStore.updateConversation(chatStore.currentConversationId, {
+      provider: '',
+      model_name: '',
+    })
+  }
 }
 </script>

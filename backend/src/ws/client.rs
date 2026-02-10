@@ -14,6 +14,7 @@ use super::WsState;
 use crate::auth;
 use crate::auth::middleware::AppState;
 use crate::db;
+use crate::docker::manager::DockerManager;
 
 #[derive(Deserialize)]
 pub struct WsQuery {
@@ -25,13 +26,14 @@ pub async fn ws_handler(
     Query(query): Query<WsQuery>,
     Extension(state): Extension<Arc<AppState>>,
     Extension(ws_state): Extension<Arc<WsState>>,
+    Extension(docker_manager): Extension<Arc<DockerManager>>,
 ) -> impl IntoResponse {
     let claims = match auth::verify_access_token(&query.token, &state.config.jwt_secret) {
         Ok(c) => c,
         Err(_) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
 
-    ws.on_upgrade(move |socket| handle_client_ws(socket, claims.sub, state, ws_state))
+    ws.on_upgrade(move |socket| handle_client_ws(socket, claims.sub, state, ws_state, docker_manager))
 }
 
 async fn handle_client_ws(
@@ -39,6 +41,7 @@ async fn handle_client_ws(
     user_id: String,
     state: Arc<AppState>,
     ws_state: Arc<WsState>,
+    docker_manager: Arc<DockerManager>,
 ) {
     let (mut ws_sink, mut ws_stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -179,11 +182,34 @@ async fn handle_client_ws(
                         serde_json::json!({
                             "type": "container_status",
                             "conversation_id": conv_id,
-                            "status": "not_running",
+                            "status": "starting",
                             "message": "Container not connected. Starting..."
                         })
                         .to_string(),
                     );
+
+                    let dm = docker_manager.clone();
+                    let cid = conv_id.clone();
+                    let uid = user_id.clone();
+                    let tx2 = tx.clone();
+                    tokio::spawn(async move {
+                        match dm.start_container(&cid, &uid).await {
+                            Ok(container_id) => {
+                                tracing::info!("Container {container_id} started for {cid}");
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to start container for {cid}: {e}");
+                                let _ = tx2.send(
+                                    serde_json::json!({
+                                        "type": "error",
+                                        "code": "container_start_failed",
+                                        "message": format!("Failed to start container: {e}")
+                                    })
+                                    .to_string(),
+                                );
+                            }
+                        }
+                    });
                 }
             }
             "cancel" => {

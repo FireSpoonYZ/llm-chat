@@ -47,5 +47,41 @@ async fn run_migrations(pool: &SqlitePool) {
             });
     }
 
+    // Run incremental migrations (may fail if already applied)
+    let migration_002 = include_str!("../../../migrations/002_provider_models.sql");
+    for statement in migration_002.split(';') {
+        let trimmed: &str = statement.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Ignore errors (e.g. column already exists)
+        let _ = sqlx::query(trimmed).execute(pool).await;
+    }
+
+    // Migration 003: add name column and recreate table without UNIQUE(user_id, provider)
+    // Only run if name column doesn't exist yet to avoid resetting custom names
+    let has_name_col = sqlx::query_scalar::<_, i32>(
+        "SELECT COUNT(*) FROM pragma_table_info('user_providers') WHERE name = 'name'"
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    if has_name_col == 0 {
+        let migration_003 = include_str!("../../../migrations/003_provider_name.sql");
+        for statement in migration_003.split(';') {
+            let trimmed: &str = statement.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            sqlx::query(trimmed)
+                .execute(pool)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("Migration 003 failed: {e}\nSQL: {trimmed}");
+                });
+        }
+    }
+
     tracing::info!("Database migrations applied successfully");
 }

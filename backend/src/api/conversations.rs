@@ -99,9 +99,21 @@ async fn update_conversation(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let title = req.title.as_deref().unwrap_or(&existing.title);
-    let provider = req.provider.as_deref().or(existing.provider.as_deref());
-    let model_name = req.model_name.as_deref().or(existing.model_name.as_deref());
-    let system_prompt = req.system_prompt_override.as_deref().or(existing.system_prompt_override.as_deref());
+    let provider = match req.provider.as_deref() {
+        Some("") => None,
+        Some(v) => Some(v),
+        None => existing.provider.as_deref(),
+    };
+    let model_name = match req.model_name.as_deref() {
+        Some("") => None,
+        Some(v) => Some(v),
+        None => existing.model_name.as_deref(),
+    };
+    let system_prompt = match req.system_prompt_override.as_deref() {
+        Some("") => None,
+        Some(v) => Some(v),
+        None => existing.system_prompt_override.as_deref(),
+    };
 
     let conv = db::conversations::update_conversation(
         &state.db,

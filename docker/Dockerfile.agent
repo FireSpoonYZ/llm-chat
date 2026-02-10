@@ -9,10 +9,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 
 COPY pyproject.toml .
-RUN uv sync --no-dev
-
 COPY src/ src/
+
+RUN uv sync --no-dev
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["uv", "run", "python", "-m", "src.main"]
+CMD ["uv", "run", "--project", "/app", "python", "-m", "src.main"]

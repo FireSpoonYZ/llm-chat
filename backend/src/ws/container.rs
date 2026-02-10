@@ -93,9 +93,16 @@ async fn handle_container_ws(
                     db::conversations::get_conversation(&state.db, &conversation_id, &user_id)
                         .await
                 {
-                    let provider_name = conv.provider.as_deref().unwrap_or("openai");
-                    let provider =
-                        db::providers::get_provider(&state.db, &user_id, provider_name).await;
+                    let provider_name = conv.provider.as_deref().unwrap_or("");
+                    let provider = if provider_name.is_empty() {
+                        // No provider on conversation, use user's default
+                        db::providers::get_default_provider(&state.db, &user_id).await
+                    } else {
+                        db::providers::get_provider(&state.db, &user_id, provider_name).await
+                    };
+                    let provider_name = provider.as_ref()
+                        .map(|p| p.provider.as_str())
+                        .unwrap_or("openai");
 
                     let messages =
                         db::messages::list_messages(&state.db, &conversation_id, 50, 0).await;
@@ -137,10 +144,14 @@ async fn handle_container_ws(
                         })
                         .unwrap_or_default();
 
-                    let model = provider
-                        .as_ref()
-                        .and_then(|p| p.model_name.clone())
-                        .or(conv.model_name)
+                    let first_model_from_provider = provider.as_ref().and_then(|p| {
+                        p.models.as_deref()
+                            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                            .and_then(|v| v.into_iter().next())
+                            .or_else(|| p.model_name.clone())
+                    });
+                    let model = conv.model_name
+                        .or(first_model_from_provider)
                         .unwrap_or_else(|| "gpt-4o".to_string());
 
                     let init_msg = serde_json::json!({
@@ -157,6 +168,19 @@ async fn handle_container_ws(
                     });
 
                     let _ = tx.send(init_msg.to_string());
+
+                    // If the last message in history is from the user, re-send it
+                    // so the agent processes it (handles cold-start scenario)
+                    if let Some(last) = messages.last() {
+                        if last.role == "user" {
+                            let resend = serde_json::json!({
+                                "type": "user_message",
+                                "message_id": &last.id,
+                                "content": &last.content,
+                            });
+                            let _ = tx.send(resend.to_string());
+                        }
+                    }
                 }
             }
             "assistant_delta" | "tool_call" | "tool_result" => {

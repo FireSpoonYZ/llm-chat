@@ -132,7 +132,15 @@ class ChatAgent:
 
                 # Stream text content
                 if chunk.content:
-                    delta = chunk.content if isinstance(chunk.content, str) else ""
+                    if isinstance(chunk.content, str):
+                        delta = chunk.content
+                    elif isinstance(chunk.content, list):
+                        delta = "".join(
+                            block.get("text", "") if isinstance(block, dict) else str(block)
+                            for block in chunk.content
+                        )
+                    else:
+                        delta = ""
                     if delta:
                         full_content += delta
                         yield StreamEvent("assistant_delta", {"delta": delta})

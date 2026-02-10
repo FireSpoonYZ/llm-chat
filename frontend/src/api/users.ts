@@ -11,19 +11,20 @@ export async function listProviders(): Promise<ProviderConfig[]> {
   return data
 }
 
-export async function upsertProvider(provider: string, apiKey: string, endpointUrl?: string, modelName?: string, isDefault = false): Promise<ProviderConfig> {
+export async function upsertProvider(name: string, providerType: string, apiKey: string, endpointUrl?: string, models: string[] = [], isDefault = false): Promise<ProviderConfig> {
   const { data } = await client.post<ProviderConfig>('/users/me/providers', {
-    provider,
+    name,
+    provider_type: providerType,
     api_key: apiKey,
     endpoint_url: endpointUrl || null,
-    model_name: modelName || null,
+    models,
     is_default: isDefault,
   })
   return data
 }
 
-export async function deleteProvider(provider: string): Promise<void> {
-  await client.delete(`/users/me/providers/${provider}`)
+export async function deleteProvider(name: string): Promise<void> {
+  await client.delete(`/users/me/providers/${encodeURIComponent(name)}`)
 }
 
 export async function listMcpServers(): Promise<McpServer[]> {
