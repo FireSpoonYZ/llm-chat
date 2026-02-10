@@ -5,21 +5,26 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@types/highlight.js": "^10.1.0",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^25.2.2",
+    "@vitejs/plugin-vue": "^6.0.4",
     "typescript": "~5.9.3",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "vue-tsc": "^3.2.4"
   },
   "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
     "axios": "^1.13.5",
     "element-plus": "^2.13.2",
     "highlight.js": "^11.11.1",
     "markdown-it": "^14.1.0",
     "pinia": "^3.0.4",
+    "vue": "^3.5.28",
     "vue-router": "^4.6.4"
   }
 }

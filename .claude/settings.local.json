@@ -18,7 +18,15 @@
       "Bash(cargo check)",
       "Bash(git init:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(npx vue-tsc --noEmit)",
+      "Bash(pnpm build)",
+      "Bash(cargo test)",
+      "Bash(uv sync --dev)",
+      "Bash(uv run pytest:*)",
+      "Bash(cargo build)",
+      "Bash(dir:*)",
+      "Bash(echo:*)"
     ]
   }
 }

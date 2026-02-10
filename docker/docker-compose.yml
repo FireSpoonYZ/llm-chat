@@ -12,10 +12,11 @@ services:
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - CONTAINER_IMAGE=claude-chat-agent:latest
       - INTERNAL_WS_PORT=3001
+      - IDLE_TIMEOUT_SECS=600
     volumes:
       - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
-    depends_on: []
+    restart: unless-stopped
 
   frontend:
     build:
@@ -25,6 +26,7 @@ services:
       - "80:80"
     depends_on:
       - backend
+    restart: unless-stopped
 
   agent-build:
     build:
