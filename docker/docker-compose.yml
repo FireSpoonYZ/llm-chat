@@ -1,0 +1,34 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    environment:
+      - DATABASE_URL=sqlite:/app/data/claude-chat.db?mode=rwc
+      - JWT_SECRET=${JWT_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - CONTAINER_IMAGE=claude-chat-agent:latest
+      - INTERNAL_WS_PORT=3001
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on: []
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+  agent-build:
+    build:
+      context: ./agent
+      dockerfile: ../docker/Dockerfile.agent
+    image: claude-chat-agent:latest
+    entrypoint: ["echo", "Agent image built"]
