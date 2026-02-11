@@ -10,6 +10,7 @@ pub struct Conversation {
     pub provider: Option<String>,
     pub model_name: Option<String>,
     pub system_prompt_override: Option<String>,
+    pub deep_thinking: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -18,18 +19,26 @@ pub async fn create_conversation(
     pool: &SqlitePool,
     user_id: &str,
     title: &str,
+    system_prompt_override: Option<&str>,
+    provider: Option<&str>,
+    model_name: Option<&str>,
+    deep_thinking: bool,
 ) -> Conversation {
     let id = uuid::Uuid::new_v4().to_string();
 
     sqlx::query_as::<_, Conversation>(
-        "INSERT INTO conversations (id, user_id, title)
-         VALUES (?, ?, ?)
+        "INSERT INTO conversations (id, user_id, title, system_prompt_override, provider, model_name, deep_thinking)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          RETURNING id, user_id, title, provider, model_name,
-                   system_prompt_override, created_at, updated_at",
+                   system_prompt_override, deep_thinking, created_at, updated_at",
     )
     .bind(&id)
     .bind(user_id)
     .bind(title)
+    .bind(system_prompt_override)
+    .bind(provider)
+    .bind(model_name)
+    .bind(deep_thinking)
     .fetch_one(pool)
     .await
     .expect("Failed to create conversation")
@@ -41,7 +50,7 @@ pub async fn list_conversations(
 ) -> Vec<Conversation> {
     sqlx::query_as::<_, Conversation>(
         "SELECT id, user_id, title, provider, model_name,
-                system_prompt_override, created_at, updated_at
+                system_prompt_override, deep_thinking, created_at, updated_at
          FROM conversations
          WHERE user_id = ?
          ORDER BY updated_at DESC",
@@ -59,7 +68,7 @@ pub async fn get_conversation(
 ) -> Option<Conversation> {
     sqlx::query_as::<_, Conversation>(
         "SELECT id, user_id, title, provider, model_name,
-                system_prompt_override, created_at, updated_at
+                system_prompt_override, deep_thinking, created_at, updated_at
          FROM conversations
          WHERE id = ? AND user_id = ?",
     )
@@ -78,19 +87,21 @@ pub async fn update_conversation(
     provider: Option<&str>,
     model_name: Option<&str>,
     system_prompt_override: Option<&str>,
+    deep_thinking: bool,
 ) -> Option<Conversation> {
     sqlx::query_as::<_, Conversation>(
         "UPDATE conversations
          SET title = ?, provider = ?, model_name = ?,
-             system_prompt_override = ?, updated_at = datetime('now')
+             system_prompt_override = ?, deep_thinking = ?, updated_at = datetime('now')
          WHERE id = ? AND user_id = ?
          RETURNING id, user_id, title, provider, model_name,
-                   system_prompt_override, created_at, updated_at",
+                   system_prompt_override, deep_thinking, created_at, updated_at",
     )
     .bind(title)
     .bind(provider)
     .bind(model_name)
     .bind(system_prompt_override)
+    .bind(deep_thinking)
     .bind(id)
     .bind(user_id)
     .fetch_optional(pool)
@@ -130,20 +141,54 @@ mod tests {
     #[tokio::test]
     async fn test_create_conversation() {
         let (pool, user_id) = setup().await;
-        let conv = create_conversation(&pool, &user_id, "My Chat").await;
+        let conv = create_conversation(&pool, &user_id, "My Chat", None, None, None, false).await;
         assert_eq!(conv.user_id, user_id);
         assert_eq!(conv.title, "My Chat");
         assert!(conv.provider.is_none());
         assert!(conv.model_name.is_none());
         assert!(conv.system_prompt_override.is_none());
+        assert!(!conv.deep_thinking);
         assert!(!conv.id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_create_conversation_with_system_prompt() {
+        let (pool, user_id) = setup().await;
+        let conv = create_conversation(&pool, &user_id, "Prompted Chat", Some("You are a pirate."), None, None, false).await;
+        assert_eq!(conv.system_prompt_override.as_deref(), Some("You are a pirate."));
+    }
+
+    #[tokio::test]
+    async fn test_create_conversation_with_provider_and_model() {
+        let (pool, user_id) = setup().await;
+        let conv = create_conversation(
+            &pool, &user_id, "Provider Chat", None,
+            Some("openai"), Some("gpt-4o"), false,
+        ).await;
+        assert_eq!(conv.provider.as_deref(), Some("openai"));
+        assert_eq!(conv.model_name.as_deref(), Some("gpt-4o"));
+        assert!(conv.system_prompt_override.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_conversation_with_all_fields() {
+        let (pool, user_id) = setup().await;
+        let conv = create_conversation(
+            &pool, &user_id, "Full Chat", Some("Be helpful."),
+            Some("anthropic"), Some("claude-3"), true,
+        ).await;
+        assert_eq!(conv.title, "Full Chat");
+        assert_eq!(conv.system_prompt_override.as_deref(), Some("Be helpful."));
+        assert_eq!(conv.provider.as_deref(), Some("anthropic"));
+        assert_eq!(conv.model_name.as_deref(), Some("claude-3"));
+        assert!(conv.deep_thinking);
     }
 
     #[tokio::test]
     async fn test_list_conversations() {
         let (pool, user_id) = setup().await;
-        create_conversation(&pool, &user_id, "Chat 1").await;
-        create_conversation(&pool, &user_id, "Chat 2").await;
+        create_conversation(&pool, &user_id, "Chat 1", None, None, None, false).await;
+        create_conversation(&pool, &user_id, "Chat 2", None, None, None, false).await;
         let convs = list_conversations(&pool, &user_id).await;
         assert_eq!(convs.len(), 2);
     }
@@ -151,7 +196,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_conversation() {
         let (pool, user_id) = setup().await;
-        let conv = create_conversation(&pool, &user_id, "Findable Chat").await;
+        let conv = create_conversation(&pool, &user_id, "Findable Chat", None, None, None, false).await;
         let fetched = get_conversation(&pool, &conv.id, &user_id).await;
         assert!(fetched.is_some());
         assert_eq!(fetched.unwrap().title, "Findable Chat");
@@ -160,7 +205,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_conversation() {
         let (pool, user_id) = setup().await;
-        let conv = create_conversation(&pool, &user_id, "Old Title").await;
+        let conv = create_conversation(&pool, &user_id, "Old Title", None, None, None, false).await;
         let updated = update_conversation(
             &pool,
             &conv.id,
@@ -169,6 +214,7 @@ mod tests {
             Some("openai"),
             Some("gpt-4"),
             Some("You are helpful."),
+            true,
         )
         .await;
         assert!(updated.is_some());
@@ -177,12 +223,13 @@ mod tests {
         assert_eq!(updated.provider.as_deref(), Some("openai"));
         assert_eq!(updated.model_name.as_deref(), Some("gpt-4"));
         assert_eq!(updated.system_prompt_override.as_deref(), Some("You are helpful."));
+        assert!(updated.deep_thinking);
     }
 
     #[tokio::test]
     async fn test_delete_conversation() {
         let (pool, user_id) = setup().await;
-        let conv = create_conversation(&pool, &user_id, "To Delete").await;
+        let conv = create_conversation(&pool, &user_id, "To Delete", None, None, None, false).await;
         let deleted = delete_conversation(&pool, &conv.id, &user_id).await;
         assert!(deleted);
         let fetched = get_conversation(&pool, &conv.id, &user_id).await;
@@ -196,7 +243,7 @@ mod tests {
     async fn test_get_other_users_conversation_returns_none() {
         let (pool, user_id) = setup().await;
         let other_user = create_user(&pool, "other", "other@example.com", "hash2").await;
-        let conv = create_conversation(&pool, &user_id, "Private Chat").await;
+        let conv = create_conversation(&pool, &user_id, "Private Chat", None, None, None, false).await;
         // The other user should not be able to see this conversation
         let fetched = get_conversation(&pool, &conv.id, &other_user.id).await;
         assert!(fetched.is_none());

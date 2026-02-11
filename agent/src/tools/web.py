@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from typing import Type
 
 import httpx
 from bs4 import BeautifulSoup
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
+
+EXA_MCP_URL = "https://mcp.exa.ai/mcp"
 
 
 class WebFetchInput(BaseModel):
@@ -66,3 +69,80 @@ class WebFetchTool(BaseTool):
             text = text[:max_length] + "\n... content truncated"
 
         return text
+
+
+class WebSearchInput(BaseModel):
+    """Input for the WebSearchTool."""
+
+    query: str = Field(description="The search query.")
+    num_results: int = Field(
+        default=5, description="Number of results to return (1-10)."
+    )
+    type: str = Field(
+        default="auto",
+        description="Search type: auto, fast, or deep.",
+    )
+
+
+class WebSearchTool(BaseTool):
+    """Search the web using Exa AI MCP endpoint."""
+
+    name: str = "web_search"
+    description: str = (
+        "Search the web using Exa AI. Returns relevant web page content "
+        "for the given query. Use this to find up-to-date information."
+    )
+    args_schema: Type[BaseModel] = WebSearchInput
+
+    def _run(self, query: str, num_results: int = 5, type: str = "auto") -> str:
+        raise NotImplementedError(
+            "WebSearchTool does not support synchronous execution. Use the async interface."
+        )
+
+    async def _arun(self, query: str, num_results: int = 5, type: str = "auto") -> str:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "web_search_exa",
+                "arguments": {
+                    "query": query,
+                    "numResults": num_results,
+                    "type": type,
+                    "livecrawl": "fallback",
+                    "contextMaxCharacters": 10000,
+                },
+            },
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(25.0)) as client:
+                response = await client.post(
+                    EXA_MCP_URL,
+                    json=payload,
+                    headers={
+                        "accept": "application/json, text/event-stream",
+                        "content-type": "application/json",
+                    },
+                )
+                response.raise_for_status()
+        except httpx.TimeoutException:
+            return "Error: web search request timed out after 25 seconds."
+        except httpx.HTTPError as exc:
+            return f"Error: web search request failed: {exc}"
+
+        # Parse SSE response — look for data: lines containing JSON-RPC result
+        for line in response.text.split("\n"):
+            if line.startswith("data: "):
+                try:
+                    data = json.loads(line[6:])
+                    content = (
+                        data.get("result", {}).get("content") or []
+                    )
+                    if content:
+                        return content[0].get("text", "")
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+
+        return "No search results found. Please try a different query."

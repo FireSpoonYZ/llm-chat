@@ -21,6 +21,54 @@ pub struct WsQuery {
     pub token: String,
 }
 
+async fn send_to_container_or_start(
+    ws_state: &Arc<WsState>,
+    docker_manager: &Arc<DockerManager>,
+    tx: &mpsc::UnboundedSender<String>,
+    conv_id: &str,
+    user_id: &str,
+    message: &str,
+) {
+    let sent = ws_state.send_to_container(conv_id, message).await;
+    if !sent {
+        // Queue the message so the container handler can forward it (with all fields) on ready
+        ws_state.set_pending_message(conv_id, message.to_string()).await;
+
+        let _ = tx.send(
+            serde_json::json!({
+                "type": "container_status",
+                "conversation_id": conv_id,
+                "status": "starting",
+                "message": "Container not connected. Starting..."
+            })
+            .to_string(),
+        );
+
+        let dm = docker_manager.clone();
+        let cid = conv_id.to_string();
+        let uid = user_id.to_string();
+        let tx2 = tx.clone();
+        tokio::spawn(async move {
+            match dm.start_container(&cid, &uid).await {
+                Ok(container_id) => {
+                    tracing::info!("Container {container_id} started for {cid}");
+                }
+                Err(e) => {
+                    tracing::error!("Failed to start container for {cid}: {e}");
+                    let _ = tx2.send(
+                        serde_json::json!({
+                            "type": "error",
+                            "code": "container_start_failed",
+                            "message": format!("Failed to start container: {e}")
+                        })
+                        .to_string(),
+                    );
+                }
+            }
+        });
+    }
+}
+
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<WsQuery>,
@@ -142,18 +190,25 @@ async fn handle_client_ws(
                     db::messages::create_message(&state.db, &conv_id, "user", &content, None, None, None)
                         .await;
 
+                let conv = db::conversations::get_conversation(&state.db, &conv_id, &user_id).await;
+                let deep_thinking = conv.as_ref().map(|c| c.deep_thinking).unwrap_or(false);
+
                 // Auto-generate conversation title from first message
                 let msg_count = db::messages::count_messages(&state.db, &conv_id).await;
                 if msg_count == 1 {
-                    let title = if content.len() > 50 {
-                        format!("{}...", &content[..50])
+                    let title: String = if content.chars().count() > 50 {
+                        format!("{}...", content.chars().take(50).collect::<String>())
                     } else {
                         content.clone()
                     };
-                    db::conversations::update_conversation(
-                        &state.db, &conv_id, &user_id, &title, None, None, None,
-                    )
-                    .await;
+                    if let Some(c) = &conv {
+                        db::conversations::update_conversation(
+                            &state.db, &conv_id, &user_id, &title,
+                            c.provider.as_deref(), c.model_name.as_deref(),
+                            c.system_prompt_override.as_deref(), c.deep_thinking,
+                        )
+                        .await;
+                    }
                 }
 
                 let _ = tx.send(
@@ -165,52 +220,170 @@ async fn handle_client_ws(
                     .to_string(),
                 );
 
-                let sent = ws_state
-                    .send_to_container(
-                        &conv_id,
-                        &serde_json::json!({
-                            "type": "user_message",
-                            "message_id": msg.id,
-                            "content": content,
-                        })
-                        .to_string(),
-                    )
-                    .await;
+                tracing::debug!("user_message: deep_thinking={}", deep_thinking);
 
-                if !sent {
-                    let _ = tx.send(
-                        serde_json::json!({
-                            "type": "container_status",
-                            "conversation_id": conv_id,
-                            "status": "starting",
-                            "message": "Container not connected. Starting..."
-                        })
-                        .to_string(),
-                    );
+                send_to_container_or_start(
+                    &ws_state, &docker_manager, &tx, &conv_id, &user_id,
+                    &serde_json::json!({
+                        "type": "user_message",
+                        "message_id": msg.id,
+                        "content": content,
+                        "deep_thinking": deep_thinking,
+                    })
+                    .to_string(),
+                )
+                .await;
+            }
+            "edit_message" => {
+                let conv_id = match &current_conversation_id {
+                    Some(id) => id.clone(),
+                    None => continue,
+                };
 
-                    let dm = docker_manager.clone();
-                    let cid = conv_id.clone();
-                    let uid = user_id.clone();
-                    let tx2 = tx.clone();
-                    tokio::spawn(async move {
-                        match dm.start_container(&cid, &uid).await {
-                            Ok(container_id) => {
-                                tracing::info!("Container {container_id} started for {cid}");
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to start container for {cid}: {e}");
-                                let _ = tx2.send(
-                                    serde_json::json!({
-                                        "type": "error",
-                                        "code": "container_start_failed",
-                                        "message": format!("Failed to start container: {e}")
-                                    })
-                                    .to_string(),
-                                );
-                            }
-                        }
-                    });
-                }
+                let message_id = match parsed.get("message_id").and_then(|v| v.as_str()) {
+                    Some(id) => id.to_string(),
+                    None => continue,
+                };
+                let content = match parsed.get("content").and_then(|v| v.as_str()) {
+                    Some(c) if !c.is_empty() => c.to_string(),
+                    _ => continue,
+                };
+
+                // Validate message exists and is a user message
+                let msg = match db::messages::get_message(&state.db, &message_id).await {
+                    Some(m) if m.role == "user" && m.conversation_id == conv_id => m,
+                    _ => {
+                        let _ = tx.send(
+                            serde_json::json!({
+                                "type": "error",
+                                "code": "invalid_message",
+                                "message": "Message not found or not a user message"
+                            })
+                            .to_string(),
+                        );
+                        continue;
+                    }
+                };
+
+                // Update content and delete subsequent messages
+                let all_msgs = db::messages::list_messages(&state.db, &conv_id, 1000, 0).await;
+                let keep_turns = all_msgs.iter()
+                    .take_while(|m| m.id != msg.id)
+                    .filter(|m| m.role == "user")
+                    .count();
+
+                db::messages::update_message_content(&state.db, &msg.id, &content).await;
+                db::messages::delete_messages_after(&state.db, &conv_id, &msg.id).await;
+
+                let _ = tx.send(
+                    serde_json::json!({
+                        "type": "messages_truncated",
+                        "after_message_id": msg.id,
+                        "updated_content": content,
+                    })
+                    .to_string(),
+                );
+
+                let deep_thinking = db::conversations::get_conversation(&state.db, &conv_id, &user_id)
+                    .await
+                    .map(|c| c.deep_thinking)
+                    .unwrap_or(false);
+
+                // Tell the running container to truncate its in-memory history
+                ws_state.send_to_container(&conv_id, &serde_json::json!({
+                    "type": "truncate_history",
+                    "keep_turns": keep_turns,
+                }).to_string()).await;
+
+                send_to_container_or_start(
+                    &ws_state, &docker_manager, &tx, &conv_id, &user_id,
+                    &serde_json::json!({
+                        "type": "user_message",
+                        "message_id": msg.id,
+                        "content": content,
+                        "deep_thinking": deep_thinking,
+                    })
+                    .to_string(),
+                )
+                .await;
+            }
+            "regenerate" => {
+                let conv_id = match &current_conversation_id {
+                    Some(id) => id.clone(),
+                    None => continue,
+                };
+
+                let message_id = match parsed.get("message_id").and_then(|v| v.as_str()) {
+                    Some(id) => id.to_string(),
+                    None => continue,
+                };
+
+                // Validate message exists and is an assistant message
+                let msg = match db::messages::get_message(&state.db, &message_id).await {
+                    Some(m) if m.role == "assistant" && m.conversation_id == conv_id => m,
+                    _ => {
+                        let _ = tx.send(
+                            serde_json::json!({
+                                "type": "error",
+                                "code": "invalid_message",
+                                "message": "Message not found or not an assistant message"
+                            })
+                            .to_string(),
+                        );
+                        continue;
+                    }
+                };
+
+                // Find the last user message before this assistant message
+                let all_msgs = db::messages::list_messages(&state.db, &conv_id, 1000, 0).await;
+                let msg_idx = all_msgs.iter().position(|m| m.id == msg.id);
+                let last_user_msg = msg_idx.and_then(|idx| {
+                    all_msgs[..idx].iter().rev().find(|m| m.role == "user")
+                });
+
+                let user_msg = match last_user_msg {
+                    Some(m) => m.clone(),
+                    None => continue,
+                };
+
+                // Delete the assistant message and everything after the user message
+                let keep_turns = all_msgs.iter()
+                    .take_while(|m| m.id != user_msg.id)
+                    .filter(|m| m.role == "user")
+                    .count();
+
+                db::messages::delete_messages_after(&state.db, &conv_id, &user_msg.id).await;
+
+                let _ = tx.send(
+                    serde_json::json!({
+                        "type": "messages_truncated",
+                        "after_message_id": user_msg.id,
+                    })
+                    .to_string(),
+                );
+
+                let deep_thinking = db::conversations::get_conversation(&state.db, &conv_id, &user_id)
+                    .await
+                    .map(|c| c.deep_thinking)
+                    .unwrap_or(false);
+
+                // Tell the running container to truncate its in-memory history
+                ws_state.send_to_container(&conv_id, &serde_json::json!({
+                    "type": "truncate_history",
+                    "keep_turns": keep_turns,
+                }).to_string()).await;
+
+                send_to_container_or_start(
+                    &ws_state, &docker_manager, &tx, &conv_id, &user_id,
+                    &serde_json::json!({
+                        "type": "user_message",
+                        "message_id": user_msg.id,
+                        "content": user_msg.content,
+                        "deep_thinking": deep_thinking,
+                    })
+                    .to_string(),
+                )
+                .await;
             }
             "cancel" => {
                 if let Some(ref conv_id) = current_conversation_id {

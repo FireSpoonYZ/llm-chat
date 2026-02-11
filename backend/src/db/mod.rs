@@ -1,6 +1,7 @@
 pub mod conversations;
 pub mod mcp_servers;
 pub mod messages;
+pub mod presets;
 pub mod providers;
 pub mod refresh_tokens;
 pub mod users;
@@ -79,6 +80,54 @@ async fn run_migrations(pool: &SqlitePool) {
                 .await
                 .unwrap_or_else(|e| {
                     panic!("Migration 003 failed: {e}\nSQL: {trimmed}");
+                });
+        }
+    }
+
+    // Migration 004: user_presets table
+    let has_presets_table = sqlx::query_scalar::<_, i32>(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='user_presets'"
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    if has_presets_table == 0 {
+        let migration_004 = include_str!("../../../migrations/004_user_presets.sql");
+        for statement in migration_004.split(';') {
+            let trimmed: &str = statement.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            sqlx::query(trimmed)
+                .execute(pool)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("Migration 004 failed: {e}\nSQL: {trimmed}");
+                });
+        }
+    }
+
+    // Migration 005: add deep_thinking column to conversations
+    let has_deep_thinking_col = sqlx::query_scalar::<_, i32>(
+        "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'deep_thinking'"
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    if has_deep_thinking_col == 0 {
+        let migration_005 = include_str!("../../../migrations/005_conversation_deep_thinking.sql");
+        for statement in migration_005.split(';') {
+            let trimmed: &str = statement.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            sqlx::query(trimmed)
+                .execute(pool)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("Migration 005 failed: {e}\nSQL: {trimmed}");
                 });
         }
     }

@@ -86,6 +86,8 @@ async fn handle_container_ws(
             .and_then(|t| t.as_str())
             .unwrap_or("");
 
+        tracing::debug!("Container msg for {}: type={}", conversation_id, msg_type);
+
         match msg_type {
             "ready" => {
                 tracing::info!("Container ready for conversation {}", conversation_id);
@@ -106,7 +108,16 @@ async fn handle_container_ws(
 
                     let messages =
                         db::messages::list_messages(&state.db, &conversation_id, 50, 0).await;
-                    let history: Vec<serde_json::Value> = messages
+
+                    // Check if last message is from user — it will be resent separately
+                    let needs_resend = messages.last().map_or(false, |m| m.role == "user");
+                    let history_messages = if needs_resend {
+                        &messages[..messages.len() - 1]
+                    } else {
+                        &messages[..]
+                    };
+
+                    let history: Vec<serde_json::Value> = history_messages
                         .iter()
                         .map(|m| {
                             serde_json::json!({
@@ -169,21 +180,26 @@ async fn handle_container_ws(
 
                     let _ = tx.send(init_msg.to_string());
 
-                    // If the last message in history is from the user, re-send it
-                    // so the agent processes it (handles cold-start scenario)
-                    if let Some(last) = messages.last() {
+                    // If there's a pending message (queued while container was starting),
+                    // send it as-is (preserves deep_thinking and other fields).
+                    // Otherwise fall back to re-sending the last user message from history.
+                    if let Some(pending) = ws_state.take_pending_message(&conversation_id).await {
+                        let _ = tx.send(pending);
+                    } else if let Some(last) = messages.last() {
                         if last.role == "user" {
                             let resend = serde_json::json!({
                                 "type": "user_message",
                                 "message_id": &last.id,
                                 "content": &last.content,
+                                "deep_thinking": conv.deep_thinking,
                             });
                             let _ = tx.send(resend.to_string());
                         }
                     }
                 }
             }
-            "assistant_delta" | "tool_call" | "tool_result" => {
+            "assistant_delta" | "thinking_delta" | "tool_call" | "tool_result" => {
+                tracing::debug!("Forwarding {} to client for {}", msg_type, conversation_id);
                 let mut forwarded = parsed.clone();
                 if let Some(obj) = forwarded.as_object_mut() {
                     obj.insert(
@@ -204,13 +220,17 @@ async fn handle_container_ws(
                     .get("token_usage")
                     .and_then(|u| u.get("completion"))
                     .and_then(|v| v.as_i64());
+                let tool_calls_json = parsed
+                    .get("tool_calls")
+                    .filter(|v| !v.is_null())
+                    .map(|v| v.to_string());
 
                 let saved_msg = db::messages::create_message(
                     &state.db,
                     &conversation_id,
                     "assistant",
                     content,
-                    None,
+                    tool_calls_json.as_deref(),
                     None,
                     token_count,
                 )
@@ -243,7 +263,9 @@ async fn handle_container_ws(
                     .send_to_client(&user_id, &conversation_id, &forwarded.to_string())
                     .await;
             }
-            _ => {}
+            _ => {
+                tracing::debug!("Unhandled container msg type: {}", msg_type);
+            }
         }
     }
 

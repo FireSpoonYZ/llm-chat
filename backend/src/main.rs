@@ -10,6 +10,7 @@ mod config;
 mod crypto;
 mod db;
 mod docker;
+mod prompts;
 mod ws;
 
 use auth::middleware::AppState;
@@ -56,6 +57,7 @@ async fn main() {
         .nest("/api/conversations", api::conversations::router())
         .nest("/api/admin", api::admin::router())
         .nest("/api/mcp-servers", mcp_servers_public_router())
+        .nest("/api/presets", api::presets::router())
         .layer(axum::Extension(state.clone()))
         .layer(axum::Extension(ws_state.clone()))
         .layer(axum::Extension(docker_manager.clone()))

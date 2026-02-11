@@ -8,14 +8,11 @@
       @click="$emit('select', conv.id)"
     >
       <span class="title">{{ conv.title }}</span>
-      <el-button
+      <button
         class="delete-btn"
-        text
-        size="small"
         @click.stop="$emit('delete', conv.id)"
-      >
-        &times;
-      </el-button>
+        aria-label="Delete conversation"
+      >&times;</button>
     </div>
   </div>
 </template>
@@ -36,7 +33,9 @@ defineEmits<{
 
 <style scoped>
 .conversation-list {
+  flex: 1;
   overflow-y: auto;
+  padding: 4px 8px;
 }
 .conversation-item {
   padding: 10px 12px;
@@ -44,25 +43,39 @@ defineEmits<{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid #f0f0f0;
+  border-radius: var(--radius-md);
+  margin-bottom: 2px;
+  transition: background var(--transition-fast);
 }
 .conversation-item:hover {
-  background: #ecf5ff;
+  background: var(--bg-sidebar-hover);
 }
 .conversation-item.active {
-  background: #e6f0ff;
+  background: var(--bg-sidebar-active);
 }
 .title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
+  color: var(--text-sidebar);
+  font-size: 14px;
 }
 .delete-btn {
+  background: none;
+  border: none;
+  color: var(--text-sidebar-muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
   opacity: 0;
-  transition: opacity 0.2s;
+  transition: opacity 0.2s, color var(--transition-fast);
+  line-height: 1;
 }
 .conversation-item:hover .delete-btn {
   opacity: 1;
+}
+.delete-btn:hover {
+  color: #F87171;
 }
 </style>

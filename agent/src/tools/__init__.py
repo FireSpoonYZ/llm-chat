@@ -3,7 +3,7 @@
 from .bash import BashTool
 from .file_ops import ReadTool, WriteTool, EditTool
 from .search import GlobTool, GrepTool
-from .web import WebFetchTool
+from .web import WebFetchTool, WebSearchTool
 from .code_interpreter import CodeInterpreterTool
 
 ALL_TOOLS = [
@@ -14,6 +14,7 @@ ALL_TOOLS = [
     GlobTool,
     GrepTool,
     WebFetchTool,
+    WebSearchTool,
     CodeInterpreterTool,
 ]
 
@@ -28,5 +29,6 @@ def create_all_tools(workspace: str = "/workspace"):
         GlobTool(workspace=workspace),
         GrepTool(workspace=workspace),
         WebFetchTool(),
+        WebSearchTool(),
         CodeInterpreterTool(workspace=workspace),
     ]

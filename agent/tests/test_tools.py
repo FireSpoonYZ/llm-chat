@@ -5,12 +5,15 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from src.tools.bash import BashTool
 from src.tools.file_ops import EditTool, ReadTool, WriteTool, _resolve_path
 from src.tools.search import GlobTool, GrepTool
+from src.tools.web import WebFetchTool, WebSearchTool
 from src.tools.code_interpreter import CodeInterpreterTool
 
 
@@ -389,6 +392,90 @@ class TestWebFetchTool:
 
 
 # ---------------------------------------------------------------------------
+# WebSearchTool (async only, tested with mock)
+# ---------------------------------------------------------------------------
+
+class TestWebSearchTool:
+    def test_sync_raises(self):
+        tool = WebSearchTool()
+        with pytest.raises(NotImplementedError):
+            tool._run("test query")
+
+    @pytest.mark.asyncio
+    @patch("src.tools.web.httpx.AsyncClient")
+    async def test_successful_search(self, mock_client_cls):
+        sse_body = (
+            'event: message\n'
+            'data: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Search results here"}]}}\n\n'
+        )
+        mock_response = MagicMock()
+        mock_response.text = sse_body
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        tool = WebSearchTool()
+        result = await tool._arun("test query")
+        assert result == "Search results here"
+
+        # Verify the POST was called with correct URL and payload
+        mock_client.post.assert_called_once()
+        call_args = mock_client.post.call_args
+        assert call_args[0][0] == "https://mcp.exa.ai/mcp"
+        payload = call_args[1]["json"]
+        assert payload["method"] == "tools/call"
+        assert payload["params"]["name"] == "web_search_exa"
+        assert payload["params"]["arguments"]["query"] == "test query"
+
+    @pytest.mark.asyncio
+    @patch("src.tools.web.httpx.AsyncClient")
+    async def test_no_results(self, mock_client_cls):
+        mock_response = MagicMock()
+        mock_response.text = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[]}}\n\n"
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        tool = WebSearchTool()
+        result = await tool._arun("nothing")
+        assert "No search results found" in result
+
+    @pytest.mark.asyncio
+    @patch("src.tools.web.httpx.AsyncClient")
+    async def test_timeout_error(self, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.TimeoutException("timeout"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        tool = WebSearchTool()
+        result = await tool._arun("test")
+        assert "timed out" in result.lower()
+
+    @pytest.mark.asyncio
+    @patch("src.tools.web.httpx.AsyncClient")
+    async def test_http_error(self, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.HTTPError("500 error"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        tool = WebSearchTool()
+        result = await tool._arun("test")
+        assert "Error" in result
+
+
+# ---------------------------------------------------------------------------
 # create_all_tools
 # ---------------------------------------------------------------------------
 
@@ -404,5 +491,6 @@ class TestCreateAllTools:
         assert "glob" in names
         assert "grep" in names
         assert "web_fetch" in names
+        assert "web_search" in names
         assert "code_interpreter" in names
-        assert len(tools) == 8
+        assert len(tools) == 9

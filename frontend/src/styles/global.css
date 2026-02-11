@@ -1,0 +1,80 @@
+@import './variables.css';
+
+/* Reset & base */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+}
+
+html, body {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  background: var(--bg-main);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#app {
+  height: 100%;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+/* Dark scrollbar for sidebar */
+.chat-sidebar::-webkit-scrollbar-thumb,
+.chat-sidebar *::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* Element Plus theme overrides */
+:root {
+  --el-color-primary: var(--accent-primary);
+  --el-color-primary-light-3: #E5A84D;
+  --el-color-primary-light-5: #ECBF73;
+  --el-color-primary-light-7: #F2D69A;
+  --el-color-primary-light-9: #FBF2E0;
+  --el-color-primary-dark-2: var(--accent-primary-hover);
+  --el-border-color: var(--border-light);
+  --el-border-color-light: var(--border-light);
+  --el-border-color-lighter: #EBE8E3;
+  --el-fill-color-blank: var(--bg-input);
+  --el-bg-color: var(--bg-main);
+  --el-text-color-primary: var(--text-primary);
+  --el-text-color-regular: var(--text-primary);
+  --el-text-color-secondary: var(--text-secondary);
+  --el-font-family: inherit;
+  --el-border-radius-base: var(--radius-sm);
+}
+
+/* Element Plus button overrides */
+.el-button--primary {
+  --el-button-bg-color: var(--accent-primary);
+  --el-button-border-color: var(--accent-primary);
+  --el-button-hover-bg-color: var(--accent-primary-hover);
+  --el-button-hover-border-color: var(--accent-primary-hover);
+}
+
+/* Element Plus dialog/drawer warm styling */
+.el-dialog, .el-drawer {
+  --el-dialog-bg-color: var(--bg-main);
+}
+
+.el-card {
+  --el-card-border-color: var(--border-light);
+}

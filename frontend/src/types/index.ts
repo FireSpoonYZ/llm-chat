@@ -17,6 +17,7 @@ export interface Conversation {
   provider: string | null
   model_name: string | null
   system_prompt_override: string | null
+  deep_thinking: boolean
   created_at: string
   updated_at: string
 }
@@ -53,6 +54,31 @@ export interface McpServer {
   transport: string
   is_enabled: boolean
 }
+
+export interface SystemPromptPreset {
+  id: string
+  name: string
+  description: string
+  content: string
+  is_default: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface ToolCallInfo {
+  id: string
+  name: string
+  input?: Record<string, unknown>
+  result?: string
+  isError?: boolean
+  isLoading?: boolean
+}
+
+export type ContentBlock =
+  | { type: 'text'; content: string }
+  | { type: 'thinking'; content: string }
+  | { type: 'tool_call'; id: string; name: string; input?: Record<string, unknown>;
+      result?: string; isError?: boolean; isLoading?: boolean }
 
 // WebSocket message types
 export interface WsMessage {

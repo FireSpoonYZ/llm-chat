@@ -13,6 +13,7 @@ import websockets
 
 from .agent import AgentConfig, ChatAgent
 from .mcp.manager import McpManager
+from .prompts.assembler import assemble_system_prompt
 from .tools import create_all_tools
 
 logger = logging.getLogger("claude-chat-agent")
@@ -68,6 +69,8 @@ class AgentSession:
             await self._handle_init(msg)
         elif msg_type == "user_message":
             await self._handle_user_message(msg)
+        elif msg_type == "truncate_history":
+            self._handle_truncate_history(msg)
         elif msg_type == "cancel":
             self._handle_cancel()
         else:
@@ -91,6 +94,15 @@ class AgentSession:
             logger.info("Added %d MCP tools from %d servers",
                         len(mcp_tools), len(self.mcp_manager.connected_servers))
 
+        # Assemble final system prompt with tool descriptions
+        if tools:
+            tool_names = [t.name for t in tools]
+            config.system_prompt = assemble_system_prompt(
+                tool_names,
+                mcp_servers=config.mcp_servers or None,
+                base_prompt=config.system_prompt,
+            )
+
         self.agent = ChatAgent(config, tools=tools)
 
     async def _handle_user_message(self, msg: dict) -> None:
@@ -103,6 +115,8 @@ class AgentSession:
             await self._send_error("not_initialized", "Agent not initialized")
             return
 
+        deep_thinking = msg.get("deep_thinking", False)
+
         # Cancel any running generation
         if self._current_task and not self._current_task.done():
             self.agent.cancel()
@@ -113,19 +127,32 @@ class AgentSession:
                 pass
 
         self._current_task = asyncio.create_task(
-            self._run_agent(content)
+            self._run_agent(content, deep_thinking)
         )
 
-    async def _run_agent(self, content: str) -> None:
+    async def _run_agent(self, content: str, deep_thinking: bool = False) -> None:
         """Stream agent response back through WebSocket."""
         assert self.agent is not None
         try:
-            async for event in self.agent.handle_message(content):
+            async for event in self.agent.handle_message(content, deep_thinking):
                 await self.ws.send(event.to_json())
         except websockets.ConnectionClosed:
             logger.warning("WebSocket closed during agent run")
         except asyncio.CancelledError:
             logger.info("Agent run cancelled")
+
+    def _handle_truncate_history(self, msg: dict) -> None:
+        """Truncate the agent's in-memory history for regenerate/edit."""
+        if self.agent is None:
+            logger.warning("truncate_history received before init")
+            return
+        keep_turns = msg.get("keep_turns", 0)
+        old_len = len(self.agent.messages)
+        self.agent.truncate_history(keep_turns)
+        logger.info(
+            "Truncated history: keep_turns=%d, messages %d -> %d",
+            keep_turns, old_len, len(self.agent.messages),
+        )
 
     def _handle_cancel(self) -> None:
         """Cancel the current generation."""

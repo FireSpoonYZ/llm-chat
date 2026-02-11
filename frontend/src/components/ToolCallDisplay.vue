@@ -107,8 +107,8 @@ const truncatedResult = computed(() => {
 
 <style scoped>
 .tool-call-display {
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 6px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
   margin: 8px 0;
   overflow: hidden;
 }
@@ -118,24 +118,26 @@ const truncatedResult = computed(() => {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  background: var(--el-fill-color-lighter);
+  background: var(--bg-user-message);
   cursor: pointer;
   user-select: none;
+  transition: background var(--transition-fast);
 }
 
 .tool-header:hover {
-  background: var(--el-fill-color-light);
+  background: var(--border-light);
 }
 
 .tool-icon {
   font-size: 16px;
-  color: var(--el-color-primary);
+  color: var(--accent-primary);
 }
 
 .tool-name {
   font-family: monospace;
   font-weight: 600;
   font-size: 13px;
+  color: var(--text-primary);
 }
 
 .tool-status {
@@ -144,7 +146,7 @@ const truncatedResult = computed(() => {
 
 .expand-icon {
   font-size: 12px;
-  color: var(--el-text-color-secondary);
+  color: var(--text-secondary);
 }
 
 .tool-body {
@@ -163,13 +165,13 @@ const truncatedResult = computed(() => {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  color: var(--el-text-color-secondary);
+  color: var(--text-secondary);
   margin-bottom: 4px;
 }
 
 .tool-content {
-  background: var(--el-fill-color);
-  border-radius: 4px;
+  background: var(--bg-user-message);
+  border-radius: var(--radius-sm);
   padding: 8px 12px;
   font-family: monospace;
   font-size: 12px;
@@ -180,9 +182,10 @@ const truncatedResult = computed(() => {
   margin: 0;
   max-height: 300px;
   overflow-y: auto;
+  color: var(--text-primary);
 }
 
 .tool-error {
-  color: var(--el-color-danger);
+  color: #DC2626;
 }
 </style>

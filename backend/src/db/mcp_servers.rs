@@ -288,7 +288,7 @@ mod tests {
         let pool = setup().await;
         // Create a user and conversation for the foreign key
         let user = create_user(&pool, "testuser", "test@example.com", "hash").await;
-        let conv = create_conversation(&pool, &user.id, "Test Conv").await;
+        let conv = create_conversation(&pool, &user.id, "Test Conv", None, None, None, false).await;
 
         let s1 = create_mcp_server(&pool, "server-a", None, "stdio", None, None, None, None, true).await;
         let s2 = create_mcp_server(&pool, "server-b", None, "sse", None, None, Some("http://b"), None, true).await;

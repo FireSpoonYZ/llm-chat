@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.main import AgentSession
+from src.prompts.tools import TOOL_DESCRIPTIONS
 
 
 class TestAgentSession:
@@ -100,6 +101,25 @@ class TestAgentSession:
         await session._handle_message(json.dumps(msg))
         session._handle_cancel.assert_called_once()
 
+    async def test_handle_message_dispatches_truncate_history(self):
+        session = AgentSession("ws://test", "tok")
+        session._handle_truncate_history = MagicMock()
+        msg = {"type": "truncate_history", "keep_turns": 2}
+        await session._handle_message(json.dumps(msg))
+        session._handle_truncate_history.assert_called_once()
+
+    async def test_handle_truncate_history_calls_agent(self):
+        session = AgentSession("ws://test", "tok")
+        session.agent = MagicMock()
+        session._handle_truncate_history({"keep_turns": 3})
+        session.agent.truncate_history.assert_called_once_with(3)
+
+    async def test_handle_truncate_history_no_agent(self):
+        session = AgentSession("ws://test", "tok")
+        session.agent = None
+        # Should not raise
+        session._handle_truncate_history({"keep_turns": 1})
+
     def test_shutdown(self):
         session = AgentSession("ws://test", "tok")
         session.agent = MagicMock()
@@ -120,3 +140,51 @@ class TestAgentSession:
         assert sent["type"] == "error"
         assert sent["code"] == "test_code"
         assert sent["message"] == "test message"
+
+    async def test_handle_init_calls_assembler_when_tools_enabled(self):
+        session = AgentSession("ws://test", "tok")
+        session.ws = AsyncMock()
+
+        with patch("src.main.ChatAgent") as MockAgent:
+            await session._handle_init({
+                "conversation_id": "conv-1",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "key",
+                "tools_enabled": True,
+            })
+            # The config passed to ChatAgent should contain tool descriptions
+            config = MockAgent.call_args[0][0]
+            assert "Available Tools" in config.system_prompt
+
+    async def test_handle_init_preserves_custom_prompt_with_tools(self):
+        session = AgentSession("ws://test", "tok")
+        session.ws = AsyncMock()
+
+        with patch("src.main.ChatAgent") as MockAgent:
+            await session._handle_init({
+                "conversation_id": "conv-1",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "key",
+                "system_prompt": "You are a pirate.",
+                "tools_enabled": True,
+            })
+            config = MockAgent.call_args[0][0]
+            assert "You are a pirate." in config.system_prompt
+            assert "Available Tools" in config.system_prompt
+
+    async def test_handle_init_no_assembler_when_tools_disabled(self):
+        session = AgentSession("ws://test", "tok")
+        session.ws = AsyncMock()
+
+        with patch("src.main.ChatAgent") as MockAgent:
+            await session._handle_init({
+                "conversation_id": "conv-1",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "key",
+                "tools_enabled": False,
+            })
+            config = MockAgent.call_args[0][0]
+            assert "Available Tools" not in config.system_prompt

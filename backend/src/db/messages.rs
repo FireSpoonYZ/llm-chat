@@ -71,6 +71,45 @@ struct CountRow {
     count: i64,
 }
 
+pub async fn get_message(pool: &SqlitePool, id: &str) -> Option<Message> {
+    sqlx::query_as::<_, Message>(
+        "SELECT id, conversation_id, role, content, \
+         tool_calls, tool_call_id, token_count, created_at \
+         FROM messages WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .expect("Failed to get message")
+}
+
+pub async fn update_message_content(pool: &SqlitePool, id: &str, content: &str) -> bool {
+    let result = sqlx::query("UPDATE messages SET content = ? WHERE id = ?")
+        .bind(content)
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("Failed to update message content");
+    result.rows_affected() > 0
+}
+
+pub async fn delete_messages_after(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    after_message_id: &str,
+) -> u64 {
+    let result = sqlx::query(
+        "DELETE FROM messages WHERE conversation_id = ? \
+         AND rowid > (SELECT rowid FROM messages WHERE id = ?)",
+    )
+    .bind(conversation_id)
+    .bind(after_message_id)
+    .execute(pool)
+    .await
+    .expect("Failed to delete messages after message");
+    result.rows_affected()
+}
+
 pub async fn count_messages(pool: &SqlitePool, conversation_id: &str) -> i64 {
     let row = sqlx::query_as::<_, CountRow>(
         "SELECT COUNT(*) as count FROM messages WHERE conversation_id = ?",
@@ -93,7 +132,7 @@ mod tests {
     async fn setup() -> (SqlitePool, String) {
         let pool = init_db("sqlite::memory:").await;
         let user = create_user(&pool, "testuser", "test@example.com", "hash").await;
-        let conv = create_conversation(&pool, &user.id, "Test Conv").await;
+        let conv = create_conversation(&pool, &user.id, "Test Conv", None, None, None, false).await;
         (pool, conv.id)
     }
 
@@ -146,5 +185,64 @@ mod tests {
         create_message(&pool, &conv_id, "user", "Hi", None, None, None).await;
         create_message(&pool, &conv_id, "assistant", "Hello", None, None, None).await;
         assert_eq!(count_messages(&pool, &conv_id).await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_message() {
+        let (pool, conv_id) = setup().await;
+        let msg = create_message(&pool, &conv_id, "user", "Hello!", None, None, None).await;
+        let fetched = get_message(&pool, &msg.id).await;
+        assert!(fetched.is_some());
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.id, msg.id);
+        assert_eq!(fetched.content, "Hello!");
+        assert_eq!(fetched.role, "user");
+    }
+
+    #[tokio::test]
+    async fn test_get_message_not_found() {
+        let (pool, _) = setup().await;
+        let fetched = get_message(&pool, "nonexistent-id").await;
+        assert!(fetched.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_message_content() {
+        let (pool, conv_id) = setup().await;
+        let msg = create_message(&pool, &conv_id, "user", "Original", None, None, None).await;
+        let updated = update_message_content(&pool, &msg.id, "Updated content").await;
+        assert!(updated);
+        let fetched = get_message(&pool, &msg.id).await.unwrap();
+        assert_eq!(fetched.content, "Updated content");
+    }
+
+    #[tokio::test]
+    async fn test_update_message_content_not_found() {
+        let (pool, _) = setup().await;
+        let updated = update_message_content(&pool, "nonexistent-id", "New content").await;
+        assert!(!updated);
+    }
+
+    #[tokio::test]
+    async fn test_delete_messages_after() {
+        let (pool, conv_id) = setup().await;
+        let msg1 = create_message(&pool, &conv_id, "user", "First", None, None, None).await;
+        let _msg2 = create_message(&pool, &conv_id, "assistant", "Second", None, None, None).await;
+        let _msg3 = create_message(&pool, &conv_id, "user", "Third", None, None, None).await;
+
+        let deleted = delete_messages_after(&pool, &conv_id, &msg1.id).await;
+        assert_eq!(deleted, 2);
+
+        let remaining = list_messages(&pool, &conv_id, 100, 0).await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].content, "First");
+    }
+
+    #[tokio::test]
+    async fn test_delete_messages_after_none() {
+        let (pool, conv_id) = setup().await;
+        let msg = create_message(&pool, &conv_id, "user", "Only one", None, None, None).await;
+        let deleted = delete_messages_after(&pool, &conv_id, &msg.id).await;
+        assert_eq!(deleted, 0);
     }
 }

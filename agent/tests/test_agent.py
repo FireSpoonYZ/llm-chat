@@ -17,6 +17,7 @@ from src.agent import (
     _accumulate_tool_call,
     build_message_history,
 )
+from src.prompts.presets import BUILTIN_PRESETS
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 
@@ -56,11 +57,11 @@ class TestAgentConfig:
 
     def test_null_system_prompt_uses_default(self):
         config = AgentConfig({"conversation_id": "c", "system_prompt": None})
-        assert "helpful AI assistant" in config.system_prompt
+        assert config.system_prompt == BUILTIN_PRESETS["default"].content
 
     def test_empty_system_prompt_uses_default(self):
         config = AgentConfig({"conversation_id": "c", "system_prompt": ""})
-        assert "helpful AI assistant" in config.system_prompt
+        assert config.system_prompt == BUILTIN_PRESETS["default"].content
 
     def test_missing_conversation_id_raises(self):
         with pytest.raises(KeyError):
@@ -266,6 +267,71 @@ class TestChatAgent:
         assert "LLM error" in error_event.data["message"]
 
     @patch("src.agent.create_chat_model")
+    async def test_multi_iteration_content_accumulation(self, mock_create):
+        """Content from iteration 1 (before tool call) should be included in complete event."""
+        from langchain_core.messages import AIMessageChunk, ToolCallChunk
+
+        call_count = 0
+
+        async def fake_astream(messages):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Iteration 1: text + tool call
+                yield AIMessageChunk(content="Sure, ", tool_call_chunks=[])
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        ToolCallChunk(name="test_tool", args='{"cmd": "echo hi"}', id="tc-1", index=0),
+                    ],
+                )
+            else:
+                # Iteration 2: final text response after tool execution
+                yield AIMessageChunk(content="Done!", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        mock_tool = MagicMock()
+        mock_tool.name = "test_tool"
+        mock_tool.ainvoke = AsyncMock(return_value="hello")
+
+        agent = ChatAgent(self._make_config(), tools=[mock_tool])
+        events = []
+        async for event in agent.handle_message("run echo"):
+            events.append(event)
+
+        complete_event = next(e for e in events if e.type == "complete")
+        # total_content should include text from BOTH iterations
+        assert complete_event.data["content"] == "Sure, Done!"
+        # tool_calls should be present
+        assert complete_event.data["tool_calls"] is not None
+        assert len(complete_event.data["tool_calls"]) == 1
+        assert complete_event.data["tool_calls"][0]["name"] == "test_tool"
+
+    @patch("src.agent.create_chat_model")
+    async def test_complete_event_no_tool_calls_when_none(self, mock_create):
+        """When no tool calls happen, tool_calls in complete should be None."""
+        from langchain_core.messages import AIMessageChunk
+
+        async def fake_astream(messages):
+            yield AIMessageChunk(content="Hello!", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_create.return_value = mock_llm
+
+        agent = ChatAgent(self._make_config())
+        events = []
+        async for event in agent.handle_message("hi"):
+            events.append(event)
+
+        complete_event = next(e for e in events if e.type == "complete")
+        assert complete_event.data["tool_calls"] is None
+
+    @patch("src.agent.create_chat_model")
     async def test_execute_tool_unknown(self, mock_create):
         mock_create.return_value = MagicMock()
         agent = ChatAgent(self._make_config())
@@ -297,3 +363,59 @@ class TestChatAgent:
         result, is_error = await agent._execute_tool("bad_tool", {})
         assert is_error is True
         assert "tool broke" in result
+
+    @patch("src.agent.create_chat_model")
+    async def test_truncate_history_keeps_system_and_turns(self, mock_create):
+        mock_create.return_value = MagicMock()
+        config = self._make_config(history=[
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "u3"},
+            {"role": "assistant", "content": "a3"},
+        ])
+        agent = ChatAgent(config)
+        assert len(agent.messages) == 7  # system + 6
+
+        agent.truncate_history(2)
+        # system + u1 + a1 + u2 + a2
+        assert len(agent.messages) == 5
+        assert isinstance(agent.messages[0], SystemMessage)
+        assert agent.messages[1].content == "u1"
+        assert agent.messages[4].content == "a2"
+
+    @patch("src.agent.create_chat_model")
+    async def test_truncate_history_zero_keeps_only_system(self, mock_create):
+        mock_create.return_value = MagicMock()
+        config = self._make_config(history=[
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+        ])
+        agent = ChatAgent(config)
+        agent.truncate_history(0)
+        assert len(agent.messages) == 1
+        assert isinstance(agent.messages[0], SystemMessage)
+
+    @patch("src.agent.create_chat_model")
+    async def test_truncate_history_preserves_tool_messages(self, mock_create):
+        """ToolMessages between AI messages should be preserved for kept turns."""
+        from langchain_core.messages import ToolMessage
+        mock_create.return_value = MagicMock()
+        config = self._make_config()
+        agent = ChatAgent(config)
+        # Manually build a history with tool messages
+        agent.messages = [
+            agent.messages[0],  # SystemMessage
+            HumanMessage(content="u1"),
+            AIMessage(content="", tool_calls=[{"id": "tc1", "name": "t", "args": {}}]),
+            ToolMessage(content="result", tool_call_id="tc1"),
+            AIMessage(content="a1"),
+            HumanMessage(content="u2"),
+            AIMessage(content="a2"),
+        ]
+        agent.truncate_history(1)
+        # Should keep: System + u1 + AI(tool_call) + ToolMessage + AI(a1)
+        assert len(agent.messages) == 5
+        assert isinstance(agent.messages[3], ToolMessage)
+        assert agent.messages[4].content == "a1"

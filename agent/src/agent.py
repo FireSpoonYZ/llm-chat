@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from typing import Any, AsyncIterator, Sequence
 
@@ -19,14 +20,14 @@ from langchain_core.messages import (
 from langchain_core.tools import BaseTool
 
 from .prompts.assembler import assemble_system_prompt
+from .prompts.presets import get_preset
 from .providers import create_chat_model
 
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful AI assistant. You have access to tools that let you "
-    "interact with the user's workspace, run code, search the web, and more. "
-    "Use tools when they would help accomplish the user's request."
-)
+def _default_system_prompt() -> str:
+    preset = get_preset("default")
+    assert preset is not None
+    return preset.content
 
 
 class AgentConfig:
@@ -38,7 +39,7 @@ class AgentConfig:
         self.model: str = init_data.get("model", "gpt-4o")
         self.api_key: str = init_data.get("api_key", "")
         self.endpoint_url: str | None = init_data.get("endpoint_url")
-        self.system_prompt: str = init_data.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+        self.system_prompt: str = init_data.get("system_prompt") or _default_system_prompt()
         self.tools_enabled: bool = init_data.get("tools_enabled", True)
         self.mcp_servers: list[dict[str, Any]] = init_data.get("mcp_servers", [])
         self.history: list[dict[str, str]] = init_data.get("history", [])
@@ -70,6 +71,9 @@ class StreamEvent:
         return json.dumps({"type": self.type, **self.data})
 
 
+logger = logging.getLogger("claude-chat-agent")
+
+
 class ChatAgent:
     """Manages a LangChain chat model with optional tool calling."""
 
@@ -95,73 +99,147 @@ class ChatAgent:
         """Signal cancellation of the current generation."""
         self._cancelled = True
 
-    async def handle_message(self, content: str) -> AsyncIterator[StreamEvent]:
+    def truncate_history(self, keep_turns: int) -> None:
+        """Truncate message history to keep only the first *keep_turns* user exchanges.
+
+        The SystemMessage at index 0 is always preserved.  Messages are cut at
+        the (keep_turns + 1)-th ``HumanMessage`` boundary so that all
+        intermediate ``ToolMessage`` / ``AIMessage`` entries belonging to kept
+        turns are retained.
+        """
+        human_count = 0
+        truncate_idx = len(self.messages)
+        for i, msg in enumerate(self.messages):
+            if isinstance(msg, HumanMessage):
+                human_count += 1
+                if human_count > keep_turns:
+                    truncate_idx = i
+                    break
+        self.messages = self.messages[:truncate_idx]
+
+    async def handle_message(self, content: str, deep_thinking: bool = False) -> AsyncIterator[StreamEvent]:
         """Process a user message and yield streaming events.
 
-        Yields StreamEvent objects for: assistant_delta, tool_call,
-        tool_result, complete, error.
+        Yields StreamEvent objects for: assistant_delta, thinking_delta,
+        tool_call, tool_result, complete, error.
         """
         self._cancelled = False
         self.messages.append(HumanMessage(content=content))
 
         try:
-            async for event in self._agent_loop():
+            async for event in self._agent_loop(deep_thinking):
                 yield event
         except asyncio.CancelledError:
             yield StreamEvent("error", {"code": "cancelled", "message": "Generation cancelled"})
         except Exception as exc:
             yield StreamEvent("error", {"code": "agent_error", "message": str(exc)})
 
-    async def _agent_loop(self) -> AsyncIterator[StreamEvent]:
+    def _get_thinking_llm(self) -> BaseChatModel:
+        """Return an LLM with provider-specific thinking/reasoning params."""
+        provider = self.config.provider.lower()
+        if provider == "anthropic":
+            return self.llm.bind(
+                max_tokens=64000,
+                thinking={"type": "enabled", "budget_tokens": 50000},
+            )
+        elif provider == "openai":
+            return self.llm.bind(
+                reasoning_effort="high",
+            )
+        elif provider == "google":
+            return self.llm.bind(
+                thinking_budget=32768,
+            )
+        else:
+            # Mistral and others: no thinking support, return as-is
+            return self.llm
+
+    async def _agent_loop(self, deep_thinking: bool = False) -> AsyncIterator[StreamEvent]:
         """Run the agent loop: call LLM, handle tool calls, repeat."""
         max_iterations = 20
+        total_content = ""  # Accumulates across all iterations
+        all_tool_calls: list[dict[str, Any]] = []  # Accumulates across all iterations
+        llm = self._get_thinking_llm() if deep_thinking else self.llm
+        if deep_thinking:
+            logger.info("Deep thinking enabled (provider=%s), bound kwargs: %s",
+                        self.config.provider, getattr(llm, 'kwargs', {}))
 
         for _ in range(max_iterations):
             if self._cancelled:
                 return
 
-            full_content = ""
+            iteration_content = ""  # Per-iteration content for LangChain message history
             tool_calls: list[dict[str, Any]] = []
 
-            async for chunk in self.llm.astream(self.messages):
+            thinking_total = 0
+            chunk_count = 0
+
+            async for chunk in llm.astream(self.messages):
                 if self._cancelled:
                     return
 
                 if not isinstance(chunk, AIMessageChunk):
                     continue
 
+                chunk_count += 1
+                # Log first few chunks for debugging
+                if deep_thinking and chunk_count <= 3:
+                    logger.info("Chunk #%d content type=%s, content=%s",
+                                chunk_count, type(chunk.content).__name__,
+                                repr(chunk.content)[:300])
+
                 # Stream text content
                 if chunk.content:
                     if isinstance(chunk.content, str):
                         delta = chunk.content
+                        if delta:
+                            iteration_content += delta
+                            total_content += delta
+                            yield StreamEvent("assistant_delta", {"delta": delta})
                     elif isinstance(chunk.content, list):
-                        delta = "".join(
-                            block.get("text", "") if isinstance(block, dict) else str(block)
-                            for block in chunk.content
-                        )
-                    else:
-                        delta = ""
-                    if delta:
-                        full_content += delta
-                        yield StreamEvent("assistant_delta", {"delta": delta})
+                        for block in chunk.content:
+                            if isinstance(block, dict):
+                                if block.get("type") == "thinking":
+                                    thinking_text = block.get("thinking", "")
+                                    if thinking_text:
+                                        thinking_total += len(thinking_text)
+                                        yield StreamEvent("thinking_delta", {"delta": thinking_text})
+                                elif block.get("type") == "text":
+                                    delta = block.get("text", "")
+                                    if delta:
+                                        iteration_content += delta
+                                        total_content += delta
+                                        yield StreamEvent("assistant_delta", {"delta": delta})
+                            else:
+                                delta = str(block)
+                                if delta:
+                                    iteration_content += delta
+                                    total_content += delta
+                                    yield StreamEvent("assistant_delta", {"delta": delta})
 
                 # Accumulate tool calls
                 if chunk.tool_call_chunks:
                     for tc_chunk in chunk.tool_call_chunks:
                         _accumulate_tool_call(tool_calls, tc_chunk)
 
+            # Filter out ghost tool call entries (empty name from index gaps)
+            if deep_thinking:
+                logger.info("Thinking total chars: %d", thinking_total)
+            tool_calls = [tc for tc in tool_calls if tc.get("name")]
+
             # If no tool calls, we're done
             if not tool_calls:
-                self.messages.append(AIMessage(content=full_content))
+                self.messages.append(AIMessage(content=iteration_content))
                 yield StreamEvent("complete", {
-                    "content": full_content,
+                    "content": total_content,
+                    "tool_calls": all_tool_calls or None,
                     "token_usage": {"prompt": 0, "completion": 0},
                 })
                 return
 
             # Build AI message with tool calls
             ai_msg = AIMessage(
-                content=full_content,
+                content=iteration_content,
                 tool_calls=[
                     {
                         "id": tc.get("id", str(uuid.uuid4())),
@@ -200,6 +278,14 @@ class ChatAgent:
                     ToolMessage(content=result, tool_call_id=tc_id)
                 )
 
+                all_tool_calls.append({
+                    "id": tc_id,
+                    "name": tc_name,
+                    "input": tc_args,
+                    "result": result,
+                    "is_error": is_error,
+                })
+
         # Max iterations reached
         yield StreamEvent("error", {
             "code": "max_iterations",
@@ -224,7 +310,16 @@ def _accumulate_tool_call(
     chunk: Any,
 ) -> None:
     """Accumulate streaming tool call chunks into complete tool calls."""
-    idx = chunk.index if hasattr(chunk, "index") and chunk.index is not None else 0
+
+    def _get(obj: Any, key: str, default: Any = None) -> Any:
+        """Get attribute or dict key."""
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    idx = _get(chunk, "index")
+    if idx is None:
+        idx = 0
 
     # Extend list if needed
     while len(tool_calls) <= idx:
@@ -232,12 +327,15 @@ def _accumulate_tool_call(
 
     tc = tool_calls[idx]
 
-    if hasattr(chunk, "id") and chunk.id:
-        tc["id"] = chunk.id
-    if hasattr(chunk, "name") and chunk.name:
-        tc["name"] = chunk.name
-    if hasattr(chunk, "args") and chunk.args:
-        tc["args_str"] += chunk.args
+    chunk_id = _get(chunk, "id")
+    if chunk_id:
+        tc["id"] = chunk_id
+    chunk_name = _get(chunk, "name")
+    if chunk_name:
+        tc["name"] = chunk_name
+    chunk_args = _get(chunk, "args")
+    if chunk_args:
+        tc["args_str"] += chunk_args
 
     # Try to parse accumulated args
     if tc["args_str"]:

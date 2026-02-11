@@ -6,8 +6,13 @@ export async function listConversations(): Promise<Conversation[]> {
   return data
 }
 
-export async function createConversation(title?: string): Promise<Conversation> {
-  const { data } = await client.post<Conversation>('/conversations', { title })
+export async function createConversation(title?: string, systemPromptOverride?: string, provider?: string, modelName?: string): Promise<Conversation> {
+  const { data } = await client.post<Conversation>('/conversations', {
+    title,
+    system_prompt_override: systemPromptOverride || undefined,
+    provider: provider || undefined,
+    model_name: modelName || undefined,
+  })
   return data
 }
 

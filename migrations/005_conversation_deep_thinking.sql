@@ -1,0 +1,1 @@
+ALTER TABLE conversations ADD COLUMN deep_thinking INTEGER NOT NULL DEFAULT 0;

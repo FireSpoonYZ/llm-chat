@@ -56,13 +56,15 @@ async function handleLogin() {
   justify-content: center;
   align-items: center;
   min-height: 100vh;
-  background: #f5f7fa;
+  background: var(--bg-main);
 }
 .auth-card {
   width: 400px;
+  border-color: var(--border-light);
 }
 .auth-card h2 {
   margin: 0;
   text-align: center;
+  color: var(--text-primary);
 }
 </style>

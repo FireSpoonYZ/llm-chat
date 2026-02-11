@@ -11,6 +11,8 @@ pub type WsSender = mpsc::UnboundedSender<String>;
 pub struct WsState {
     pub client_connections: RwLock<HashMap<String, HashMap<String, WsSender>>>,
     pub container_connections: RwLock<HashMap<String, WsSender>>,
+    /// Messages queued while a container was starting (keyed by conversation_id).
+    pub pending_messages: RwLock<HashMap<String, String>>,
 }
 
 impl WsState {
@@ -62,6 +64,16 @@ impl WsState {
         } else {
             false
         }
+    }
+
+    pub async fn set_pending_message(&self, conversation_id: &str, msg: String) {
+        let mut pending = self.pending_messages.write().await;
+        pending.insert(conversation_id.to_string(), msg);
+    }
+
+    pub async fn take_pending_message(&self, conversation_id: &str) -> Option<String> {
+        let mut pending = self.pending_messages.write().await;
+        pending.remove(conversation_id)
     }
 }
 

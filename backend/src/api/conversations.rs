@@ -25,6 +25,7 @@ pub struct ConversationResponse {
     pub provider: Option<String>,
     pub model_name: Option<String>,
     pub system_prompt_override: Option<String>,
+    pub deep_thinking: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -37,6 +38,7 @@ impl From<db::conversations::Conversation> for ConversationResponse {
             provider: c.provider,
             model_name: c.model_name,
             system_prompt_override: c.system_prompt_override,
+            deep_thinking: c.deep_thinking,
             created_at: c.created_at,
             updated_at: c.updated_at,
         }
@@ -54,6 +56,10 @@ async fn list_conversations(
 #[derive(Deserialize)]
 pub struct CreateConversationRequest {
     pub title: Option<String>,
+    pub system_prompt_override: Option<String>,
+    pub provider: Option<String>,
+    pub model_name: Option<String>,
+    pub deep_thinking: Option<bool>,
 }
 
 async fn create_conversation(
@@ -62,7 +68,15 @@ async fn create_conversation(
     Json(req): Json<CreateConversationRequest>,
 ) -> Result<(StatusCode, Json<ConversationResponse>), StatusCode> {
     let title = req.title.unwrap_or_else(|| "New Conversation".into());
-    let conv = db::conversations::create_conversation(&state.db, &auth.user_id, &title).await;
+    let conv = db::conversations::create_conversation(
+        &state.db,
+        &auth.user_id,
+        &title,
+        req.system_prompt_override.as_deref(),
+        req.provider.as_deref(),
+        req.model_name.as_deref(),
+        req.deep_thinking.unwrap_or(false),
+    ).await;
 
     // Create workspace directory
     let workspace_dir = format!("data/conversations/{}", conv.id);
@@ -87,6 +101,7 @@ pub struct UpdateConversationRequest {
     pub provider: Option<String>,
     pub model_name: Option<String>,
     pub system_prompt_override: Option<String>,
+    pub deep_thinking: Option<bool>,
 }
 
 async fn update_conversation(
@@ -114,6 +129,7 @@ async fn update_conversation(
         Some(v) => Some(v),
         None => existing.system_prompt_override.as_deref(),
     };
+    let deep_thinking = req.deep_thinking.unwrap_or(existing.deep_thinking);
 
     let conv = db::conversations::update_conversation(
         &state.db,
@@ -123,6 +139,7 @@ async fn update_conversation(
         provider,
         model_name,
         system_prompt,
+        deep_thinking,
     ).await
     .ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(conv.into()))
