@@ -35,7 +35,7 @@ pub struct ContainerClaims {
     pub single_use: bool,
 }
 
-/// Create a short-lived access token (15 minutes) for a user.
+/// Create an access token (2 hours) for a user.
 pub fn create_access_token(
     user_id: &str,
     username: &str,
@@ -47,7 +47,7 @@ pub fn create_access_token(
         sub: user_id.to_owned(),
         username: username.to_owned(),
         is_admin,
-        exp: now + 15 * 60, // 15 minutes
+        exp: now + 2 * 60 * 60, // 2 hours
         iat: now,
     };
     encode(

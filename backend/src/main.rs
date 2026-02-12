@@ -10,11 +10,11 @@ mod config;
 mod crypto;
 mod db;
 mod docker;
+mod error;
 mod prompts;
 mod ws;
 
 use auth::middleware::AppState;
-use docker::registry::ContainerRegistry;
 use ws::WsState;
 
 #[tokio::main]
@@ -26,15 +26,10 @@ async fn main() {
     let config = config::Config::from_env();
     let pool = db::init_db(&config.database_url).await;
 
-    let state = Arc::new(AppState {
-        db: pool,
-        config: config.clone(),
-    });
-
     let ws_state = WsState::new();
-    let container_registry = ContainerRegistry::new();
 
     // Docker manager for container lifecycle
+    let container_registry = docker::registry::ContainerRegistry::new();
     let docker_manager = Arc::new(docker::manager::DockerManager::new(
         config.clone(),
         container_registry.clone(),
@@ -42,6 +37,13 @@ async fn main() {
 
     // Spawn idle container cleanup task (check every 30 seconds)
     docker::manager::spawn_idle_cleanup(docker_manager.clone(), 30);
+
+    let state = Arc::new(AppState {
+        db: pool,
+        config: config.clone(),
+        ws_state: ws_state.clone(),
+        docker_manager: docker_manager.clone(),
+    });
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -55,20 +57,18 @@ async fn main() {
         .nest("/api/auth", api::auth::router())
         .nest("/api/users", api::users::router())
         .nest("/api/conversations", api::conversations::router())
+        .nest("/api/conversations/{id}/files", api::files::router())
         .nest("/api/admin", api::admin::router())
         .nest("/api/mcp-servers", mcp_servers_public_router())
         .nest("/api/presets", api::presets::router())
-        .layer(axum::Extension(state.clone()))
-        .layer(axum::Extension(ws_state.clone()))
-        .layer(axum::Extension(docker_manager.clone()))
+        .with_state(state.clone())
         .layer(cors.clone())
         .layer(TraceLayer::new_for_http());
 
     // Internal WS router (container-facing)
     let internal_app = Router::new()
         .route("/internal/ws", get(ws::container::container_ws_handler))
-        .layer(axum::Extension(state.clone()))
-        .layer(axum::Extension(ws_state))
+        .with_state(state.clone())
         .layer(TraceLayer::new_for_http());
 
     // Start both servers
@@ -81,30 +81,41 @@ async fn main() {
     let main_listener = tokio::net::TcpListener::bind(&main_addr).await.unwrap();
     let internal_listener = tokio::net::TcpListener::bind(&internal_addr).await.unwrap();
 
+    let shutdown_signal = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+        tracing::info!("Shutdown signal received, stopping...");
+    };
+
+    let dm = docker_manager.clone();
     tokio::select! {
-        r = axum::serve(main_listener, app) => {
+        r = axum::serve(main_listener, app)
+            .with_graceful_shutdown(shutdown_signal) => {
             if let Err(e) = r { tracing::error!("Main server error: {e}"); }
         }
         r = axum::serve(internal_listener, internal_app) => {
             if let Err(e) = r { tracing::error!("Internal server error: {e}"); }
         }
     }
+
+    dm.shutdown().await;
 }
 
 async fn health() -> &'static str {
     "ok"
 }
 
-fn mcp_servers_public_router() -> Router {
+fn mcp_servers_public_router() -> Router<Arc<AppState>> {
     Router::new().route("/", get(list_available_mcp_servers))
 }
 
 async fn list_available_mcp_servers(
-    axum::extract::Extension(state): axum::extract::Extension<Arc<AppState>>,
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     _auth: auth::middleware::AuthUser,
-) -> axum::Json<Vec<api::conversations::McpServerResponse>> {
-    let servers = db::mcp_servers::list_enabled_mcp_servers(&state.db).await;
-    axum::Json(
+) -> Result<axum::Json<Vec<api::conversations::McpServerResponse>>, error::AppError> {
+    let servers = db::mcp_servers::list_enabled_mcp_servers(&state.db).await?;
+    Ok(axum::Json(
         servers
             .into_iter()
             .map(|s| api::conversations::McpServerResponse {
@@ -115,5 +126,5 @@ async fn list_available_mcp_servers(
                 is_enabled: s.is_enabled,
             })
             .collect(),
-    )
+    ))
 }

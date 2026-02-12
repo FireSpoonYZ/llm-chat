@@ -18,7 +18,7 @@
           @click="handleSend"
           aria-label="Send message"
         >
-          <span class="send-icon">↑</span>
+          <el-icon :size="18"><Promotion /></el-icon>
         </button>
       </div>
       <div class="input-options">
@@ -36,6 +36,7 @@
 
 <script setup lang="ts">
 import { ref, nextTick } from 'vue'
+import { Promotion } from '@element-plus/icons-vue'
 
 defineProps<{ disabled: boolean; deepThinking: boolean }>()
 const emit = defineEmits<{ send: [content: string]; 'update:deepThinking': [value: boolean] }>()
@@ -125,11 +126,6 @@ function autoGrow() {
 .send-btn:disabled {
   opacity: 0.35;
   cursor: not-allowed;
-}
-.send-icon {
-  font-size: 18px;
-  font-weight: 700;
-  line-height: 1;
 }
 .input-options {
   display: flex;

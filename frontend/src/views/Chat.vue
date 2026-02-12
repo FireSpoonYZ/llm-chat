@@ -3,10 +3,10 @@
     <!-- Sidebar -->
     <aside class="chat-sidebar" :class="{ collapsed: sidebarCollapsed }">
       <div class="sidebar-header">
-        <button class="new-chat-btn" @click="showNewChatDialog = true">
-          <span class="plus-icon">+</span>
+        <el-button class="new-chat-btn" @click="showNewChatDialog = true">
+          <el-icon><Plus /></el-icon>
           <span v-if="!sidebarCollapsed">New Chat</span>
-        </button>
+        </el-button>
       </div>
       <ConversationList
         :conversations="chatStore.conversations"
@@ -15,20 +15,25 @@
         @delete="handleDeleteConversation"
       />
       <div class="sidebar-footer">
-        <button class="sidebar-link" @click="$router.push('/settings')">
+        <el-button class="sidebar-link" text @click="$router.push('/settings')">
+          <el-icon><Setting /></el-icon>
           <span>Settings</span>
-        </button>
-        <button class="sidebar-link logout" @click="auth.logout()">
+        </el-button>
+        <el-button class="sidebar-link logout" text @click="auth.logout()">
+          <el-icon><SwitchButton /></el-icon>
           <span>Logout</span>
-        </button>
+        </el-button>
       </div>
     </aside>
 
     <!-- Main chat area -->
     <main class="chat-main">
-      <button class="sidebar-toggle" @click="sidebarCollapsed = !sidebarCollapsed">
-        <span class="toggle-icon">{{ sidebarCollapsed ? '☰' : '◀' }}</span>
-      </button>
+      <el-button class="sidebar-toggle" text @click="sidebarCollapsed = !sidebarCollapsed">
+        <el-icon :size="18">
+          <Expand v-if="sidebarCollapsed" />
+          <Fold v-else />
+        </el-icon>
+      </el-button>
 
       <template v-if="chatStore.currentConversationId && currentConversation">
         <div class="chat-toolbar">
@@ -44,7 +49,8 @@
               class="model-cascader"
               @change="handleCascaderChange"
             />
-            <button class="toolbar-btn" @click="showPromptDrawer = true">System Prompt</button>
+            <el-button class="toolbar-btn" text @click="showPromptDrawer = true">System Prompt</el-button>
+            <el-button class="toolbar-btn" text @click="showFilesDrawer = true">Files</el-button>
           </div>
         </div>
         <div class="chat-messages">
@@ -57,11 +63,7 @@
               @edit="handleEditMessage"
               @regenerate="handleRegenerateMessage"
             />
-            <div v-if="chatStore.isWaiting && !chatStore.isStreaming" class="waiting-indicator">
-              <div class="waiting-dots">
-                <span></span><span></span><span></span>
-              </div>
-            </div>
+            <div v-if="chatStore.isWaiting && !chatStore.isStreaming" v-loading="true" class="waiting-indicator" element-loading-background="transparent" />
             <ChatMessage
               v-if="chatStore.isStreaming"
               :message="{ id: 'streaming', role: 'assistant', content: chatStore.streamingContent, tool_calls: null, tool_call_id: null, token_count: null, created_at: '' }"
@@ -71,6 +73,13 @@
           </div>
         </div>
         <ChatInput @send="handleSend" :disabled="chatStore.isStreaming" :deep-thinking="deepThinking" @update:deep-thinking="toggleDeepThinking" />
+        <div v-if="!chatStore.wsConnected" class="ws-status-bar ws-disconnected">
+          <span class="ws-dot pulse"></span>
+          <span>连接中断，正在重连...</span>
+        </div>
+        <div v-if="chatStore.sendFailed" class="ws-status-bar ws-send-failed">
+          <span>消息发送失败，请检查网络连接</span>
+        </div>
       </template>
       <template v-else>
         <div class="empty-state">
@@ -123,18 +132,25 @@
         <el-button type="primary" @click="handleSavePrompt">Save</el-button>
       </div>
     </el-drawer>
+
+    <!-- Files Drawer -->
+    <el-drawer v-model="showFilesDrawer" title="Workspace Files" size="480px" @open="fileBrowserRef?.refresh()">
+      <FileBrowser v-if="chatStore.currentConversationId" ref="fileBrowserRef" :conversation-id="chatStore.currentConversationId" />
+    </el-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, computed, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Fold, Expand, Setting, SwitchButton } from '@element-plus/icons-vue'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import { useSettingsStore } from '../stores/settings'
 import ConversationList from '../components/ConversationList.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
+import FileBrowser from '../components/FileBrowser.vue'
 
 const auth = useAuthStore()
 const chatStore = useChatStore()
@@ -146,6 +162,8 @@ const newChatPresetId = ref('')
 const newChatPrompt = ref('')
 const showPromptDrawer = ref(false)
 const editingPrompt = ref('')
+const showFilesDrawer = ref(false)
+const fileBrowserRef = ref<InstanceType<typeof FileBrowser> | null>(null)
 
 const deepThinking = computed(() => currentConversation.value?.deep_thinking ?? false)
 
@@ -199,6 +217,9 @@ async function handleSelectConversation(id: string) {
 }
 
 async function handleDeleteConversation(id: string) {
+  try {
+    await ElMessageBox.confirm('Delete this conversation? This cannot be undone.', 'Confirm', { type: 'warning' })
+  } catch { return }
   await chatStore.deleteConversation(id)
 }
 
@@ -300,25 +321,15 @@ async function handleCascaderChange(val: string[] | null) {
 }
 .new-chat-btn {
   width: 100%;
-  display: flex;
-  align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 10px 16px;
-  background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: var(--radius-md);
-  color: var(--text-sidebar);
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  color: var(--text-sidebar) !important;
   font-size: 14px;
-  cursor: pointer;
-  transition: background var(--transition-fast);
+  background: transparent !important;
 }
 .new-chat-btn:hover {
-  background: var(--bg-sidebar-hover);
-}
-.plus-icon {
-  font-size: 18px;
-  font-weight: 300;
+  background: var(--bg-sidebar-hover) !important;
 }
 
 .sidebar-footer {
@@ -329,21 +340,16 @@ async function handleCascaderChange(val: string[] | null) {
   gap: 4px;
 }
 .sidebar-link {
-  background: none;
-  border: none;
-  color: var(--text-sidebar-muted);
+  color: var(--text-sidebar-muted) !important;
   font-size: 13px;
-  cursor: pointer;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  transition: color var(--transition-fast), background var(--transition-fast);
+  gap: 6px;
 }
 .sidebar-link:hover {
-  color: var(--text-sidebar);
-  background: var(--bg-sidebar-hover);
+  color: var(--text-sidebar) !important;
+  background: var(--bg-sidebar-hover) !important;
 }
 .sidebar-link.logout:hover {
-  color: #F87171;
+  color: #F87171 !important;
 }
 
 .chat-main {
@@ -360,17 +366,7 @@ async function handleCascaderChange(val: string[] | null) {
   top: 12px;
   left: 12px;
   z-index: 10;
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary);
-  font-size: 16px;
-  transition: background var(--transition-fast);
-}
-.sidebar-toggle:hover {
-  background: var(--border-light);
+  color: var(--text-secondary) !important;
 }
 
 .chat-toolbar {
@@ -394,45 +390,12 @@ async function handleCascaderChange(val: string[] | null) {
   width: 340px;
 }
 .toolbar-btn {
-  background: none;
-  border: none;
-  color: var(--text-secondary);
+  color: var(--text-secondary) !important;
   font-size: 13px;
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-  transition: color var(--transition-fast), background var(--transition-fast);
-}
-.toolbar-btn:hover {
-  color: var(--text-primary);
-  background: var(--border-light);
-}
-.toolbar-btn.active {
-  color: var(--accent, #60A5FA);
-  background: rgba(96, 165, 250, 0.12);
 }
 
 .waiting-indicator {
-  display: flex;
-  padding: 16px 0;
-}
-.waiting-dots {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-}
-.waiting-dots span {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-secondary);
-  animation: waiting-bounce 1.4s infinite ease-in-out both;
-}
-.waiting-dots span:nth-child(1) { animation-delay: -0.32s; }
-.waiting-dots span:nth-child(2) { animation-delay: -0.16s; }
-@keyframes waiting-bounce {
-  0%, 80%, 100% { transform: scale(0.4); opacity: 0.4; }
-  40% { transform: scale(1); opacity: 1; }
+  height: 60px;
 }
 
 .chat-messages {
@@ -452,5 +415,36 @@ async function handleCascaderChange(val: string[] | null) {
   justify-content: center;
   color: var(--text-secondary);
   font-size: 15px;
+}
+
+.ws-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 6px 16px;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.ws-disconnected {
+  color: #D97706;
+  background: rgba(217, 119, 6, 0.08);
+}
+.ws-send-failed {
+  color: #EF4444;
+  background: rgba(239, 68, 68, 0.08);
+}
+.ws-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #D97706;
+}
+.ws-dot.pulse {
+  animation: ws-pulse 1.5s infinite;
+}
+@keyframes ws-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
 }
 </style>

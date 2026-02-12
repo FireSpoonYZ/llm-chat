@@ -98,7 +98,7 @@ class TestMcpInstructions:
         result = mcp_instructions(servers)
         assert "test-server" in result
         assert "A test server" in result
-        assert "mcp_test-server_" in result
+        assert "original names" in result
 
     def test_multiple_servers(self):
         servers = [

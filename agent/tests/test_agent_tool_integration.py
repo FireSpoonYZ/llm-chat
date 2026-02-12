@@ -401,6 +401,9 @@ class TestToolErrorPreservesContent:
         # Must contain text from BOTH iterations
         assert "Sure, " in content
         assert "The command failed." in content
-        # tool_calls should be recorded
-        assert complete[0].data["tool_calls"] is not None
-        assert complete[0].data["tool_calls"][0]["name"] == "bash"
+        # tool_calls should be recorded (Format A: interleaved content blocks)
+        blocks = complete[0].data["tool_calls"]
+        assert blocks is not None
+        tool_call_blocks = [b for b in blocks if b.get("type") == "tool_call"]
+        assert len(tool_call_blocks) == 1
+        assert tool_call_blocks[0]["name"] == "bash"

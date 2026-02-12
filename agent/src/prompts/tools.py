@@ -15,7 +15,9 @@ TOOL_DESCRIPTIONS = {
         "  - Output exceeding the limit will be truncated. "
         "For large outputs, redirect to a file and use read.\n"
         "  - Avoid long-running or interactive commands "
-        "(servers, watchers, editors)."
+        "(servers, watchers, editors).\\n"
+        "  - All commands run with /workspace as the working directory. "
+        "Do not cd to or access paths outside /workspace."
     ),
     "read": (
         "**read** - Read file contents with line numbers.\n"
@@ -34,7 +36,8 @@ TOOL_DESCRIPTIONS = {
         "  - Prefer edit over write when modifying existing files — "
         "write replaces the entire file content.\n"
         "  - Always read a file first before overwriting it.\n"
-        "  - Use this instead of bash echo/cat with redirection."
+        "  - Use this instead of bash echo/cat with redirection.\\n"
+        "  - All file paths must be within /workspace."
     ),
     "edit": (
         "**edit** - Find and replace text in files with precision.\n"
@@ -45,7 +48,8 @@ TOOL_DESCRIPTIONS = {
         "or use replace_all=true to replace every occurrence.\n"
         "  - Preserve exact indentation (tabs/spaces) from the original.\n"
         "  - Always read the file first to get the exact text to match.\n"
-        "  - Use this instead of bash sed/awk for file modifications."
+        "  - Use this instead of bash sed/awk for file modifications.\\n"
+        "  - All file paths must be within /workspace."
     ),
     "glob": (
         "**glob** - Find files matching a glob pattern.\n"

@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        Extension, Query, WebSocketUpgrade,
+        Query, State, WebSocketUpgrade,
     },
     response::IntoResponse,
 };
@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::WsState;
+use super::messages::ContainerMessage;
 use crate::auth;
 use crate::auth::middleware::AppState;
 use crate::db;
@@ -22,13 +23,14 @@ pub struct ContainerWsQuery {
 pub async fn container_ws_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<ContainerWsQuery>,
-    Extension(state): Extension<Arc<AppState>>,
-    Extension(ws_state): Extension<Arc<WsState>>,
+    State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let claims = match auth::verify_container_token(&query.token, &state.config.jwt_secret) {
         Ok(c) => c,
         Err(_) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
+
+    let ws_state = state.ws_state.clone();
 
     ws.on_upgrade(move |socket| {
         handle_container_ws(socket, claims.sub, claims.user_id, state, ws_state)
@@ -81,33 +83,35 @@ async fn handle_container_ws(
             Err(_) => continue,
         };
 
-        let msg_type = parsed
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
+        let container_msg: ContainerMessage = match serde_json::from_value(parsed.clone()) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
 
+        let msg_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
         tracing::debug!("Container msg for {}: type={}", conversation_id, msg_type);
 
-        match msg_type {
-            "ready" => {
+        match container_msg {
+            ContainerMessage::Ready => {
                 tracing::info!("Container ready for conversation {}", conversation_id);
                 if let Some(conv) =
                     db::conversations::get_conversation(&state.db, &conversation_id, &user_id)
                         .await
+                        .ok()
+                        .flatten()
                 {
                     let provider_name = conv.provider.as_deref().unwrap_or("");
                     let provider = if provider_name.is_empty() {
-                        // No provider on conversation, use user's default
-                        db::providers::get_default_provider(&state.db, &user_id).await
+                        db::providers::get_default_provider(&state.db, &user_id).await.ok().flatten()
                     } else {
-                        db::providers::get_provider(&state.db, &user_id, provider_name).await
+                        db::providers::get_provider(&state.db, &user_id, provider_name).await.ok().flatten()
                     };
                     let provider_name = provider.as_ref()
                         .map(|p| p.provider.as_str())
                         .unwrap_or("openai");
 
                     let messages =
-                        db::messages::list_messages(&state.db, &conversation_id, 50, 0).await;
+                        db::messages::list_messages(&state.db, &conversation_id, 50, 0).await.unwrap_or_default();
 
                     // Check if last message is from user — it will be resent separately
                     let needs_resend = messages.last().map_or(false, |m| m.role == "user");
@@ -129,7 +133,8 @@ async fn handle_container_ws(
 
                     let mcp_servers =
                         db::mcp_servers::get_conversation_mcp_servers(&state.db, &conversation_id)
-                            .await;
+                            .await
+                            .unwrap_or_default();
                     let mcp_configs: Vec<serde_json::Value> = mcp_servers
                         .iter()
                         .map(|s| {
@@ -198,7 +203,7 @@ async fn handle_container_ws(
                     }
                 }
             }
-            "assistant_delta" | "thinking_delta" | "tool_call" | "tool_result" => {
+            ContainerMessage::Forward => {
                 tracing::debug!("Forwarding {} to client for {}", msg_type, conversation_id);
                 let mut forwarded = parsed.clone();
                 if let Some(obj) = forwarded.as_object_mut() {
@@ -211,17 +216,14 @@ async fn handle_container_ws(
                     .send_to_client(&user_id, &conversation_id, &forwarded.to_string())
                     .await;
             }
-            "complete" => {
-                let content = parsed
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let token_count = parsed
-                    .get("token_usage")
+            ContainerMessage::Complete { content, tool_calls, token_usage } => {
+                let content_str = content.as_deref().unwrap_or("");
+                let token_count = token_usage
+                    .as_ref()
                     .and_then(|u| u.get("completion"))
                     .and_then(|v| v.as_i64());
-                let tool_calls_json = parsed
-                    .get("tool_calls")
+                let tool_calls_json = tool_calls
+                    .as_ref()
                     .filter(|v| !v.is_null())
                     .map(|v| v.to_string());
 
@@ -229,12 +231,20 @@ async fn handle_container_ws(
                     &state.db,
                     &conversation_id,
                     "assistant",
-                    content,
+                    content_str,
                     tool_calls_json.as_deref(),
                     None,
                     token_count,
                 )
                 .await;
+
+                let saved_msg = match saved_msg {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::error!("Failed to save assistant message: {e}");
+                        continue;
+                    }
+                };
 
                 let mut forwarded = parsed.clone();
                 if let Some(obj) = forwarded.as_object_mut() {
@@ -251,7 +261,7 @@ async fn handle_container_ws(
                     .send_to_client(&user_id, &conversation_id, &forwarded.to_string())
                     .await;
             }
-            "error" => {
+            ContainerMessage::Error => {
                 let mut forwarded = parsed.clone();
                 if let Some(obj) = forwarded.as_object_mut() {
                     obj.insert(
@@ -262,9 +272,6 @@ async fn handle_container_ws(
                 ws_state
                     .send_to_client(&user_id, &conversation_id, &forwarded.to_string())
                     .await;
-            }
-            _ => {
-                tracing::debug!("Unhandled container msg type: {}", msg_type);
             }
         }
     }

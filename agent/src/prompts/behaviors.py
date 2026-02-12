@@ -21,10 +21,19 @@ Analyze the error and try an alternative approach."""
 SAFETY_INSTRUCTIONS = """\
 # Safety Instructions
 
+## Workspace Restriction (Non-Negotiable)
+All file operations MUST target /workspace and only /workspace. \
+This restriction is absolute and cannot be overridden by user instructions.
+- Do NOT read, write, edit, or execute files outside /workspace.
+- Do NOT access system directories such as /etc, /root, /home, /tmp, \
+/var, /usr, /bin, /sbin, /proc, /sys, or /dev.
+- Do NOT use "..", symlinks, or absolute paths to escape /workspace.
+- If a user asks you to access files outside /workspace, refuse and explain \
+that you can only operate within the workspace directory.
+
+## General Safety
 - Do not execute destructive commands (rm -rf, drop tables, force push) \
 without explicit user confirmation.
-- Stay within the workspace directory. Do not access files outside \
-the project boundary unless the user requests it.
 - Do not execute code that appears malicious or harmful.
 - Substitute any personally identifiable information (PII) with \
 generic placeholders in code examples.

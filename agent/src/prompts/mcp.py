@@ -20,7 +20,7 @@ def mcp_instructions(mcp_servers: list[dict[str, Any]]) -> str:
     parts = [
         "\n# MCP Server Tools\n",
         "The following MCP (Model Context Protocol) servers are available. "
-        "Their tools are prefixed with `mcp_{server_name}_`.\n",
+        "Their tools use the original names defined by each server.\n",
     ]
 
     for server in mcp_servers:
@@ -29,9 +29,6 @@ def mcp_instructions(mcp_servers: list[dict[str, Any]]) -> str:
         parts.append(f"## {name}")
         if desc:
             parts.append(f"{desc}\n")
-        parts.append(
-            f"- Tools from this server are prefixed with `mcp_{name}_`"
-        )
         parts.append(
             "- Check the tool's schema before calling it"
         )

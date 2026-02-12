@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bollard::container::{
     Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions,
-    StopContainerOptions,
+    StopContainerOptions, NetworkingConfig,
 };
-use bollard::models::HostConfig;
+use bollard::models::{EndpointSettings, HostConfig};
 use bollard::Docker;
 
 use super::registry::ContainerRegistry;
@@ -44,18 +45,29 @@ impl DockerManager {
             auth::create_container_token(conversation_id, user_id, &self.config.jwt_secret)
                 .map_err(|e| format!("Failed to create container token: {e}"))?;
 
-        let backend_ws_url = format!(
-            "ws://host.docker.internal:{}/internal/ws",
-            self.config.internal_ws_port
-        );
+        let backend_ws_url = if self.config.docker_network.is_some() {
+            format!(
+                "ws://backend:{}/internal/ws",
+                self.config.internal_ws_port
+            )
+        } else {
+            format!(
+                "ws://host.docker.internal:{}/internal/ws",
+                self.config.internal_ws_port
+            )
+        };
 
-        let workspace_path =
-            std::fs::canonicalize(format!("data/conversations/{conversation_id}"))
-                .unwrap_or_else(|_| {
-                    let path = format!("data/conversations/{conversation_id}");
-                    std::fs::create_dir_all(&path).ok();
-                    std::path::PathBuf::from(&path)
-                });
+        let container_data_path = format!("data/conversations/{conversation_id}");
+        std::fs::create_dir_all(&container_data_path).ok();
+
+        let workspace_host_path = if let Some(ref host_dir) = self.config.host_data_dir {
+            format!("{}/conversations/{}", host_dir, conversation_id)
+        } else {
+            std::fs::canonicalize(&container_data_path)
+                .unwrap_or_else(|_| std::path::PathBuf::from(&container_data_path))
+                .to_string_lossy()
+                .to_string()
+        };
 
         let container_name = format!("claude-chat-agent-{}", &conversation_id[..8]);
 
@@ -79,17 +91,26 @@ impl DockerManager {
                 format!("CONVERSATION_ID={conversation_id}"),
             ]),
             host_config: Some(HostConfig {
-                binds: Some(vec![format!(
-                    "{}:/workspace",
-                    workspace_path.to_string_lossy()
-                )]),
-                extra_hosts: Some(vec![
-                    "host.docker.internal:host-gateway".to_string(),
-                ]),
+                binds: Some(vec![format!("{}:/workspace", workspace_host_path)]),
+                extra_hosts: if self.config.docker_network.is_none() {
+                    Some(vec!["host.docker.internal:host-gateway".to_string()])
+                } else {
+                    None
+                },
                 memory: Some(512 * 1024 * 1024), // 512MB
                 nano_cpus: Some(1_000_000_000),   // 1 CPU
                 ..Default::default()
             }),
+            networking_config: if let Some(ref network) = self.config.docker_network {
+                Some(NetworkingConfig {
+                    endpoints_config: HashMap::from([(
+                        network.clone(),
+                        EndpointSettings::default(),
+                    )]),
+                })
+            } else {
+                None
+            },
             working_dir: Some("/workspace".to_string()),
             ..Default::default()
         };
@@ -187,6 +208,19 @@ impl DockerManager {
     /// List all running containers.
     pub async fn list_containers(&self) -> Vec<super::registry::ContainerInfo> {
         self.registry.list_all().await
+    }
+
+    /// Stop and remove all running containers (used during graceful shutdown).
+    pub async fn shutdown(&self) {
+        let containers = self.registry.list_all().await;
+        if containers.is_empty() {
+            return;
+        }
+        tracing::info!("Shutting down {} container(s)...", containers.len());
+        for info in containers {
+            let _ = self.stop_container(&info.conversation_id).await;
+        }
+        tracing::info!("All containers stopped");
     }
 }
 

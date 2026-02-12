@@ -144,7 +144,7 @@ class ChatAgent:
             )
         elif provider == "openai":
             return self.llm.bind(
-                reasoning_effort="high",
+                reasoning={"effort": "high", "summary": "auto"},
             )
         elif provider == "google":
             return self.llm.bind(
@@ -156,15 +156,17 @@ class ChatAgent:
 
     async def _agent_loop(self, deep_thinking: bool = False) -> AsyncIterator[StreamEvent]:
         """Run the agent loop: call LLM, handle tool calls, repeat."""
-        max_iterations = 20
         total_content = ""  # Accumulates across all iterations
-        all_tool_calls: list[dict[str, Any]] = []  # Accumulates across all iterations
+        all_content_blocks: list[dict[str, Any]] = []  # Interleaved thinking/text/tool_call blocks
         llm = self._get_thinking_llm() if deep_thinking else self.llm
         if deep_thinking:
             logger.info("Deep thinking enabled (provider=%s), bound kwargs: %s",
                         self.config.provider, getattr(llm, 'kwargs', {}))
 
-        for _ in range(max_iterations):
+        iteration = 0
+        while True:
+            iteration += 1
+            logger.info("Agent iteration %d", iteration)
             if self._cancelled:
                 return
 
@@ -196,6 +198,10 @@ class ChatAgent:
                             iteration_content += delta
                             total_content += delta
                             yield StreamEvent("assistant_delta", {"delta": delta})
+                            if all_content_blocks and all_content_blocks[-1].get("type") == "text":
+                                all_content_blocks[-1]["content"] += delta
+                            else:
+                                all_content_blocks.append({"type": "text", "content": delta})
                     elif isinstance(chunk.content, list):
                         for block in chunk.content:
                             if isinstance(block, dict):
@@ -204,18 +210,53 @@ class ChatAgent:
                                     if thinking_text:
                                         thinking_total += len(thinking_text)
                                         yield StreamEvent("thinking_delta", {"delta": thinking_text})
+                                        if all_content_blocks and all_content_blocks[-1].get("type") == "thinking":
+                                            all_content_blocks[-1]["content"] += thinking_text
+                                        else:
+                                            all_content_blocks.append({"type": "thinking", "content": thinking_text})
+                                elif block.get("type") == "reasoning":
+                                    # OpenAI format — summary is a list of dicts
+                                    summaries = block.get("summary") or []
+                                    if isinstance(summaries, list):
+                                        for s in summaries:
+                                            if isinstance(s, dict):
+                                                text = s.get("text", "")
+                                                if text:
+                                                    thinking_total += len(text)
+                                                    yield StreamEvent("thinking_delta", {"delta": text})
+                                                    if all_content_blocks and all_content_blocks[-1].get("type") == "thinking":
+                                                        all_content_blocks[-1]["content"] += text
+                                                    else:
+                                                        all_content_blocks.append({"type": "thinking", "content": text})
+                                    # Also check normalized reasoning field
+                                    reasoning_text = block.get("reasoning", "")
+                                    if reasoning_text:
+                                        thinking_total += len(reasoning_text)
+                                        yield StreamEvent("thinking_delta", {"delta": reasoning_text})
+                                        if all_content_blocks and all_content_blocks[-1].get("type") == "thinking":
+                                            all_content_blocks[-1]["content"] += reasoning_text
+                                        else:
+                                            all_content_blocks.append({"type": "thinking", "content": reasoning_text})
                                 elif block.get("type") == "text":
                                     delta = block.get("text", "")
                                     if delta:
                                         iteration_content += delta
                                         total_content += delta
                                         yield StreamEvent("assistant_delta", {"delta": delta})
+                                        if all_content_blocks and all_content_blocks[-1].get("type") == "text":
+                                            all_content_blocks[-1]["content"] += delta
+                                        else:
+                                            all_content_blocks.append({"type": "text", "content": delta})
                             else:
                                 delta = str(block)
                                 if delta:
                                     iteration_content += delta
                                     total_content += delta
                                     yield StreamEvent("assistant_delta", {"delta": delta})
+                                    if all_content_blocks and all_content_blocks[-1].get("type") == "text":
+                                        all_content_blocks[-1]["content"] += delta
+                                    else:
+                                        all_content_blocks.append({"type": "text", "content": delta})
 
                 # Accumulate tool calls
                 if chunk.tool_call_chunks:
@@ -230,9 +271,13 @@ class ChatAgent:
             # If no tool calls, we're done
             if not tool_calls:
                 self.messages.append(AIMessage(content=iteration_content))
+                has_rich_blocks = any(
+                    b.get("type") in ("tool_call", "thinking")
+                    for b in all_content_blocks
+                )
                 yield StreamEvent("complete", {
                     "content": total_content,
-                    "tool_calls": all_tool_calls or None,
+                    "tool_calls": all_content_blocks if has_rich_blocks else None,
                     "token_usage": {"prompt": 0, "completion": 0},
                 })
                 return
@@ -278,19 +323,15 @@ class ChatAgent:
                     ToolMessage(content=result, tool_call_id=tc_id)
                 )
 
-                all_tool_calls.append({
+                all_content_blocks.append({
+                    "type": "tool_call",
                     "id": tc_id,
                     "name": tc_name,
                     "input": tc_args,
                     "result": result,
-                    "is_error": is_error,
+                    "isError": is_error,
                 })
 
-        # Max iterations reached
-        yield StreamEvent("error", {
-            "code": "max_iterations",
-            "message": "Agent reached maximum iteration limit",
-        })
 
     async def _execute_tool(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
         """Execute a tool by name and return (result, is_error)."""

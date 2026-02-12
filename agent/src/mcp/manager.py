@@ -1,116 +1,27 @@
-"""MCP server lifecycle manager and LangChain tool bridge."""
+"""MCP server lifecycle manager using langchain-mcp-adapters."""
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Type
+from typing import Any
 
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel, ConfigDict, Field
-
-from .client import McpClient
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
 logger = logging.getLogger(__name__)
 
 
-class McpToolInput(BaseModel):
-    """Generic input schema for MCP tools."""
-    arguments: str = Field(
-        default="{}",
-        description="JSON-encoded arguments to pass to the MCP tool.",
-    )
-
-
-class McpLangChainTool(BaseTool):
-    """A LangChain tool that delegates to an MCP server tool."""
-
-    name: str = ""
-    description: str = ""
-    args_schema: Type[BaseModel] = McpToolInput
-    mcp_client: Any = None  # McpClient instance
-    mcp_tool_name: str = ""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    def _run(self, arguments: str = "{}") -> str:
-        raise NotImplementedError("MCP tools are async-only. Use _arun.")
-
-    async def _arun(self, arguments: str = "{}") -> str:
-        if self.mcp_client is None:
-            return "Error: MCP client not available"
-        try:
-            args = json.loads(arguments) if arguments else {}
-        except json.JSONDecodeError:
-            return f"Error: invalid JSON arguments: {arguments}"
-        try:
-            return await self.mcp_client.call_tool(self.mcp_tool_name, args)
-        except Exception as exc:
-            return f"Error calling MCP tool '{self.mcp_tool_name}': {exc}"
-
-
 class McpManager:
-    """Manages multiple MCP server connections and creates LangChain tools."""
+    """Manages MCP server connections via MultiServerMCPClient."""
 
     def __init__(self) -> None:
-        self._clients: dict[str, McpClient] = {}
+        self._client: MultiServerMCPClient | None = None
+        self._server_names: list[str] = []
 
     @property
     def connected_servers(self) -> list[str]:
-        return [name for name, c in self._clients.items() if c.is_connected]
-
-    async def add_server(
-        self,
-        name: str,
-        command: str,
-        args: list[str] | None = None,
-        env: dict[str, str] | None = None,
-    ) -> McpClient:
-        """Add and connect to an MCP server."""
-        if name in self._clients:
-            await self.remove_server(name)
-
-        client = McpClient(name=name, command=command, args=args, env=env)
-        try:
-            await client.connect()
-            await client.list_tools()
-            self._clients[name] = client
-            logger.info(
-                "MCP server '%s' added with %d tools",
-                name, len(client._tools),
-            )
-        except Exception as exc:
-            logger.error("Failed to connect to MCP server '%s': %s", name, exc)
-            await client.disconnect()
-            raise
-        return client
-
-    async def remove_server(self, name: str) -> None:
-        """Disconnect and remove an MCP server."""
-        client = self._clients.pop(name, None)
-        if client:
-            await client.disconnect()
-
-    async def shutdown(self) -> None:
-        """Disconnect all MCP servers."""
-        for name in list(self._clients.keys()):
-            await self.remove_server(name)
-
-    def get_langchain_tools(self) -> list[BaseTool]:
-        """Create LangChain tool wrappers for all connected MCP server tools."""
-        tools: list[BaseTool] = []
-        for name, client in self._clients.items():
-            if not client.is_connected:
-                continue
-            for schema in client.get_tool_schemas():
-                tool = McpLangChainTool(
-                    name=schema["name"],
-                    description=schema["description"],
-                    mcp_client=client,
-                    mcp_tool_name=schema["mcp_tool_name"],
-                )
-                tools.append(tool)
-        return tools
+        return list(self._server_names)
 
     async def setup_from_config(
         self, mcp_servers: list[dict[str, Any]]
@@ -124,6 +35,9 @@ class McpManager:
         Returns:
             List of LangChain tools from all successfully connected servers.
         """
+        await self.shutdown()
+
+        server_configs: dict[str, dict[str, Any]] = {}
         for server_config in mcp_servers:
             name = server_config.get("name", "")
             transport = server_config.get("transport", "stdio")
@@ -159,11 +73,39 @@ class McpManager:
             elif isinstance(env_raw, dict):
                 env = env_raw
 
-            try:
-                await self.add_server(name, command, args, env)
-            except Exception as exc:
-                logger.error(
-                    "Failed to start MCP server '%s': %s", name, exc
-                )
+            entry: dict[str, Any] = {
+                "transport": "stdio",
+                "command": command,
+                "args": args,
+            }
+            if env:
+                entry["env"] = env
+            server_configs[name] = entry
 
-        return self.get_langchain_tools()
+        if not server_configs:
+            return []
+
+        self._client = MultiServerMCPClient(server_configs)
+        self._server_names = list(server_configs.keys())
+
+        try:
+            tools = await self._client.get_tools()
+            logger.info(
+                "Connected to %d MCP servers, loaded %d tools",
+                len(self._server_names), len(tools),
+            )
+            return tools
+        except Exception as exc:
+            logger.error("Failed to connect to MCP servers: %s", exc)
+            await self.shutdown()
+            raise
+
+    async def shutdown(self) -> None:
+        """Disconnect all MCP servers."""
+        if self._client is not None:
+            try:
+                await self._client.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._client = None
+        self._server_names = []

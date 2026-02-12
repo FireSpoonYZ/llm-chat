@@ -85,3 +85,16 @@ export interface WsMessage {
   type: string
   [key: string]: unknown
 }
+
+export interface FileEntry {
+  name: string
+  is_dir: boolean
+  size: number
+  modified: string | null
+  children?: FileEntry[]
+}
+
+export interface ListFilesResponse {
+  path: string
+  entries: FileEntry[]
+}

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Path},
+    extract::{Path, State},
     http::StatusCode,
     routing::{delete, get},
     Json, Router,
@@ -10,8 +10,9 @@ use std::sync::Arc;
 use crate::auth::middleware::{AppState, AuthUser};
 use crate::crypto;
 use crate::db;
+use crate::error::AppError;
 
-pub fn router() -> Router {
+pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/me", get(get_profile))
         .route("/me/providers", get(list_providers).post(upsert_provider))
@@ -28,11 +29,11 @@ pub struct ProfileResponse {
 }
 
 async fn get_profile(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
-) -> Result<Json<ProfileResponse>, StatusCode> {
-    let user = db::users::get_user_by_id(&state.db, &auth.user_id).await
-        .ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<ProfileResponse>, AppError> {
+    let user = db::users::get_user_by_id(&state.db, &auth.user_id).await?
+        .ok_or(AppError::NotFound)?;
 
     Ok(Json(ProfileResponse {
         id: user.id,
@@ -61,10 +62,10 @@ fn parse_models_json(json_str: Option<&str>) -> Vec<String> {
 }
 
 async fn list_providers(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
-) -> Result<Json<Vec<ProviderResponse>>, StatusCode> {
-    let providers = db::providers::list_providers(&state.db, &auth.user_id).await;
+) -> Result<Json<Vec<ProviderResponse>>, AppError> {
+    let providers = db::providers::list_providers(&state.db, &auth.user_id).await?;
     Ok(Json(
         providers
             .into_iter()
@@ -92,32 +93,32 @@ pub struct UpsertProviderRequest {
 }
 
 async fn upsert_provider(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
     Json(req): Json<UpsertProviderRequest>,
-) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
+) -> Result<Json<ProviderResponse>, AppError> {
     let valid_providers = ["openai", "anthropic", "google", "mistral"];
     if !valid_providers.contains(&req.provider_type.as_str()) {
-        return Err((StatusCode::BAD_REQUEST, "Invalid provider type".into()));
+        return Err(AppError::BadRequest("Invalid provider type".into()));
     }
 
     if req.name.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Name is required".into()));
+        return Err(AppError::BadRequest("Name is required".into()));
     }
 
     // If editing and keeping existing key, look up the existing encrypted key
     let encrypted_key = if req.api_key == "__KEEP_EXISTING__" {
         // Find existing provider by name to reuse its encrypted key
-        let existing = db::providers::list_providers(&state.db, &auth.user_id).await
+        let existing = db::providers::list_providers(&state.db, &auth.user_id).await?
             .into_iter()
             .find(|p| p.name.as_deref() == Some(req.name.as_str()));
         match existing {
             Some(p) => p.api_key_encrypted,
-            None => return Err((StatusCode::BAD_REQUEST, "API key is required for new providers".into())),
+            None => return Err(AppError::BadRequest("API key is required for new providers".into())),
         }
     } else {
         crypto::encrypt(&req.api_key, &state.config.encryption_key)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .map_err(AppError::Internal)?
     };
 
     let models_json = req.models.as_ref().map(|m| serde_json::to_string(m).unwrap());
@@ -135,7 +136,7 @@ async fn upsert_provider(
         req.is_default,
         models_json.as_deref(),
         Some(&req.name),
-    ).await;
+    ).await?;
 
     Ok(Json(ProviderResponse {
         id: provider.id,
@@ -149,13 +150,13 @@ async fn upsert_provider(
 }
 
 async fn delete_provider(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
     Path(name): Path<String>,
-) -> StatusCode {
-    if db::providers::delete_provider_by_name(&state.db, &auth.user_id, &name).await {
-        StatusCode::NO_CONTENT
+) -> Result<StatusCode, AppError> {
+    if db::providers::delete_provider_by_name(&state.db, &auth.user_id, &name).await? {
+        Ok(StatusCode::NO_CONTENT)
     } else {
-        StatusCode::NOT_FOUND
+        Err(AppError::NotFound)
     }
 }

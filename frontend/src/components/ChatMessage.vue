@@ -9,14 +9,16 @@
         <span class="message-time">{{ formattedTime }}</span>
       </div>
       <template v-if="isEditing">
-        <textarea
+        <el-input
           class="edit-textarea"
           v-model="editContent"
-          rows="3"
+          type="textarea"
+          :rows="3"
+          resize="vertical"
         />
         <div class="edit-actions">
-          <button class="save-btn" @click="saveEdit">Save</button>
-          <button class="cancel-btn" @click="cancelEdit">Cancel</button>
+          <el-button class="save-btn" type="primary" size="small" @click="saveEdit">Save</el-button>
+          <el-button class="cancel-btn" size="small" @click="cancelEdit">Cancel</el-button>
         </div>
       </template>
       <template v-else>
@@ -39,18 +41,24 @@
           />
         </template>
         <div class="message-footer">
-          <button
+          <el-button
             v-if="message.role === 'user' && !isStreaming"
             class="action-btn edit-btn"
+            text
+            size="small"
             title="Edit message"
+            :icon="EditPen"
             @click="startEdit"
-          >✎</button>
-          <button
+          />
+          <el-button
             v-if="message.role === 'assistant' && !isStreaming"
             class="action-btn regenerate-btn"
+            text
+            size="small"
             title="Regenerate response"
+            :icon="RefreshRight"
             @click="$emit('regenerate', message.id)"
-          >↻</button>
+          />
         </div>
       </template>
     </div>
@@ -59,6 +67,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { EditPen, RefreshRight } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
@@ -119,10 +128,33 @@ const contentBlocks = computed<ContentBlock[]>(() => {
     try {
       const parsed = JSON.parse(props.message.tool_calls) as unknown[]
       if (Array.isArray(parsed) && parsed.length > 0) {
-        const first = parsed[0] as Record<string, unknown>
-        if ('type' in first) {
-          return parsed as ContentBlock[]
+        const hasTypedBlocks = parsed.some(
+          (item) => typeof item === 'object' && item !== null && 'type' in (item as object)
+        )
+
+        if (hasTypedBlocks) {
+          return (parsed as Array<Record<string, unknown>>)
+            .filter((item) => item.type === 'text' || item.type === 'thinking' || item.type === 'tool_call')
+            .map((item) => {
+              if (item.type === 'thinking') {
+                return { type: 'thinking' as const, content: (item.content as string) || '' }
+              }
+              if (item.type === 'tool_call') {
+                return {
+                  type: 'tool_call' as const,
+                  id: (item.id as string) || '',
+                  name: (item.name as string) || '',
+                  input: item.input as Record<string, unknown> | undefined,
+                  result: item.result as string | undefined,
+                  isError: (item.isError ?? item.is_error) as boolean | undefined,
+                  isLoading: false,
+                }
+              }
+              return { type: 'text' as const, content: (item.content as string) || '' }
+            })
         }
+
+        // Legacy format (no type field): text on top, tool calls below
         const blocks: ContentBlock[] = []
         if (props.message.content) {
           blocks.push({ type: 'text', content: props.message.content })
@@ -258,70 +290,17 @@ function cancelEdit() {
 }
 
 .action-btn {
-  background: none;
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  padding: 2px 8px;
-  font-size: 13px;
-  color: var(--text-secondary);
   opacity: 0;
-  transition: opacity 0.2s, background var(--transition-fast);
+  transition: opacity 0.2s;
 }
 .chat-message:hover .action-btn {
   opacity: 1;
-}
-.action-btn:hover {
-  background: var(--border-light);
-  color: var(--accent-primary);
-}
-
-.edit-textarea {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--border-input);
-  border-radius: var(--radius-md);
-  font-family: inherit;
-  font-size: 15px;
-  line-height: 1.6;
-  resize: vertical;
-  box-sizing: border-box;
-  background: var(--bg-input);
-  color: var(--text-primary);
-}
-.edit-textarea:focus {
-  outline: none;
-  border-color: var(--accent-primary);
-  box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.15);
 }
 
 .edit-actions {
   display: flex;
   gap: 8px;
   margin-top: 8px;
-}
-.save-btn, .cancel-btn {
-  padding: 6px 16px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-light);
-  cursor: pointer;
-  font-size: 13px;
-  transition: background var(--transition-fast);
-}
-.save-btn {
-  background: var(--accent-primary);
-  color: white;
-  border-color: var(--accent-primary);
-}
-.save-btn:hover {
-  background: var(--accent-primary-hover);
-}
-.cancel-btn {
-  background: var(--bg-input);
-  color: var(--text-primary);
-}
-.cancel-btn:hover {
-  background: var(--border-light);
 }
 
 .message-content {

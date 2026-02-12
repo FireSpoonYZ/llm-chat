@@ -8,16 +8,20 @@
       @click="$emit('select', conv.id)"
     >
       <span class="title">{{ conv.title }}</span>
-      <button
+      <el-button
         class="delete-btn"
+        text
+        size="small"
+        :icon="Close"
         @click.stop="$emit('delete', conv.id)"
         aria-label="Delete conversation"
-      >&times;</button>
+      />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { Close } from '@element-plus/icons-vue'
 import type { Conversation } from '../types'
 
 defineProps<{
@@ -62,20 +66,14 @@ defineEmits<{
   font-size: 14px;
 }
 .delete-btn {
-  background: none;
-  border: none;
-  color: var(--text-sidebar-muted);
-  font-size: 18px;
-  cursor: pointer;
-  padding: 0 4px;
+  color: var(--text-sidebar-muted) !important;
   opacity: 0;
   transition: opacity 0.2s, color var(--transition-fast);
-  line-height: 1;
 }
 .conversation-item:hover .delete-btn {
   opacity: 1;
 }
 .delete-btn:hover {
-  color: #F87171;
+  color: #F87171 !important;
 }
 </style>

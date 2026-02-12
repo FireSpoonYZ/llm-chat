@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Path},
+    extract::{Path, State},
     http::StatusCode,
     routing::get,
     Json, Router,
@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use crate::auth::middleware::{AdminOnly, AppState};
 use crate::db;
+use crate::error::AppError;
 
-pub fn router() -> Router {
+pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/mcp-servers", get(list_mcp_servers).post(create_mcp_server))
         .route("/mcp-servers/{id}", get(get_mcp_server).put(update_mcp_server).delete(delete_mcp_server))
@@ -48,11 +49,11 @@ impl From<db::mcp_servers::McpServer> for McpServerDetailResponse {
 }
 
 async fn list_mcp_servers(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     _admin: AdminOnly,
-) -> Json<Vec<McpServerDetailResponse>> {
-    let servers = db::mcp_servers::list_mcp_servers(&state.db).await;
-    Json(servers.into_iter().map(Into::into).collect())
+) -> Result<Json<Vec<McpServerDetailResponse>>, AppError> {
+    let servers = db::mcp_servers::list_mcp_servers(&state.db).await?;
+    Ok(Json(servers.into_iter().map(Into::into).collect()))
 }
 
 #[derive(Deserialize)]
@@ -67,12 +68,12 @@ pub struct CreateMcpServerRequest {
 }
 
 async fn create_mcp_server(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     _admin: AdminOnly,
     Json(req): Json<CreateMcpServerRequest>,
-) -> Result<(StatusCode, Json<McpServerDetailResponse>), (StatusCode, String)> {
+) -> Result<(StatusCode, Json<McpServerDetailResponse>), AppError> {
     if req.transport != "stdio" && req.transport != "sse" {
-        return Err((StatusCode::BAD_REQUEST, "Transport must be 'stdio' or 'sse'".into()));
+        return Err(AppError::BadRequest("Transport must be 'stdio' or 'sse'".into()));
     }
 
     let server = db::mcp_servers::create_mcp_server(
@@ -85,18 +86,18 @@ async fn create_mcp_server(
         req.url.as_deref(),
         req.env_vars.as_deref(),
         true,
-    ).await;
+    ).await?;
 
     Ok((StatusCode::CREATED, Json(server.into())))
 }
 
 async fn get_mcp_server(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     _admin: AdminOnly,
     Path(id): Path<String>,
-) -> Result<Json<McpServerDetailResponse>, StatusCode> {
-    let server = db::mcp_servers::get_mcp_server(&state.db, &id).await
-        .ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<McpServerDetailResponse>, AppError> {
+    let server = db::mcp_servers::get_mcp_server(&state.db, &id).await?
+        .ok_or(AppError::NotFound)?;
     Ok(Json(server.into()))
 }
 
@@ -113,13 +114,13 @@ pub struct UpdateMcpServerRequest {
 }
 
 async fn update_mcp_server(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     _admin: AdminOnly,
     Path(id): Path<String>,
     Json(req): Json<UpdateMcpServerRequest>,
-) -> Result<Json<McpServerDetailResponse>, StatusCode> {
-    let existing = db::mcp_servers::get_mcp_server(&state.db, &id).await
-        .ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<McpServerDetailResponse>, AppError> {
+    let existing = db::mcp_servers::get_mcp_server(&state.db, &id).await?
+        .ok_or(AppError::NotFound)?;
 
     let name = req.name.as_deref().unwrap_or(&existing.name);
     let transport = req.transport.as_deref().unwrap_or(&existing.transport);
@@ -136,19 +137,19 @@ async fn update_mcp_server(
         req.url.as_deref().or(existing.url.as_deref()),
         req.env_vars.as_deref().or(existing.env_vars.as_deref()),
         is_enabled,
-    ).await
-    .ok_or(StatusCode::NOT_FOUND)?;
+    ).await?
+    .ok_or(AppError::NotFound)?;
     Ok(Json(server.into()))
 }
 
 async fn delete_mcp_server(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     _admin: AdminOnly,
     Path(id): Path<String>,
-) -> StatusCode {
-    if db::mcp_servers::delete_mcp_server(&state.db, &id).await {
-        StatusCode::NO_CONTENT
+) -> Result<StatusCode, AppError> {
+    if db::mcp_servers::delete_mcp_server(&state.db, &id).await? {
+        Ok(StatusCode::NO_CONTENT)
     } else {
-        StatusCode::NOT_FOUND
+        Err(AppError::NotFound)
     }
 }

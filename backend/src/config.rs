@@ -1,40 +1,48 @@
-use std::env;
+use serde::Deserialize;
 
-#[derive(Clone)]
+fn default_database_url() -> String {
+    "sqlite:data/claude-chat.db?mode=rwc".into()
+}
+fn default_host() -> String {
+    "0.0.0.0".into()
+}
+fn default_port() -> u16 {
+    3000
+}
+fn default_container_image() -> String {
+    "claude-chat-agent:latest".into()
+}
+fn default_container_idle_timeout() -> u64 {
+    600
+}
+fn default_internal_ws_port() -> u16 {
+    3001
+}
+
+#[derive(Clone, Deserialize)]
 pub struct Config {
+    #[serde(default = "default_database_url")]
     pub database_url: String,
     pub jwt_secret: String,
     pub encryption_key: String,
+    #[serde(default = "default_host")]
     pub host: String,
+    #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default = "default_container_image")]
     pub container_image: String,
+    #[serde(rename = "container_idle_timeout", default = "default_container_idle_timeout")]
     pub container_idle_timeout_secs: u64,
+    #[serde(default = "default_internal_ws_port")]
     pub internal_ws_port: u16,
+    pub docker_network: Option<String>,
+    pub host_data_dir: Option<String>,
+    pub fileserver_url: Option<String>,
 }
 
 impl Config {
     pub fn from_env() -> Self {
         dotenvy::dotenv().ok();
-        Self {
-            database_url: env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "sqlite:data/claude-chat.db?mode=rwc".into()),
-            jwt_secret: env::var("JWT_SECRET").expect("JWT_SECRET must be set"),
-            encryption_key: env::var("ENCRYPTION_KEY").expect("ENCRYPTION_KEY must be set"),
-            host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
-            port: env::var("PORT")
-                .unwrap_or_else(|_| "3000".into())
-                .parse()
-                .expect("PORT must be a number"),
-            container_image: env::var("CONTAINER_IMAGE")
-                .unwrap_or_else(|_| "claude-chat-agent:latest".into()),
-            container_idle_timeout_secs: env::var("CONTAINER_IDLE_TIMEOUT")
-                .unwrap_or_else(|_| "600".into())
-                .parse()
-                .expect("CONTAINER_IDLE_TIMEOUT must be a number"),
-            internal_ws_port: env::var("INTERNAL_WS_PORT")
-                .unwrap_or_else(|_| "3001".into())
-                .parse()
-                .expect("INTERNAL_WS_PORT must be a number"),
-        }
+        envy::from_env::<Config>().expect("Failed to parse config from environment")
     }
 }

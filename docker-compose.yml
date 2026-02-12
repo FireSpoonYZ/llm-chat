@@ -1,0 +1,44 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    ports:
+      - "${PORT:-3000}:3000"
+      - "${INTERNAL_WS_PORT:-3001}:3001"
+    env_file: .env
+    environment:
+      - DATABASE_URL=sqlite:/app/data/claude-chat.db?mode=rwc
+      - PORT=3000
+      - INTERNAL_WS_PORT=3001
+      - DOCKER_NETWORK=llm-chat_default
+      - HOST_DATA_DIR=${PWD}/data
+      - FILESERVER_URL=http://fileserver:5000
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  fileserver:
+    image: sigoden/dufs
+    command: /data -A
+    volumes:
+      - ./data/conversations:/data
+    restart: unless-stopped
+
+  agent-build:
+    build:
+      context: ./agent
+      dockerfile: ../docker/Dockerfile.agent
+    image: claude-chat-agent:latest
+    entrypoint: ["echo", "Agent image built"]

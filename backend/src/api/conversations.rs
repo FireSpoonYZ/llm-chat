@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Path, Query},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::get,
     Json, Router,
@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use crate::auth::middleware::{AppState, AuthUser};
 use crate::db;
+use crate::error::AppError;
 
-pub fn router() -> Router {
+pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_conversations).post(create_conversation))
         .route("/{id}", get(get_conversation).put(update_conversation).delete(delete_conversation))
@@ -46,11 +47,11 @@ impl From<db::conversations::Conversation> for ConversationResponse {
 }
 
 async fn list_conversations(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
-) -> Json<Vec<ConversationResponse>> {
-    let convos = db::conversations::list_conversations(&state.db, &auth.user_id).await;
-    Json(convos.into_iter().map(Into::into).collect())
+) -> Result<Json<Vec<ConversationResponse>>, AppError> {
+    let convos = db::conversations::list_conversations(&state.db, &auth.user_id).await?;
+    Ok(Json(convos.into_iter().map(Into::into).collect()))
 }
 
 #[derive(Deserialize)]
@@ -63,10 +64,10 @@ pub struct CreateConversationRequest {
 }
 
 async fn create_conversation(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
     Json(req): Json<CreateConversationRequest>,
-) -> Result<(StatusCode, Json<ConversationResponse>), StatusCode> {
+) -> Result<(StatusCode, Json<ConversationResponse>), AppError> {
     let title = req.title.unwrap_or_else(|| "New Conversation".into());
     let conv = db::conversations::create_conversation(
         &state.db,
@@ -76,7 +77,7 @@ async fn create_conversation(
         req.provider.as_deref(),
         req.model_name.as_deref(),
         req.deep_thinking.unwrap_or(false),
-    ).await;
+    ).await?;
 
     // Create workspace directory
     let workspace_dir = format!("data/conversations/{}", conv.id);
@@ -86,12 +87,12 @@ async fn create_conversation(
 }
 
 async fn get_conversation(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<ConversationResponse>, StatusCode> {
-    let conv = db::conversations::get_conversation(&state.db, &id, &auth.user_id).await
-        .ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<ConversationResponse>, AppError> {
+    let conv = db::conversations::get_conversation(&state.db, &id, &auth.user_id).await?
+        .ok_or(AppError::NotFound)?;
     Ok(Json(conv.into()))
 }
 
@@ -105,13 +106,13 @@ pub struct UpdateConversationRequest {
 }
 
 async fn update_conversation(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
     Path(id): Path<String>,
     Json(req): Json<UpdateConversationRequest>,
-) -> Result<Json<ConversationResponse>, StatusCode> {
-    let existing = db::conversations::get_conversation(&state.db, &id, &auth.user_id).await
-        .ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<ConversationResponse>, AppError> {
+    let existing = db::conversations::get_conversation(&state.db, &id, &auth.user_id).await?
+        .ok_or(AppError::NotFound)?;
 
     let title = req.title.as_deref().unwrap_or(&existing.title);
     let provider = match req.provider.as_deref() {
@@ -140,23 +141,22 @@ async fn update_conversation(
         model_name,
         system_prompt,
         deep_thinking,
-    ).await
-    .ok_or(StatusCode::NOT_FOUND)?;
+    ).await?
+    .ok_or(AppError::NotFound)?;
     Ok(Json(conv.into()))
 }
 
 async fn delete_conversation(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> StatusCode {
-    if db::conversations::delete_conversation(&state.db, &id, &auth.user_id).await {
-        // Clean up workspace directory
+) -> Result<StatusCode, AppError> {
+    if db::conversations::delete_conversation(&state.db, &id, &auth.user_id).await? {
         let workspace_dir = format!("data/conversations/{}", id);
         let _ = std::fs::remove_dir_all(&workspace_dir);
-        StatusCode::NO_CONTENT
+        Ok(StatusCode::NO_CONTENT)
     } else {
-        StatusCode::NOT_FOUND
+        Err(AppError::NotFound)
     }
 }
 
@@ -184,20 +184,20 @@ pub struct MessageResponse {
 }
 
 async fn list_messages(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
     Path(id): Path<String>,
     Query(params): Query<PaginationParams>,
-) -> Result<Json<MessagesResponse>, StatusCode> {
+) -> Result<Json<MessagesResponse>, AppError> {
     // Verify conversation belongs to user
-    db::conversations::get_conversation(&state.db, &id, &auth.user_id).await
-        .ok_or(StatusCode::NOT_FOUND)?;
+    db::conversations::get_conversation(&state.db, &id, &auth.user_id).await?
+        .ok_or(AppError::NotFound)?;
 
     let limit = params.limit.unwrap_or(50).min(100);
     let offset = params.offset.unwrap_or(0);
 
-    let messages = db::messages::list_messages(&state.db, &id, limit, offset).await;
-    let total = db::messages::count_messages(&state.db, &id).await;
+    let messages = db::messages::list_messages(&state.db, &id, limit, offset).await?;
+    let total = db::messages::count_messages(&state.db, &id).await?;
 
     Ok(Json(MessagesResponse {
         messages: messages
@@ -226,14 +226,14 @@ pub struct McpServerResponse {
 }
 
 async fn get_mcp_servers(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<Vec<McpServerResponse>>, StatusCode> {
-    db::conversations::get_conversation(&state.db, &id, &auth.user_id).await
-        .ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<Vec<McpServerResponse>>, AppError> {
+    db::conversations::get_conversation(&state.db, &id, &auth.user_id).await?
+        .ok_or(AppError::NotFound)?;
 
-    let servers = db::mcp_servers::get_conversation_mcp_servers(&state.db, &id).await;
+    let servers = db::mcp_servers::get_conversation_mcp_servers(&state.db, &id).await?;
     Ok(Json(
         servers
             .into_iter()
@@ -254,15 +254,15 @@ pub struct SetMcpServersRequest {
 }
 
 async fn set_mcp_servers(
-    Extension(state): Extension<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
     Path(id): Path<String>,
     Json(req): Json<SetMcpServersRequest>,
-) -> Result<StatusCode, StatusCode> {
-    db::conversations::get_conversation(&state.db, &id, &auth.user_id).await
-        .ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<StatusCode, AppError> {
+    db::conversations::get_conversation(&state.db, &id, &auth.user_id).await?
+        .ok_or(AppError::NotFound)?;
 
-    db::mcp_servers::set_conversation_mcp_servers(&state.db, &id, &req.server_ids).await;
+    db::mcp_servers::set_conversation_mcp_servers(&state.db, &id, &req.server_ids).await?;
 
     Ok(StatusCode::OK)
 }

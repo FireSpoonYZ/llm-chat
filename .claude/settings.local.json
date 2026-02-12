@@ -67,7 +67,22 @@
       "Bash(docker stop:*)",
       "Bash(~/.local/bin/uv run pytest:*)",
       "Bash(~/.local/bin/uv pip show:*)",
-      "Bash(PATH=\"$HOME/.local/bin:$PATH\" uv run --no-project python3 -c \"\nimport sys, json\ndata = json.loads\\(sys.stdin.read\\(\\)\\)\nfor block in data:\n    t = block.get\\(''type'', ''''\\)\n    if t == ''thinking'':\n        print\\(f''THINKING: len={len\\(block.get\\(\"\"content\"\", \"\"\"\"\\)\\)}''\\)\n        print\\(block.get\\(''content'', ''''\\)[:300]\\)\n    elif t == ''tool_call'':\n        print\\(f''TOOL: {block.get\\(\"\"name\"\", \"\"?\"\"\\)}''\\)\n    elif t == ''text'':\n        print\\(f''TEXT: len={len\\(block.get\\(\"\"content\"\", \"\"\"\"\\)\\)}''\\)\n\")"
+      "Bash(PATH=\"$HOME/.local/bin:$PATH\" uv run --no-project python3 -c \"\nimport sys, json\ndata = json.loads\\(sys.stdin.read\\(\\)\\)\nfor block in data:\n    t = block.get\\(''type'', ''''\\)\n    if t == ''thinking'':\n        print\\(f''THINKING: len={len\\(block.get\\(\"\"content\"\", \"\"\"\"\\)\\)}''\\)\n        print\\(block.get\\(''content'', ''''\\)[:300]\\)\n    elif t == ''tool_call'':\n        print\\(f''TOOL: {block.get\\(\"\"name\"\", \"\"?\"\"\\)}''\\)\n    elif t == ''text'':\n        print\\(f''TEXT: len={len\\(block.get\\(\"\"content\"\", \"\"\"\"\\)\\)}''\\)\n\")",
+      "Bash(netstat:*)",
+      "Bash(sudo iptables:*)",
+      "Bash(npx vite build:*)",
+      "Bash(PATH=\"$HOME/.local/bin:$PATH\" uv run python -c \"\nimport langchain_openai.chat_models.base as base\nimport inspect\nsrc = inspect.getsource\\(base\\)\nlines = src.split\\(''\\\\n''\\)\nfor i, line in enumerate\\(lines\\):\n    if ''reasoning'' in line.lower\\(\\):\n        start = max\\(0, i-1\\)\n        end = min\\(len\\(lines\\), i+2\\)\n        for j in range\\(start, end\\):\n            print\\(f''{j}: {lines[j]}''\\)\n        print\\(''---''\\)\n\")",
+      "Bash(PATH=\"$HOME/.local/bin:$PATH\" uv run python -c \"\nfrom importlib.metadata import version\nprint\\(''langchain_google_genai:'', version\\(''langchain-google-genai''\\)\\)\nprint\\(''langchain_mistralai:'', version\\(''langchain-mistralai''\\)\\)\n\")",
+      "Bash(PATH=\"$HOME/.local/bin:$PATH\" uv run python -c \"import tiktoken; print\\(''tiktoken available''\\)\")",
+      "Bash(npx vitest:*)",
+      "Bash($HOME/.local/bin/uv run pytest:*)",
+      "Bash(/home/firespoon/.local/bin/uv run pytest:*)",
+      "WebFetch(domain:docs.rs)",
+      "Bash(wc:*)",
+      "Bash(PATH=\"$HOME/.local/bin:$PATH\" uv add:*)",
+      "Bash($HOME/.local/bin/uv add:*)",
+      "Bash(/home/firespoon/.local/bin/uv add:*)",
+      "Bash(/home/firespoon/.local/bin/uv run python:*)"
     ]
   }
 }

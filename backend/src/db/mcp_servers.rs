@@ -26,7 +26,7 @@ pub async fn create_mcp_server(
     url: Option<&str>,
     env_vars: Option<&str>,
     is_enabled: bool,
-) -> McpServer {
+) -> Result<McpServer, sqlx::Error> {
     let id = uuid::Uuid::new_v4().to_string();
 
     sqlx::query_as::<_, McpServer>(
@@ -47,10 +47,9 @@ pub async fn create_mcp_server(
     .bind(is_enabled)
     .fetch_one(pool)
     .await
-    .expect("Failed to create MCP server")
 }
 
-pub async fn list_mcp_servers(pool: &SqlitePool) -> Vec<McpServer> {
+pub async fn list_mcp_servers(pool: &SqlitePool) -> Result<Vec<McpServer>, sqlx::Error> {
     sqlx::query_as::<_, McpServer>(
         "SELECT id, name, description, transport, \
          command, args, url, env_vars, is_enabled, created_at \
@@ -58,10 +57,9 @@ pub async fn list_mcp_servers(pool: &SqlitePool) -> Vec<McpServer> {
     )
     .fetch_all(pool)
     .await
-    .expect("Failed to list MCP servers")
 }
 
-pub async fn list_enabled_mcp_servers(pool: &SqlitePool) -> Vec<McpServer> {
+pub async fn list_enabled_mcp_servers(pool: &SqlitePool) -> Result<Vec<McpServer>, sqlx::Error> {
     sqlx::query_as::<_, McpServer>(
         "SELECT id, name, description, transport, \
          command, args, url, env_vars, is_enabled, created_at \
@@ -70,13 +68,12 @@ pub async fn list_enabled_mcp_servers(pool: &SqlitePool) -> Vec<McpServer> {
     )
     .fetch_all(pool)
     .await
-    .expect("Failed to list enabled MCP servers")
 }
 
 pub async fn get_mcp_server(
     pool: &SqlitePool,
     id: &str,
-) -> Option<McpServer> {
+) -> Result<Option<McpServer>, sqlx::Error> {
     sqlx::query_as::<_, McpServer>(
         "SELECT id, name, description, transport, \
          command, args, url, env_vars, is_enabled, created_at \
@@ -85,7 +82,6 @@ pub async fn get_mcp_server(
     .bind(id)
     .fetch_optional(pool)
     .await
-    .expect("Failed to get MCP server")
 }
 
 pub async fn update_mcp_server(
@@ -99,7 +95,7 @@ pub async fn update_mcp_server(
     url: Option<&str>,
     env_vars: Option<&str>,
     is_enabled: bool,
-) -> Option<McpServer> {
+) -> Result<Option<McpServer>, sqlx::Error> {
     sqlx::query_as::<_, McpServer>(
         "UPDATE mcp_servers SET name = ?, description = ?, \
          transport = ?, command = ?, args = ?, url = ?, \
@@ -119,32 +115,29 @@ pub async fn update_mcp_server(
     .bind(id)
     .fetch_optional(pool)
     .await
-    .expect("Failed to update MCP server")
 }
 
-pub async fn delete_mcp_server(pool: &SqlitePool, id: &str) -> bool {
+pub async fn delete_mcp_server(pool: &SqlitePool, id: &str) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM mcp_servers WHERE id = ?")
         .bind(id)
         .execute(pool)
-        .await
-        .expect("Failed to delete MCP server");
+        .await?;
 
-    result.rows_affected() > 0
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn set_conversation_mcp_servers(
     pool: &SqlitePool,
     conversation_id: &str,
     server_ids: &[String],
-) {
+) -> Result<(), sqlx::Error> {
     // Delete existing associations
     sqlx::query(
         "DELETE FROM conversation_mcp_servers WHERE conversation_id = ?",
     )
     .bind(conversation_id)
     .execute(pool)
-    .await
-    .expect("Failed to clear conversation MCP servers");
+    .await?;
 
     // Insert new associations
     for server_id in server_ids {
@@ -155,15 +148,16 @@ pub async fn set_conversation_mcp_servers(
         .bind(conversation_id)
         .bind(server_id)
         .execute(pool)
-        .await
-        .expect("Failed to insert conversation MCP server");
+        .await?;
     }
+
+    Ok(())
 }
 
 pub async fn get_conversation_mcp_servers(
     pool: &SqlitePool,
     conversation_id: &str,
-) -> Vec<McpServer> {
+) -> Result<Vec<McpServer>, sqlx::Error> {
     sqlx::query_as::<_, McpServer>(
         "SELECT s.id, s.name, s.description, s.transport, \
          s.command, s.args, s.url, s.env_vars, s.is_enabled, s.created_at \
@@ -176,7 +170,6 @@ pub async fn get_conversation_mcp_servers(
     .bind(conversation_id)
     .fetch_all(pool)
     .await
-    .expect("Failed to get conversation MCP servers")
 }
 
 #[cfg(test)]
@@ -204,7 +197,8 @@ mod tests {
             Some("{\"KEY\":\"val\"}"),
             true,
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(server.name, "test-server");
         assert_eq!(server.description.as_deref(), Some("A test server"));
         assert_eq!(server.transport, "stdio");
@@ -219,9 +213,9 @@ mod tests {
     #[tokio::test]
     async fn test_list_mcp_servers() {
         let pool = setup().await;
-        create_mcp_server(&pool, "alpha", None, "stdio", None, None, None, None, true).await;
-        create_mcp_server(&pool, "beta", None, "sse", None, None, Some("http://localhost"), None, false).await;
-        let all = list_mcp_servers(&pool).await;
+        create_mcp_server(&pool, "alpha", None, "stdio", None, None, None, None, true).await.unwrap();
+        create_mcp_server(&pool, "beta", None, "sse", None, None, Some("http://localhost"), None, false).await.unwrap();
+        let all = list_mcp_servers(&pool).await.unwrap();
         assert_eq!(all.len(), 2);
         // Should be ordered by name ASC
         assert_eq!(all[0].name, "alpha");
@@ -231,9 +225,9 @@ mod tests {
     #[tokio::test]
     async fn test_list_enabled_mcp_servers() {
         let pool = setup().await;
-        create_mcp_server(&pool, "enabled-one", None, "stdio", None, None, None, None, true).await;
-        create_mcp_server(&pool, "disabled-one", None, "stdio", None, None, None, None, false).await;
-        let enabled = list_enabled_mcp_servers(&pool).await;
+        create_mcp_server(&pool, "enabled-one", None, "stdio", None, None, None, None, true).await.unwrap();
+        create_mcp_server(&pool, "disabled-one", None, "stdio", None, None, None, None, false).await.unwrap();
+        let enabled = list_enabled_mcp_servers(&pool).await.unwrap();
         assert_eq!(enabled.len(), 1);
         assert_eq!(enabled[0].name, "enabled-one");
     }
@@ -244,7 +238,8 @@ mod tests {
         let server = create_mcp_server(
             &pool, "old-name", None, "stdio", None, None, None, None, true,
         )
-        .await;
+        .await
+        .unwrap();
         let updated = update_mcp_server(
             &pool,
             &server.id,
@@ -257,7 +252,8 @@ mod tests {
             None,
             false,
         )
-        .await;
+        .await
+        .unwrap();
         assert!(updated.is_some());
         let updated = updated.unwrap();
         assert_eq!(updated.name, "new-name");
@@ -273,13 +269,14 @@ mod tests {
         let server = create_mcp_server(
             &pool, "to-delete", None, "stdio", None, None, None, None, true,
         )
-        .await;
-        let deleted = delete_mcp_server(&pool, &server.id).await;
+        .await
+        .unwrap();
+        let deleted = delete_mcp_server(&pool, &server.id).await.unwrap();
         assert!(deleted);
-        let fetched = get_mcp_server(&pool, &server.id).await;
+        let fetched = get_mcp_server(&pool, &server.id).await.unwrap();
         assert!(fetched.is_none());
         // Deleting again should return false
-        let deleted_again = delete_mcp_server(&pool, &server.id).await;
+        let deleted_again = delete_mcp_server(&pool, &server.id).await.unwrap();
         assert!(!deleted_again);
     }
 
@@ -287,26 +284,26 @@ mod tests {
     async fn test_conversation_mcp_servers() {
         let pool = setup().await;
         // Create a user and conversation for the foreign key
-        let user = create_user(&pool, "testuser", "test@example.com", "hash").await;
-        let conv = create_conversation(&pool, &user.id, "Test Conv", None, None, None, false).await;
+        let user = create_user(&pool, "testuser", "test@example.com", "hash").await.unwrap();
+        let conv = create_conversation(&pool, &user.id, "Test Conv", None, None, None, false).await.unwrap();
 
-        let s1 = create_mcp_server(&pool, "server-a", None, "stdio", None, None, None, None, true).await;
-        let s2 = create_mcp_server(&pool, "server-b", None, "sse", None, None, Some("http://b"), None, true).await;
+        let s1 = create_mcp_server(&pool, "server-a", None, "stdio", None, None, None, None, true).await.unwrap();
+        let s2 = create_mcp_server(&pool, "server-b", None, "sse", None, None, Some("http://b"), None, true).await.unwrap();
 
         // Associate both servers with the conversation
-        set_conversation_mcp_servers(&pool, &conv.id, &[s1.id.clone(), s2.id.clone()]).await;
-        let servers = get_conversation_mcp_servers(&pool, &conv.id).await;
+        set_conversation_mcp_servers(&pool, &conv.id, &[s1.id.clone(), s2.id.clone()]).await.unwrap();
+        let servers = get_conversation_mcp_servers(&pool, &conv.id).await.unwrap();
         assert_eq!(servers.len(), 2);
 
         // Replace with only one server
-        set_conversation_mcp_servers(&pool, &conv.id, &[s1.id.clone()]).await;
-        let servers = get_conversation_mcp_servers(&pool, &conv.id).await;
+        set_conversation_mcp_servers(&pool, &conv.id, &[s1.id.clone()]).await.unwrap();
+        let servers = get_conversation_mcp_servers(&pool, &conv.id).await.unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "server-a");
 
         // Clear all associations
-        set_conversation_mcp_servers(&pool, &conv.id, &[]).await;
-        let servers = get_conversation_mcp_servers(&pool, &conv.id).await;
+        set_conversation_mcp_servers(&pool, &conv.id, &[]).await.unwrap();
+        let servers = get_conversation_mcp_servers(&pool, &conv.id).await.unwrap();
         assert_eq!(servers.len(), 0);
     }
 }

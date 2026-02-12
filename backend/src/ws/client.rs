@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        Extension, Query, WebSocketUpgrade,
+        Query, State, WebSocketUpgrade,
     },
     response::IntoResponse,
 };
@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::WsState;
+use super::messages::ClientMessage;
 use crate::auth;
 use crate::auth::middleware::AppState;
 use crate::db;
@@ -72,14 +73,15 @@ async fn send_to_container_or_start(
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<WsQuery>,
-    Extension(state): Extension<Arc<AppState>>,
-    Extension(ws_state): Extension<Arc<WsState>>,
-    Extension(docker_manager): Extension<Arc<DockerManager>>,
+    State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let claims = match auth::verify_access_token(&query.token, &state.config.jwt_secret) {
         Ok(c) => c,
         Err(_) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
+
+    let ws_state = state.ws_state.clone();
+    let docker_manager = state.docker_manager.clone();
 
     ws.on_upgrade(move |socket| handle_client_ws(socket, claims.sub, state, ws_state, docker_manager))
 }
@@ -111,39 +113,30 @@ async fn handle_client_ws(
             _ => continue,
         };
 
-        let parsed: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
+        let client_msg: ClientMessage = match serde_json::from_str(&text) {
+            Ok(m) => m,
             Err(_) => continue,
         };
 
-        let msg_type = parsed
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
-
-        match msg_type {
-            "join_conversation" => {
-                let conv_id = parsed
-                    .get("conversation_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+        match client_msg {
+            ClientMessage::JoinConversation { conversation_id: conv_id } => {
                 if conv_id.is_empty() {
                     continue;
                 }
 
-                if db::conversations::get_conversation(&state.db, conv_id, &user_id)
-                    .await
-                    .is_none()
-                {
-                    let _ = tx.send(
-                        serde_json::json!({
-                            "type": "error",
-                            "code": "not_found",
-                            "message": "Conversation not found"
-                        })
-                        .to_string(),
-                    );
-                    continue;
+                match db::conversations::get_conversation(&state.db, &conv_id, &user_id).await {
+                    Ok(None) | Err(_) => {
+                        let _ = tx.send(
+                            serde_json::json!({
+                                "type": "error",
+                                "code": "not_found",
+                                "message": "Conversation not found"
+                            })
+                            .to_string(),
+                        );
+                        continue;
+                    }
+                    Ok(Some(_)) => {}
                 }
 
                 if let Some(ref old_id) = current_conversation_id {
@@ -151,7 +144,7 @@ async fn handle_client_ws(
                 }
 
                 current_conversation_id = Some(conv_id.to_string());
-                ws_state.add_client(&user_id, conv_id, tx.clone()).await;
+                ws_state.add_client(&user_id, &conv_id, tx.clone()).await;
 
                 let _ = tx.send(
                     serde_json::json!({
@@ -161,7 +154,7 @@ async fn handle_client_ws(
                     .to_string(),
                 );
             }
-            "user_message" => {
+            ClientMessage::UserMessage { content } => {
                 let conv_id = match &current_conversation_id {
                     Some(id) => id.clone(),
                     None => {
@@ -177,24 +170,23 @@ async fn handle_client_ws(
                     }
                 };
 
-                let content = parsed
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
                 if content.is_empty() {
                     continue;
                 }
 
-                let msg =
-                    db::messages::create_message(&state.db, &conv_id, "user", &content, None, None, None)
-                        .await;
+                let msg = match db::messages::create_message(&state.db, &conv_id, "user", &content, None, None, None).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::error!("Failed to create message: {e}");
+                        continue;
+                    }
+                };
 
-                let conv = db::conversations::get_conversation(&state.db, &conv_id, &user_id).await;
+                let conv = db::conversations::get_conversation(&state.db, &conv_id, &user_id).await.ok().flatten();
                 let deep_thinking = conv.as_ref().map(|c| c.deep_thinking).unwrap_or(false);
 
                 // Auto-generate conversation title from first message
-                let msg_count = db::messages::count_messages(&state.db, &conv_id).await;
+                let msg_count = db::messages::count_messages(&state.db, &conv_id).await.unwrap_or(0);
                 if msg_count == 1 {
                     let title: String = if content.chars().count() > 50 {
                         format!("{}...", content.chars().take(50).collect::<String>())
@@ -202,7 +194,7 @@ async fn handle_client_ws(
                         content.clone()
                     };
                     if let Some(c) = &conv {
-                        db::conversations::update_conversation(
+                        let _ = db::conversations::update_conversation(
                             &state.db, &conv_id, &user_id, &title,
                             c.provider.as_deref(), c.model_name.as_deref(),
                             c.system_prompt_override.as_deref(), c.deep_thinking,
@@ -234,24 +226,19 @@ async fn handle_client_ws(
                 )
                 .await;
             }
-            "edit_message" => {
+            ClientMessage::EditMessage { message_id, content } => {
                 let conv_id = match &current_conversation_id {
                     Some(id) => id.clone(),
                     None => continue,
                 };
 
-                let message_id = match parsed.get("message_id").and_then(|v| v.as_str()) {
-                    Some(id) => id.to_string(),
-                    None => continue,
-                };
-                let content = match parsed.get("content").and_then(|v| v.as_str()) {
-                    Some(c) if !c.is_empty() => c.to_string(),
-                    _ => continue,
-                };
+                if content.is_empty() {
+                    continue;
+                }
 
                 // Validate message exists and is a user message
                 let msg = match db::messages::get_message(&state.db, &message_id).await {
-                    Some(m) if m.role == "user" && m.conversation_id == conv_id => m,
+                    Ok(Some(m)) if m.role == "user" && m.conversation_id == conv_id => m,
                     _ => {
                         let _ = tx.send(
                             serde_json::json!({
@@ -266,14 +253,14 @@ async fn handle_client_ws(
                 };
 
                 // Update content and delete subsequent messages
-                let all_msgs = db::messages::list_messages(&state.db, &conv_id, 1000, 0).await;
+                let all_msgs = db::messages::list_messages(&state.db, &conv_id, 1000, 0).await.unwrap_or_default();
                 let keep_turns = all_msgs.iter()
                     .take_while(|m| m.id != msg.id)
                     .filter(|m| m.role == "user")
                     .count();
 
-                db::messages::update_message_content(&state.db, &msg.id, &content).await;
-                db::messages::delete_messages_after(&state.db, &conv_id, &msg.id).await;
+                db::messages::update_message_content(&state.db, &msg.id, &content).await.ok();
+                db::messages::delete_messages_after(&state.db, &conv_id, &msg.id).await.ok();
 
                 let _ = tx.send(
                     serde_json::json!({
@@ -286,6 +273,8 @@ async fn handle_client_ws(
 
                 let deep_thinking = db::conversations::get_conversation(&state.db, &conv_id, &user_id)
                     .await
+                    .ok()
+                    .flatten()
                     .map(|c| c.deep_thinking)
                     .unwrap_or(false);
 
@@ -307,20 +296,15 @@ async fn handle_client_ws(
                 )
                 .await;
             }
-            "regenerate" => {
+            ClientMessage::Regenerate { message_id } => {
                 let conv_id = match &current_conversation_id {
                     Some(id) => id.clone(),
                     None => continue,
                 };
 
-                let message_id = match parsed.get("message_id").and_then(|v| v.as_str()) {
-                    Some(id) => id.to_string(),
-                    None => continue,
-                };
-
                 // Validate message exists and is an assistant message
                 let msg = match db::messages::get_message(&state.db, &message_id).await {
-                    Some(m) if m.role == "assistant" && m.conversation_id == conv_id => m,
+                    Ok(Some(m)) if m.role == "assistant" && m.conversation_id == conv_id => m,
                     _ => {
                         let _ = tx.send(
                             serde_json::json!({
@@ -335,7 +319,7 @@ async fn handle_client_ws(
                 };
 
                 // Find the last user message before this assistant message
-                let all_msgs = db::messages::list_messages(&state.db, &conv_id, 1000, 0).await;
+                let all_msgs = db::messages::list_messages(&state.db, &conv_id, 1000, 0).await.unwrap_or_default();
                 let msg_idx = all_msgs.iter().position(|m| m.id == msg.id);
                 let last_user_msg = msg_idx.and_then(|idx| {
                     all_msgs[..idx].iter().rev().find(|m| m.role == "user")
@@ -352,7 +336,7 @@ async fn handle_client_ws(
                     .filter(|m| m.role == "user")
                     .count();
 
-                db::messages::delete_messages_after(&state.db, &conv_id, &user_msg.id).await;
+                db::messages::delete_messages_after(&state.db, &conv_id, &user_msg.id).await.ok();
 
                 let _ = tx.send(
                     serde_json::json!({
@@ -364,6 +348,8 @@ async fn handle_client_ws(
 
                 let deep_thinking = db::conversations::get_conversation(&state.db, &conv_id, &user_id)
                     .await
+                    .ok()
+                    .flatten()
                     .map(|c| c.deep_thinking)
                     .unwrap_or(false);
 
@@ -385,7 +371,7 @@ async fn handle_client_ws(
                 )
                 .await;
             }
-            "cancel" => {
+            ClientMessage::Cancel => {
                 if let Some(ref conv_id) = current_conversation_id {
                     ws_state
                         .send_to_container(
@@ -395,7 +381,9 @@ async fn handle_client_ws(
                         .await;
                 }
             }
-            _ => {}
+            ClientMessage::Ping => {
+                let _ = tx.send(serde_json::json!({"type": "pong"}).to_string());
+            }
         }
     }
 

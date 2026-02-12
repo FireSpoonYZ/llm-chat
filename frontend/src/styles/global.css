@@ -21,7 +21,11 @@ html, body {
   height: 100%;
 }
 
-/* Scrollbar styling */
+/* Scrollbar styling — cross-browser */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
 ::-webkit-scrollbar {
   width: 6px;
 }
@@ -37,6 +41,12 @@ html, body {
 }
 
 /* Dark scrollbar for sidebar */
+.chat-sidebar {
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+.chat-sidebar *  {
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
 .chat-sidebar::-webkit-scrollbar-thumb,
 .chat-sidebar *::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.15);

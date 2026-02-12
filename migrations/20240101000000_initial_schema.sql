@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- User AI provider configs
+-- User AI provider configs (final schema with name + models columns)
 CREATE TABLE IF NOT EXISTS user_providers (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS user_providers (
     model_name TEXT,
     is_default INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(user_id, provider)
+    models TEXT,
+    name TEXT
 );
 
 -- Conversations
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     provider TEXT,
     model_name TEXT,
     system_prompt_override TEXT,
+    deep_thinking INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -76,9 +78,24 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- User presets
+CREATE TABLE IF NOT EXISTS user_presets (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_id, name)
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_providers_user_id ON user_providers(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_providers_name ON user_providers(user_id, name);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token_hash ON refresh_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_user_presets_user_id ON user_presets(user_id);

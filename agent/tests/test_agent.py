@@ -306,10 +306,15 @@ class TestChatAgent:
         complete_event = next(e for e in events if e.type == "complete")
         # total_content should include text from BOTH iterations
         assert complete_event.data["content"] == "Sure, Done!"
-        # tool_calls should be present
-        assert complete_event.data["tool_calls"] is not None
-        assert len(complete_event.data["tool_calls"]) == 1
-        assert complete_event.data["tool_calls"][0]["name"] == "test_tool"
+        # tool_calls should be Format A content blocks (interleaved)
+        blocks = complete_event.data["tool_calls"]
+        assert blocks is not None
+        tool_call_blocks = [b for b in blocks if b.get("type") == "tool_call"]
+        assert len(tool_call_blocks) == 1
+        assert tool_call_blocks[0]["name"] == "test_tool"
+        # Should also have text blocks
+        text_blocks = [b for b in blocks if b.get("type") == "text"]
+        assert len(text_blocks) >= 1
 
     @patch("src.agent.create_chat_model")
     async def test_complete_event_no_tool_calls_when_none(self, mock_create):

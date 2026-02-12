@@ -4,10 +4,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from langchain.chat_models import init_chat_model
 from langchain_core.language_models.chat_models import BaseChatModel
 
 
 SUPPORTED_PROVIDERS = ("openai", "anthropic", "google", "mistral")
+
+# Map our provider names to init_chat_model's model_provider values.
+_PROVIDER_MAP = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "google": "google_genai",
+    "mistral": "mistralai",
+}
 
 
 def create_chat_model(
@@ -38,101 +47,27 @@ def create_chat_model(
         ValueError: If the provider is not supported.
     """
     provider = provider.lower().strip()
-
-    if provider == "openai":
-        return _create_openai(model, api_key, endpoint_url, streaming, temperature, **kwargs)
-    elif provider == "anthropic":
-        return _create_anthropic(model, api_key, endpoint_url, streaming, temperature, **kwargs)
-    elif provider == "google":
-        return _create_google(model, api_key, streaming, temperature, **kwargs)
-    elif provider == "mistral":
-        return _create_mistral(model, api_key, endpoint_url, streaming, temperature, **kwargs)
-    else:
+    if provider not in SUPPORTED_PROVIDERS:
         raise ValueError(
             f"Unsupported provider: {provider!r}. "
             f"Supported: {', '.join(SUPPORTED_PROVIDERS)}"
         )
 
-
-def _create_openai(
-    model: str,
-    api_key: str,
-    endpoint_url: str | None,
-    streaming: bool,
-    temperature: float,
-    **kwargs: Any,
-) -> BaseChatModel:
-    from langchain_openai import ChatOpenAI
-
+    model_provider = _PROVIDER_MAP[provider]
     params: dict[str, Any] = {
-        "model": model,
         "api_key": api_key,
         "streaming": streaming,
         "temperature": temperature,
         **kwargs,
     }
     if endpoint_url:
-        params["base_url"] = endpoint_url
-    return ChatOpenAI(**params)
+        if provider == "mistral":
+            params["endpoint"] = endpoint_url
+        elif provider != "google":
+            params["base_url"] = endpoint_url
 
-
-def _create_anthropic(
-    model: str,
-    api_key: str,
-    endpoint_url: str | None,
-    streaming: bool,
-    temperature: float,
-    **kwargs: Any,
-) -> BaseChatModel:
-    from langchain_anthropic import ChatAnthropic
-
-    params: dict[str, Any] = {
-        "model": model,
-        "api_key": api_key,
-        "streaming": streaming,
-        "temperature": temperature,
-        **kwargs,
-    }
-    if endpoint_url:
-        params["base_url"] = endpoint_url
-    return ChatAnthropic(**params)
-
-
-def _create_google(
-    model: str,
-    api_key: str,
-    streaming: bool,
-    temperature: float,
-    **kwargs: Any,
-) -> BaseChatModel:
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    return ChatGoogleGenerativeAI(
+    return init_chat_model(
         model=model,
-        google_api_key=api_key,
-        streaming=streaming,
-        temperature=temperature,
-        **kwargs,
+        model_provider=model_provider,
+        **params,
     )
-
-
-def _create_mistral(
-    model: str,
-    api_key: str,
-    endpoint_url: str | None,
-    streaming: bool,
-    temperature: float,
-    **kwargs: Any,
-) -> BaseChatModel:
-    from langchain_mistralai import ChatMistralAI
-
-    params: dict[str, Any] = {
-        "model": model,
-        "api_key": api_key,
-        "streaming": streaming,
-        "temperature": temperature,
-        **kwargs,
-    }
-    if endpoint_url:
-        params["endpoint"] = endpoint_url
-    return ChatMistralAI(**params)

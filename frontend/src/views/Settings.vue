@@ -42,11 +42,11 @@
           <el-divider />
 
           <h4>{{ isEditingProvider ? 'Edit Provider' : 'Add Provider' }}</h4>
-          <el-form label-position="top" class="provider-form">
-            <el-form-item label="Name">
+          <el-form ref="providerFormRef" :model="providerForm" :rules="providerRules" label-position="top" class="provider-form">
+            <el-form-item label="Name" prop="name">
               <el-input v-model="providerForm.name" placeholder="e.g. My OpenAI, Work Anthropic" />
             </el-form-item>
-            <el-form-item label="API Type">
+            <el-form-item label="API Type" prop="providerType">
               <el-select v-model="providerForm.providerType" placeholder="Select API type">
                 <el-option label="OpenAI" value="openai" />
                 <el-option label="Anthropic" value="anthropic" />
@@ -54,16 +54,18 @@
                 <el-option label="Mistral" value="mistral" />
               </el-select>
             </el-form-item>
-            <el-form-item label="API Key">
+            <el-form-item label="API Key" prop="apiKey">
               <el-input v-model="providerForm.apiKey" type="password" show-password :placeholder="isEditingProvider ? '(leave empty to keep current)' : 'sk-...'" />
             </el-form-item>
-            <el-form-item label="Models">
+            <el-form-item label="Models" prop="models">
               <div class="model-tags">
                 <el-tag v-for="m in providerForm.models" :key="m" closable @close="removeModel(m)">{{ m }}</el-tag>
               </div>
-              <el-select v-model="modelToAdd" placeholder="Add a model" filterable allow-create :disabled="!providerForm.providerType" style="width: 100%" @change="addModel">
-                <el-option v-for="m in suggestedModels" :key="m" :label="m" :value="m" />
-              </el-select>
+              <el-input v-model="modelToAdd" placeholder="Enter model name" @keyup.enter="addModel">
+                <template #append>
+                  <el-button @click="addModel">Add</el-button>
+                </template>
+              </el-input>
             </el-form-item>
             <el-form-item label="Custom Endpoint (optional)">
               <el-input v-model="providerForm.endpointUrl" placeholder="https://..." />
@@ -103,14 +105,14 @@
           <el-divider />
 
           <h4>{{ isEditingPreset ? 'Edit Preset' : 'Add Preset' }}</h4>
-          <el-form label-position="top" class="provider-form">
-            <el-form-item label="Name">
+          <el-form ref="presetFormRef" :model="presetForm" :rules="presetRules" label-position="top" class="provider-form">
+            <el-form-item label="Name" prop="name">
               <el-input v-model="presetForm.name" placeholder="Preset name" />
             </el-form-item>
             <el-form-item label="Description">
               <el-input v-model="presetForm.description" placeholder="Short description" />
             </el-form-item>
-            <el-form-item label="Content">
+            <el-form-item label="Content" prop="content">
               <el-input v-model="presetForm.content" type="textarea" :rows="12" placeholder="System prompt content" />
             </el-form-item>
             <el-form-item>
@@ -128,10 +130,11 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref, computed, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { onMounted, reactive, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import type { FormInstance, FormRules } from 'element-plus'
 import { useSettingsStore } from '../stores/settings'
-import { PROVIDER_MODELS, PROVIDER_LABELS } from '../constants/providers'
+import { PROVIDER_LABELS } from '../constants/providers'
 import type { ProviderConfig, SystemPromptPreset } from '../types'
 
 const settingsStore = useSettingsStore()
@@ -159,31 +162,56 @@ const presetForm = reactive({
 
 const modelToAdd = ref('')
 
-const suggestedModels = computed(() => {
-  const all = PROVIDER_MODELS[providerForm.providerType] || []
-  return all.filter(m => !providerForm.models.includes(m))
+const providerFormRef = ref<FormInstance>()
+const presetFormRef = ref<FormInstance>()
+
+const providerRules = reactive<FormRules>({
+  name: [{ required: true, message: 'Name is required', trigger: 'blur' }],
+  providerType: [{ required: true, message: 'API type is required', trigger: 'change' }],
+  apiKey: [{
+    validator: (_rule, value, callback) => {
+      if (!isEditingProvider.value && !value) {
+        callback(new Error('API key is required'))
+      } else {
+        callback()
+      }
+    },
+    trigger: 'blur',
+  }],
+  models: [{
+    validator: (_rule, _value, callback) => {
+      if (!providerForm.models.length) {
+        callback(new Error('Add at least one model'))
+      } else {
+        callback()
+      }
+    },
+    trigger: 'change',
+  }],
 })
+
+const presetRules = reactive<FormRules>({
+  name: [{ required: true, message: 'Name is required', trigger: 'blur' }],
+  content: [{ required: true, message: 'Content is required', trigger: 'blur' }],
+})
+
+function addModel() {
+  const val = modelToAdd.value.trim()
+  if (val && !providerForm.models.includes(val)) {
+    providerForm.models.push(val)
+    providerFormRef.value?.validateField('models').catch(() => {})
+  }
+  modelToAdd.value = ''
+}
 
 function providerLabel(name: string) {
   return PROVIDER_LABELS[name] || name
 }
 
-function addModel(val: string) {
-  if (val && !providerForm.models.includes(val)) {
-    providerForm.models.push(val)
-  }
-  modelToAdd.value = ''
-}
-
 function removeModel(model: string) {
   providerForm.models = providerForm.models.filter(m => m !== model)
+  providerFormRef.value?.validateField('models').catch(() => {})
 }
-
-watch(() => providerForm.providerType, (newVal, oldVal) => {
-  if (!isEditingProvider.value && oldVal) {
-    providerForm.models = []
-  }
-})
 
 function resetProviderForm() {
   isEditingProvider.value = false
@@ -193,6 +221,7 @@ function resetProviderForm() {
   providerForm.models = []
   providerForm.endpointUrl = ''
   providerForm.isDefault = false
+  providerFormRef.value?.clearValidate()
 }
 
 function handleEditProvider(row: ProviderConfig) {
@@ -212,6 +241,7 @@ function resetPresetForm() {
   presetForm.description = ''
   presetForm.content = ''
   presetForm.isDefault = false
+  presetFormRef.value?.clearValidate()
 }
 
 function handleEditPreset(row: SystemPromptPreset) {
@@ -229,22 +259,9 @@ onMounted(async () => {
 })
 
 async function handleSaveProvider() {
-  if (!providerForm.name.trim()) {
-    ElMessage.warning('Name is required')
-    return
-  }
-  if (!providerForm.providerType) {
-    ElMessage.warning('API type is required')
-    return
-  }
-  if (!isEditingProvider.value && !providerForm.apiKey) {
-    ElMessage.warning('API key is required')
-    return
-  }
-  if (!providerForm.models.length) {
-    ElMessage.warning('Add at least one model')
-    return
-  }
+  if (!providerFormRef.value) return
+  const valid = await providerFormRef.value.validate().catch(() => false)
+  if (!valid) return
   const apiKey = providerForm.apiKey || '__KEEP_EXISTING__'
   try {
     await settingsStore.saveProvider(
@@ -265,6 +282,9 @@ async function handleSaveProvider() {
 
 async function handleDeleteProvider(name: string) {
   try {
+    await ElMessageBox.confirm('Delete this provider? This cannot be undone.', 'Confirm', { type: 'warning' })
+  } catch { return }
+  try {
     await settingsStore.removeProvider(name)
     ElMessage.success('Provider deleted')
   } catch {
@@ -273,14 +293,9 @@ async function handleDeleteProvider(name: string) {
 }
 
 async function handleSavePreset() {
-  if (!presetForm.name.trim()) {
-    ElMessage.warning('Name is required')
-    return
-  }
-  if (!presetForm.content.trim()) {
-    ElMessage.warning('Content is required')
-    return
-  }
+  if (!presetFormRef.value) return
+  const valid = await presetFormRef.value.validate().catch(() => false)
+  if (!valid) return
   try {
     if (isEditingPreset.value) {
       await settingsStore.editPreset(editingPresetId.value, {
@@ -307,6 +322,9 @@ async function handleSavePreset() {
 }
 
 async function handleDeletePreset(id: string) {
+  try {
+    await ElMessageBox.confirm('Delete this preset? This cannot be undone.', 'Confirm', { type: 'warning' })
+  } catch { return }
   try {
     await settingsStore.removePreset(id)
     ElMessage.success('Preset deleted')

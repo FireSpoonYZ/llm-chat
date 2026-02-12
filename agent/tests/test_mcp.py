@@ -1,190 +1,23 @@
-"""Tests for MCP client and manager modules."""
+"""Tests for MCP manager module."""
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.mcp.client import McpClient
-from src.mcp.manager import McpLangChainTool, McpManager, McpToolInput
+from src.mcp.manager import McpManager
 
-
-# ---------------------------------------------------------------------------
-# McpClient
-# ---------------------------------------------------------------------------
-
-class TestMcpClient:
-    def test_init(self):
-        client = McpClient(name="test", command="echo")
-        assert client.name == "test"
-        assert client.command == "echo"
-        assert client.args == []
-        assert client.env == {}
-        assert not client.is_connected
-
-    def test_init_with_args(self):
-        client = McpClient(
-            name="test",
-            command="python",
-            args=["-m", "server"],
-            env={"KEY": "val"},
-        )
-        assert client.args == ["-m", "server"]
-        assert client.env == {"KEY": "val"}
-
-    def test_is_connected_false_initially(self):
-        client = McpClient(name="test", command="echo")
-        assert client.is_connected is False
-
-    def test_get_tool_schemas_empty(self):
-        client = McpClient(name="test", command="echo")
-        assert client.get_tool_schemas() == []
-
-    def test_get_tool_schemas_with_tools(self):
-        client = McpClient(name="myserver", command="echo")
-        mock_tool = MagicMock()
-        mock_tool.name = "add"
-        mock_tool.description = "Add two numbers"
-        mock_tool.inputSchema = {"type": "object", "properties": {"a": {"type": "number"}}}
-        client._tools = [mock_tool]
-
-        schemas = client.get_tool_schemas()
-        assert len(schemas) == 1
-        assert schemas[0]["name"] == "mcp_myserver_add"
-        assert schemas[0]["description"] == "Add two numbers"
-        assert schemas[0]["mcp_server"] == "myserver"
-        assert schemas[0]["mcp_tool_name"] == "add"
-        assert "input_schema" in schemas[0]
-
-    async def test_list_tools_not_connected(self):
-        client = McpClient(name="test", command="echo")
-        with pytest.raises(RuntimeError, match="not connected"):
-            await client.list_tools()
-
-    async def test_call_tool_not_connected(self):
-        client = McpClient(name="test", command="echo")
-        with pytest.raises(RuntimeError, match="not connected"):
-            await client.call_tool("test_tool")
-
-    async def test_disconnect_when_not_connected(self):
-        client = McpClient(name="test", command="echo")
-        # Should not raise
-        await client.disconnect()
-        assert not client.is_connected
-
-
-# ---------------------------------------------------------------------------
-# McpLangChainTool
-# ---------------------------------------------------------------------------
-
-class TestMcpLangChainTool:
-    def test_sync_raises(self):
-        tool = McpLangChainTool(
-            name="test_tool",
-            description="test",
-            mcp_tool_name="test",
-        )
-        with pytest.raises(NotImplementedError):
-            tool._run()
-
-    async def test_arun_no_client(self):
-        tool = McpLangChainTool(
-            name="test_tool",
-            description="test",
-            mcp_client=None,
-            mcp_tool_name="test",
-        )
-        result = await tool._arun()
-        assert "not available" in result.lower()
-
-    async def test_arun_invalid_json(self):
-        mock_client = AsyncMock()
-        tool = McpLangChainTool(
-            name="test_tool",
-            description="test",
-            mcp_client=mock_client,
-            mcp_tool_name="test",
-        )
-        result = await tool._arun(arguments="not json{{{")
-        assert "invalid json" in result.lower()
-
-    async def test_arun_success(self):
-        mock_client = AsyncMock()
-        mock_client.call_tool = AsyncMock(return_value="tool output")
-        tool = McpLangChainTool(
-            name="test_tool",
-            description="test",
-            mcp_client=mock_client,
-            mcp_tool_name="add",
-        )
-        result = await tool._arun(arguments='{"a": 1, "b": 2}')
-        assert result == "tool output"
-        mock_client.call_tool.assert_called_once_with("add", {"a": 1, "b": 2})
-
-    async def test_arun_empty_args(self):
-        mock_client = AsyncMock()
-        mock_client.call_tool = AsyncMock(return_value="ok")
-        tool = McpLangChainTool(
-            name="test_tool",
-            description="test",
-            mcp_client=mock_client,
-            mcp_tool_name="ping",
-        )
-        result = await tool._arun(arguments="{}")
-        mock_client.call_tool.assert_called_once_with("ping", {})
-
-    async def test_arun_tool_error(self):
-        mock_client = AsyncMock()
-        mock_client.call_tool = AsyncMock(side_effect=RuntimeError("server down"))
-        tool = McpLangChainTool(
-            name="test_tool",
-            description="test",
-            mcp_client=mock_client,
-            mcp_tool_name="fail",
-        )
-        result = await tool._arun(arguments="{}")
-        assert "error" in result.lower()
-        assert "server down" in result.lower()
-
-
-# ---------------------------------------------------------------------------
-# McpToolInput
-# ---------------------------------------------------------------------------
-
-class TestMcpToolInput:
-    def test_default_arguments(self):
-        inp = McpToolInput()
-        assert inp.arguments == "{}"
-
-    def test_custom_arguments(self):
-        inp = McpToolInput(arguments='{"key": "value"}')
-        assert inp.arguments == '{"key": "value"}'
-
-
-# ---------------------------------------------------------------------------
-# McpManager
-# ---------------------------------------------------------------------------
 
 class TestMcpManager:
     def test_init(self):
         manager = McpManager()
         assert manager.connected_servers == []
 
-    async def test_remove_nonexistent_server(self):
-        manager = McpManager()
-        # Should not raise
-        await manager.remove_server("nonexistent")
-
     async def test_shutdown_empty(self):
         manager = McpManager()
-        # Should not raise
         await manager.shutdown()
-
-    def test_get_langchain_tools_empty(self):
-        manager = McpManager()
-        assert manager.get_langchain_tools() == []
+        assert manager.connected_servers == []
 
     async def test_setup_from_config_skips_non_stdio(self):
         manager = McpManager()
@@ -199,52 +32,166 @@ class TestMcpManager:
         tools = await manager.setup_from_config(config)
         assert tools == []
 
-    async def test_setup_from_config_parses_args_string(self):
-        """Args as JSON string should be parsed."""
+    async def test_setup_from_config_empty_list(self):
         manager = McpManager()
-        # This will fail to connect (no real server), but we test arg parsing
-        config = [{
-            "name": "test",
-            "transport": "stdio",
-            "command": "nonexistent_command_12345",
-            "args": '["--flag", "value"]',
-        }]
-        # Will fail to connect, but shouldn't crash
-        tools = await manager.setup_from_config(config)
+        tools = await manager.setup_from_config([])
         assert tools == []
+        assert manager.connected_servers == []
+
+    async def test_setup_from_config_parses_args_json_string(self):
+        """Args as JSON string should be parsed into a list."""
+        manager = McpManager()
+        mock_tool = MagicMock()
+        mock_tool.name = "test_tool"
+
+        with patch(
+            "src.mcp.manager.MultiServerMCPClient"
+        ) as MockClient:
+            instance = MockClient.return_value
+            instance.get_tools = AsyncMock(return_value=[mock_tool])
+
+            config = [{
+                "name": "test",
+                "transport": "stdio",
+                "command": "python",
+                "args": '["--flag", "value"]',
+            }]
+            tools = await manager.setup_from_config(config)
+
+            # Verify the client was created with parsed args
+            call_args = MockClient.call_args[0][0]
+            assert call_args["test"]["args"] == ["--flag", "value"]
+            assert len(tools) == 1
+
+    async def test_setup_from_config_parses_args_plain_string(self):
+        """Non-JSON args string should be split by whitespace."""
+        manager = McpManager()
+        mock_tool = MagicMock()
+
+        with patch(
+            "src.mcp.manager.MultiServerMCPClient"
+        ) as MockClient:
+            instance = MockClient.return_value
+            instance.get_tools = AsyncMock(return_value=[mock_tool])
+
+            config = [{
+                "name": "test",
+                "transport": "stdio",
+                "command": "python",
+                "args": "--flag value",
+            }]
+            await manager.setup_from_config(config)
+
+            call_args = MockClient.call_args[0][0]
+            assert call_args["test"]["args"] == ["--flag", "value"]
 
     async def test_setup_from_config_parses_env_string(self):
+        """env_vars as JSON string should be parsed into a dict."""
         manager = McpManager()
-        config = [{
-            "name": "test",
-            "transport": "stdio",
-            "command": "nonexistent_command_12345",
-            "env_vars": '{"KEY": "val"}',
-        }]
-        tools = await manager.setup_from_config(config)
-        assert tools == []
+        mock_tool = MagicMock()
 
-    async def test_get_langchain_tools_with_mock_client(self):
+        with patch(
+            "src.mcp.manager.MultiServerMCPClient"
+        ) as MockClient:
+            instance = MockClient.return_value
+            instance.get_tools = AsyncMock(return_value=[mock_tool])
+
+            config = [{
+                "name": "test",
+                "transport": "stdio",
+                "command": "python",
+                "env_vars": '{"KEY": "val"}',
+            }]
+            await manager.setup_from_config(config)
+
+            call_args = MockClient.call_args[0][0]
+            assert call_args["test"]["env"] == {"KEY": "val"}
+
+    async def test_setup_from_config_success(self):
+        """Successful setup returns tools and tracks server names."""
+        manager = McpManager()
+        mock_tools = [MagicMock(), MagicMock()]
+
+        with patch(
+            "src.mcp.manager.MultiServerMCPClient"
+        ) as MockClient:
+            instance = MockClient.return_value
+            instance.get_tools = AsyncMock(return_value=mock_tools)
+
+            config = [
+                {"name": "server1", "transport": "stdio", "command": "cmd1"},
+                {"name": "server2", "transport": "stdio", "command": "cmd2"},
+            ]
+            tools = await manager.setup_from_config(config)
+
+            assert len(tools) == 2
+            assert set(manager.connected_servers) == {"server1", "server2"}
+
+    async def test_setup_from_config_connection_failure(self):
+        """Connection failure should raise and clean up."""
+        manager = McpManager()
+
+        with patch(
+            "src.mcp.manager.MultiServerMCPClient"
+        ) as MockClient:
+            instance = MockClient.return_value
+            instance.get_tools = AsyncMock(
+                side_effect=ConnectionError("refused")
+            )
+            instance.__aexit__ = AsyncMock()
+
+            config = [{"name": "bad", "transport": "stdio", "command": "cmd"}]
+            with pytest.raises(ConnectionError):
+                await manager.setup_from_config(config)
+
+            assert manager.connected_servers == []
+
+    async def test_shutdown_clears_state(self):
+        """Shutdown should clear client and server names."""
+        manager = McpManager()
+        mock_tools = [MagicMock()]
+
+        with patch(
+            "src.mcp.manager.MultiServerMCPClient"
+        ) as MockClient:
+            instance = MockClient.return_value
+            instance.get_tools = AsyncMock(return_value=mock_tools)
+            instance.__aexit__ = AsyncMock()
+
+            config = [{"name": "srv", "transport": "stdio", "command": "cmd"}]
+            await manager.setup_from_config(config)
+            assert manager.connected_servers == ["srv"]
+
+            await manager.shutdown()
+            assert manager.connected_servers == []
+            assert manager._client is None
+
+    async def test_shutdown_calls_aexit(self):
+        """Shutdown should call client.__aexit__ for cleanup."""
         manager = McpManager()
         mock_client = MagicMock()
-        mock_client.is_connected = True
-        mock_client.get_tool_schemas.return_value = [
-            {
-                "name": "mcp_test_add",
-                "description": "Add numbers",
-                "mcp_server": "test",
-                "mcp_tool_name": "add",
-            }
-        ]
-        manager._clients["test"] = mock_client
-        tools = manager.get_langchain_tools()
-        assert len(tools) == 1
-        assert tools[0].name == "mcp_test_add"
+        mock_client.__aexit__ = AsyncMock()
+        manager._client = mock_client
+        manager._server_names = ["test"]
 
-    async def test_get_langchain_tools_skips_disconnected(self):
+        await manager.shutdown()
+        mock_client.__aexit__.assert_awaited_once_with(None, None, None)
+        assert manager._client is None
+
+    async def test_setup_replaces_previous_client(self):
+        """Calling setup_from_config again should shut down the old client."""
         manager = McpManager()
-        mock_client = MagicMock()
-        mock_client.is_connected = False
-        manager._clients["test"] = mock_client
-        tools = manager.get_langchain_tools()
-        assert len(tools) == 0
+
+        with patch(
+            "src.mcp.manager.MultiServerMCPClient"
+        ) as MockClient:
+            instance = MockClient.return_value
+            instance.get_tools = AsyncMock(return_value=[MagicMock()])
+            instance.__aexit__ = AsyncMock()
+
+            config = [{"name": "srv", "transport": "stdio", "command": "cmd"}]
+            await manager.setup_from_config(config)
+
+            await manager.setup_from_config(config)
+            # A new client should have been created
+            assert MockClient.call_count == 2

@@ -1,5 +1,5 @@
 import client from './client'
-import type { Conversation, MessagesResponse, McpServer } from '../types'
+import type { Conversation, MessagesResponse, McpServer, ListFilesResponse } from '../types'
 
 export async function listConversations(): Promise<Conversation[]> {
   const { data } = await client.get<Conversation[]>('/conversations')
@@ -42,4 +42,46 @@ export async function getConversationMcpServers(id: string): Promise<McpServer[]
 
 export async function setConversationMcpServers(id: string, serverIds: string[]): Promise<void> {
   await client.put(`/conversations/${id}/mcp-servers`, { server_ids: serverIds })
+}
+
+export async function listFiles(id: string, path = '', recursive = false): Promise<ListFilesResponse> {
+  const { data } = await client.get<ListFilesResponse>(`/conversations/${id}/files`, {
+    params: { path, ...(recursive ? { recursive: true } : {}) },
+  })
+  return data
+}
+
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const url = window.URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  window.URL.revokeObjectURL(url)
+  document.body.removeChild(a)
+}
+
+function extractFilename(headers: Record<string, unknown>, fallback: string): string {
+  const disposition = String(headers['content-disposition'] || '')
+  const match = disposition.match(/filename="?([^";\n]+)"?/)
+  return match ? match[1] : fallback
+}
+
+export async function downloadFile(id: string, path: string): Promise<void> {
+  const response = await client.get(`/conversations/${id}/files/download`, {
+    params: { path },
+    responseType: 'blob',
+  })
+  const fallback = path.split('/').pop() || 'download'
+  const filename = extractFilename(response.headers, fallback)
+  triggerBlobDownload(new Blob([response.data]), filename)
+}
+
+export async function downloadBatch(id: string, paths: string[]): Promise<void> {
+  const response = await client.post(`/conversations/${id}/files/download-batch`, { paths }, {
+    responseType: 'blob',
+  })
+  const filename = extractFilename(response.headers, 'download.zip')
+  triggerBlobDownload(new Blob([response.data]), filename)
 }

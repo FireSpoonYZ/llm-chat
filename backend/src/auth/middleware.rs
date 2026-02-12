@@ -2,16 +2,18 @@ use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-use axum::http::StatusCode;
-use axum::Extension;
 
 use crate::config::Config;
+use crate::docker::manager::DockerManager;
+use crate::error::AppError;
+use crate::ws::WsState;
 
-/// Shared application state, stored as `Extension<Arc<AppState>>` on the router.
-#[derive(Clone)]
+/// Shared application state, stored as `Router::with_state(Arc<AppState>)`.
 pub struct AppState {
     pub db: sqlx::SqlitePool,
     pub config: Config,
+    pub ws_state: Arc<WsState>,
+    pub docker_manager: Arc<DockerManager>,
 }
 
 /// Extractor that authenticates a request via the `Authorization: Bearer <token>`
@@ -23,41 +25,26 @@ pub struct AuthUser {
     pub is_admin: bool,
 }
 
-impl<S> FromRequestParts<S> for AuthUser
-where
-    S: Send + Sync,
-{
-    type Rejection = (StatusCode, &'static str);
+impl FromRequestParts<Arc<AppState>> for AuthUser {
+    type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut Parts,
-        _state: &S,
+        state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        // Retrieve AppState from request extensions.
-        let Extension(state): Extension<Arc<AppState>> =
-            Extension::from_request_parts(parts, _state)
-                .await
-                .map_err(|_| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "application state not configured",
-                    )
-                })?;
-
-        // Extract the Bearer token from the Authorization header.
         let auth_header = parts
             .headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .ok_or((StatusCode::UNAUTHORIZED, "missing authorization header"))?;
+            .ok_or_else(|| AppError::Unauthorized("Missing authorization header".into()))?;
 
         let token = auth_header
             .strip_prefix("Bearer ")
-            .ok_or((StatusCode::UNAUTHORIZED, "invalid authorization scheme"))?;
+            .ok_or_else(|| AppError::Unauthorized("Invalid authorization scheme".into()))?;
 
         let claims =
             super::verify_access_token(token, &state.config.jwt_secret)
-                .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid or expired token"))?;
+                .map_err(|_| AppError::Unauthorized("Invalid or expired token".into()))?;
 
         Ok(AuthUser {
             user_id: claims.sub,
@@ -73,19 +60,16 @@ where
 #[derive(Debug, Clone)]
 pub struct AdminOnly(pub AuthUser);
 
-impl<S> FromRequestParts<S> for AdminOnly
-where
-    S: Send + Sync,
-{
-    type Rejection = (StatusCode, &'static str);
+impl FromRequestParts<Arc<AppState>> for AdminOnly {
+    type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &S,
+        state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let user = AuthUser::from_request_parts(parts, state).await?;
         if !user.is_admin {
-            return Err((StatusCode::FORBIDDEN, "admin privileges required"));
+            return Err(AppError::Forbidden("Admin privileges required".into()));
         }
         Ok(AdminOnly(user))
     }

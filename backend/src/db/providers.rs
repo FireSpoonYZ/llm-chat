@@ -27,7 +27,7 @@ pub async fn upsert_provider(
     is_default: bool,
     models: Option<&str>,
     name: Option<&str>,
-) -> UserProvider {
+) -> Result<UserProvider, sqlx::Error> {
     let actual_name = name.unwrap_or(provider);
     let actual_id = match id {
         Some(existing) => existing.to_string(),
@@ -45,7 +45,7 @@ pub async fn upsert_provider(
         .bind(actual_name)
         .execute(pool)
         .await
-        .expect("Failed to clear default providers");
+        ?;
     }
 
     sqlx::query_as::<_, UserProvider>(
@@ -73,13 +73,12 @@ pub async fn upsert_provider(
     .bind(actual_name)
     .fetch_one(pool)
     .await
-    .expect("Failed to upsert provider")
 }
 
 pub async fn list_providers(
     pool: &SqlitePool,
     user_id: &str,
-) -> Vec<UserProvider> {
+) -> Result<Vec<UserProvider>, sqlx::Error> {
     sqlx::query_as::<_, UserProvider>(
         "SELECT id, user_id, provider, api_key_encrypted, \
          endpoint_url, model_name, is_default, created_at, models, name \
@@ -89,14 +88,13 @@ pub async fn list_providers(
     .bind(user_id)
     .fetch_all(pool)
     .await
-    .expect("Failed to list providers")
 }
 
 pub async fn get_provider(
     pool: &SqlitePool,
     user_id: &str,
     provider: &str,
-) -> Option<UserProvider> {
+) -> Result<Option<UserProvider>, sqlx::Error> {
     sqlx::query_as::<_, UserProvider>(
         "SELECT id, user_id, provider, api_key_encrypted, \
          endpoint_url, model_name, is_default, created_at, models, name \
@@ -107,13 +105,12 @@ pub async fn get_provider(
     .bind(provider)
     .fetch_optional(pool)
     .await
-    .expect("Failed to get provider")
 }
 
 pub async fn get_default_provider(
     pool: &SqlitePool,
     user_id: &str,
-) -> Option<UserProvider> {
+) -> Result<Option<UserProvider>, sqlx::Error> {
     sqlx::query_as::<_, UserProvider>(
         "SELECT id, user_id, provider, api_key_encrypted, \
          endpoint_url, model_name, is_default, created_at, models, name \
@@ -123,41 +120,38 @@ pub async fn get_default_provider(
     .bind(user_id)
     .fetch_optional(pool)
     .await
-    .expect("Failed to get default provider")
 }
 
 pub async fn delete_provider(
     pool: &SqlitePool,
     user_id: &str,
     provider: &str,
-) -> bool {
+) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
         "DELETE FROM user_providers WHERE user_id = ? AND provider = ?",
     )
     .bind(user_id)
     .bind(provider)
     .execute(pool)
-    .await
-    .expect("Failed to delete provider");
+    .await?;
 
-    result.rows_affected() > 0
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn delete_provider_by_name(
     pool: &SqlitePool,
     user_id: &str,
     name: &str,
-) -> bool {
+) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
         "DELETE FROM user_providers WHERE user_id = ? AND name = ?",
     )
     .bind(user_id)
     .bind(name)
     .execute(pool)
-    .await
-    .expect("Failed to delete provider by name");
+    .await?;
 
-    result.rows_affected() > 0
+    Ok(result.rows_affected() > 0)
 }
 
 #[cfg(test)]
@@ -168,7 +162,7 @@ mod tests {
 
     async fn setup() -> (SqlitePool, String) {
         let pool = init_db("sqlite::memory:").await;
-        let user = create_user(&pool, "testuser", "test@example.com", "hash").await;
+        let user = create_user(&pool, "testuser", "test@example.com", "hash").await.unwrap();
         (pool, user.id)
     }
 
@@ -179,7 +173,8 @@ mod tests {
             &pool, None, &user_id, "openai", "enc_key_1",
             Some("https://api.openai.com"), Some("gpt-4"), true, Some("[\"gpt-4\"]"), Some("My OpenAI"),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(prov.user_id, user_id);
         assert_eq!(prov.provider, "openai");
         assert_eq!(prov.api_key_encrypted, "enc_key_1");
@@ -196,46 +191,48 @@ mod tests {
             &pool, None, &user_id, "openai", "old_key",
             None, None, false, None, Some("My OpenAI"),
         )
-        .await;
+        .await
+        .unwrap();
         let updated = upsert_provider(
             &pool, None, &user_id, "openai", "new_key",
             Some("https://new.endpoint"), Some("gpt-4o"), true, Some("[\"gpt-4o\"]"), Some("My OpenAI"),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(updated.api_key_encrypted, "new_key");
         assert_eq!(updated.endpoint_url.as_deref(), Some("https://new.endpoint"));
         assert_eq!(updated.model_name.as_deref(), Some("gpt-4o"));
         assert!(updated.is_default);
-        let all = list_providers(&pool, &user_id).await;
+        let all = list_providers(&pool, &user_id).await.unwrap();
         assert_eq!(all.len(), 1);
     }
 
     #[tokio::test]
     async fn test_list_providers() {
         let (pool, user_id) = setup().await;
-        upsert_provider(&pool, None, &user_id, "openai", "k1", None, None, false, None, Some("openai")).await;
-        upsert_provider(&pool, None, &user_id, "anthropic", "k2", None, None, false, None, Some("anthropic")).await;
-        let all = list_providers(&pool, &user_id).await;
+        upsert_provider(&pool, None, &user_id, "openai", "k1", None, None, false, None, Some("openai")).await.unwrap();
+        upsert_provider(&pool, None, &user_id, "anthropic", "k2", None, None, false, None, Some("anthropic")).await.unwrap();
+        let all = list_providers(&pool, &user_id).await.unwrap();
         assert_eq!(all.len(), 2);
     }
 
     #[tokio::test]
     async fn test_get_provider() {
         let (pool, user_id) = setup().await;
-        upsert_provider(&pool, None, &user_id, "anthropic", "k1", None, None, false, None, Some("anthropic")).await;
-        let fetched = get_provider(&pool, &user_id, "anthropic").await;
+        upsert_provider(&pool, None, &user_id, "anthropic", "k1", None, None, false, None, Some("anthropic")).await.unwrap();
+        let fetched = get_provider(&pool, &user_id, "anthropic").await.unwrap();
         assert!(fetched.is_some());
         assert_eq!(fetched.unwrap().provider, "anthropic");
-        let missing = get_provider(&pool, &user_id, "google").await;
+        let missing = get_provider(&pool, &user_id, "google").await.unwrap();
         assert!(missing.is_none());
     }
 
     #[tokio::test]
     async fn test_get_default_provider() {
         let (pool, user_id) = setup().await;
-        upsert_provider(&pool, None, &user_id, "openai", "k1", None, None, false, None, Some("openai")).await;
-        upsert_provider(&pool, None, &user_id, "anthropic", "k2", None, None, true, None, Some("anthropic")).await;
-        let default = get_default_provider(&pool, &user_id).await;
+        upsert_provider(&pool, None, &user_id, "openai", "k1", None, None, false, None, Some("openai")).await.unwrap();
+        upsert_provider(&pool, None, &user_id, "anthropic", "k2", None, None, true, None, Some("anthropic")).await.unwrap();
+        let default = get_default_provider(&pool, &user_id).await.unwrap();
         assert!(default.is_some());
         assert_eq!(default.unwrap().provider, "anthropic");
     }
@@ -243,10 +240,10 @@ mod tests {
     #[tokio::test]
     async fn test_delete_provider() {
         let (pool, user_id) = setup().await;
-        upsert_provider(&pool, None, &user_id, "openai", "k1", None, None, false, None, Some("openai")).await;
-        let deleted = delete_provider(&pool, &user_id, "openai").await;
+        upsert_provider(&pool, None, &user_id, "openai", "k1", None, None, false, None, Some("openai")).await.unwrap();
+        let deleted = delete_provider(&pool, &user_id, "openai").await.unwrap();
         assert!(deleted);
-        let deleted_again = delete_provider(&pool, &user_id, "openai").await;
+        let deleted_again = delete_provider(&pool, &user_id, "openai").await.unwrap();
         assert!(!deleted_again);
     }
 }
