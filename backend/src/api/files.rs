@@ -217,7 +217,7 @@ async fn download_file(
                 format!("attachment; filename=\"{}\"", filename),
             )
             .body(body)
-            .unwrap())
+            .map_err(|e| AppError::Internal(e.to_string()))?)
     } else if file_path.is_dir() {
         // Directory: proxy to dufs fileserver for zip download
         download_dir_zip(&state.config, &conversation_id, &requested, &file_path).await
@@ -263,7 +263,7 @@ async fn download_dir_zip(
             format!("attachment; filename=\"{}.zip\"", dir_name),
         )
         .body(body)
-        .unwrap())
+        .map_err(|e| AppError::Internal(e.to_string()))?)
 }
 
 #[derive(Deserialize)]
@@ -287,40 +287,50 @@ async fn download_batch(
 
     let workspace_root = PathBuf::from(format!("data/conversations/{}", conversation_id));
 
-    let buf = Cursor::new(Vec::new());
-    let mut zip = zip::ZipWriter::new(buf);
-    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-
+    // Resolve all paths first (canonicalize is cheap for a few paths)
+    let mut resolved_paths = Vec::new();
     for path_str in &req.paths {
         let resolved = resolve_safe_path(&workspace_root, path_str)
             .ok_or_else(|| AppError::Forbidden("Path traversal denied".into()))?;
-        let name_prefix = path_str.trim_start_matches('/');
-
-        if resolved.is_file() {
-            let data = tokio::fs::read(&resolved)
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            zip.start_file(name_prefix, options)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            zip.write_all(&data)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-        } else if resolved.is_dir() {
-            add_dir_to_zip(&mut zip, &resolved, name_prefix, options)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-        }
+        let name_prefix = path_str.trim_start_matches('/').to_string();
+        resolved_paths.push((resolved, name_prefix));
     }
 
-    let cursor = zip.finish().map_err(|e| AppError::Internal(e.to_string()))?;
-    let bytes = cursor.into_inner();
+    // Build zip in a blocking task to avoid blocking the async executor
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let buf = Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(buf);
+        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    Ok(Response::builder()
+        for (resolved, name_prefix) in &resolved_paths {
+            if resolved.is_file() {
+                let data = std::fs::read(resolved)
+                    .map_err(|e| e.to_string())?;
+                zip.start_file(name_prefix.as_str(), options)
+                    .map_err(|e| e.to_string())?;
+                zip.write_all(&data)
+                    .map_err(|e| e.to_string())?;
+            } else if resolved.is_dir() {
+                add_dir_to_zip(&mut zip, resolved, name_prefix, options)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        let cursor = zip.finish().map_err(|e| e.to_string())?;
+        Ok(cursor.into_inner())
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?
+    .map_err(AppError::Internal)?;
+
+    Response::builder()
         .header(header::CONTENT_TYPE, "application/zip")
         .header(
             header::CONTENT_DISPOSITION,
             "attachment; filename=\"download.zip\"",
         )
         .body(Body::from(bytes))
-        .unwrap())
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 fn add_dir_to_zip(

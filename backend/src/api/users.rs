@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use validator::Validate;
 
 use crate::auth::middleware::{AppState, AuthUser};
 use crate::crypto;
@@ -82,9 +83,21 @@ async fn list_providers(
     ))
 }
 
-#[derive(Deserialize)]
+fn validate_provider_type(provider_type: &str) -> Result<(), validator::ValidationError> {
+    const VALID_PROVIDERS: &[&str] = &["openai", "anthropic", "google", "mistral"];
+    if VALID_PROVIDERS.contains(&provider_type) {
+        Ok(())
+    } else {
+        Err(validator::ValidationError::new("invalid_provider_type")
+            .with_message("Invalid provider type".into()))
+    }
+}
+
+#[derive(Deserialize, Validate)]
 pub struct UpsertProviderRequest {
+    #[validate(length(min = 1, message = "Name is required"))]
     pub name: String,
+    #[validate(custom(function = "validate_provider_type"))]
     pub provider_type: String,
     pub api_key: String,
     pub endpoint_url: Option<String>,
@@ -97,14 +110,7 @@ async fn upsert_provider(
     auth: AuthUser,
     Json(req): Json<UpsertProviderRequest>,
 ) -> Result<Json<ProviderResponse>, AppError> {
-    let valid_providers = ["openai", "anthropic", "google", "mistral"];
-    if !valid_providers.contains(&req.provider_type.as_str()) {
-        return Err(AppError::BadRequest("Invalid provider type".into()));
-    }
-
-    if req.name.trim().is_empty() {
-        return Err(AppError::BadRequest("Name is required".into()));
-    }
+    req.validate().map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     // If editing and keeping existing key, look up the existing encrypted key
     let encrypted_key = if req.api_key == "__KEEP_EXISTING__" {
@@ -117,11 +123,10 @@ async fn upsert_provider(
             None => return Err(AppError::BadRequest("API key is required for new providers".into())),
         }
     } else {
-        crypto::encrypt(&req.api_key, &state.config.encryption_key)
-            .map_err(AppError::Internal)?
+        crypto::encrypt(&req.api_key, &state.config.encryption_key)?
     };
 
-    let models_json = req.models.as_ref().map(|m| serde_json::to_string(m).unwrap());
+    let models_json = req.models.as_ref().and_then(|m| serde_json::to_string(m).ok());
     let first_model = req.models.as_ref().and_then(|m| m.first().cloned());
 
     let id = uuid::Uuid::new_v4().to_string();

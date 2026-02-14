@@ -2,15 +2,23 @@ use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use rand::rngs::OsRng;
 
+#[derive(Debug, thiserror::Error)]
+pub enum PasswordError {
+    #[error("failed to hash password: {0}")]
+    Hash(String),
+    #[error("invalid password hash: {0}")]
+    InvalidHash(String),
+}
+
 /// Hash a plaintext password with Argon2id and a random salt.
 ///
 /// Returns the PHC-formatted hash string (contains algorithm, salt, and hash).
-pub fn hash_password(password: &str) -> Result<String, String> {
+pub fn hash_password(password: &str) -> Result<String, PasswordError> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
     let hash = argon2
         .hash_password(password.as_bytes(), &salt)
-        .map_err(|e| format!("failed to hash password: {e}"))?;
+        .map_err(|e| PasswordError::Hash(e.to_string()))?;
     Ok(hash.to_string())
 }
 
@@ -18,12 +26,18 @@ pub fn hash_password(password: &str) -> Result<String, String> {
 ///
 /// Returns `Ok(true)` if the password matches, `Ok(false)` if it does not,
 /// or `Err` if the stored hash is malformed.
-pub fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
+pub fn verify_password(password: &str, hash: &str) -> Result<bool, PasswordError> {
     let parsed_hash = PasswordHash::new(hash)
-        .map_err(|e| format!("invalid password hash: {e}"))?;
+        .map_err(|e| PasswordError::InvalidHash(e.to_string()))?;
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
         .is_ok())
+}
+
+impl From<PasswordError> for crate::error::AppError {
+    fn from(e: PasswordError) -> Self {
+        crate::error::AppError::Internal(e.to_string())
+    }
 }
 
 #[cfg(test)]

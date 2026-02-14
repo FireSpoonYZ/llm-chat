@@ -80,12 +80,8 @@ def _events_by_type(events: list[StreamEvent], t: str) -> list[StreamEvent]:
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures (workspace provided by conftest.py)
 # ---------------------------------------------------------------------------
-
-@pytest.fixture
-def workspace(tmp_path):
-    return str(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -300,19 +296,27 @@ class TestCodeInterpreterToolIntegration:
 
 class TestWebSearchToolIntegration:
     @patch("src.agent.create_chat_model")
+    @patch("src.tools.web.httpx_sse.aconnect_sse")
     @patch("src.tools.web.httpx.AsyncClient")
-    async def test_web_search(self, mock_client_cls, mock_create, workspace):
-        # Mock httpx SSE response from Exa MCP
-        sse_body = (
-            'event: message\n'
-            'data: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Latest news results"}]}}\n\n'
-        )
-        mock_response = MagicMock()
-        mock_response.text = sse_body
-        mock_response.raise_for_status = MagicMock()
+    async def test_web_search(self, mock_client_cls, mock_aconnect, mock_create, workspace):
+        # Mock SSE event
+        mock_event = MagicMock()
+        mock_event.data = json.dumps({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"content": [{"type": "text", "text": "Latest news results"}]},
+        })
+
+        mock_event_source = MagicMock()
+        async def _aiter():
+            yield mock_event
+        mock_event_source.aiter_sse = _aiter
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_event_source)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_aconnect.return_value = mock_ctx
 
         mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client_cls.return_value = mock_client

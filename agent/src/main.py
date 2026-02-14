@@ -10,6 +10,12 @@ import signal
 import sys
 
 import websockets
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from .agent import AgentConfig, ChatAgent
 from .mcp.manager import McpManager
@@ -22,7 +28,6 @@ BACKEND_WS_URL = os.environ.get(
     "BACKEND_WS_URL", "ws://host.docker.internal:3001/internal/ws"
 )
 CONTAINER_TOKEN = os.environ.get("CONTAINER_TOKEN", "")
-RECONNECT_DELAY = 3
 MAX_RECONNECT_ATTEMPTS = 5
 
 
@@ -132,7 +137,8 @@ class AgentSession:
 
     async def _run_agent(self, content: str, deep_thinking: bool = False) -> None:
         """Stream agent response back through WebSocket."""
-        assert self.agent is not None
+        if self.agent is None:
+            raise RuntimeError("Agent not initialized before _run_agent")
         try:
             async for event in self.agent.handle_message(content, deep_thinking):
                 await self.ws.send(event.to_json())
@@ -192,34 +198,24 @@ async def main() -> None:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, session.shutdown)
 
-    attempts = 0
-    while attempts < MAX_RECONNECT_ATTEMPTS:
-        try:
-            await session.run()
-            break  # Clean exit
-        except websockets.ConnectionClosedError as exc:
-            attempts += 1
-            logger.warning(
-                "Connection closed (attempt %d/%d): %s",
-                attempts, MAX_RECONNECT_ATTEMPTS, exc,
-            )
-            if attempts < MAX_RECONNECT_ATTEMPTS:
-                await asyncio.sleep(RECONNECT_DELAY)
-        except ConnectionRefusedError:
-            attempts += 1
-            logger.warning(
-                "Connection refused (attempt %d/%d)",
-                attempts, MAX_RECONNECT_ATTEMPTS,
-            )
-            if attempts < MAX_RECONNECT_ATTEMPTS:
-                await asyncio.sleep(RECONNECT_DELAY)
-        except asyncio.CancelledError:
-            logger.info("Shutting down")
-            break
+    @retry(
+        retry=retry_if_exception_type(
+            (websockets.ConnectionClosedError, ConnectionRefusedError)
+        ),
+        stop=stop_after_attempt(MAX_RECONNECT_ATTEMPTS),
+        wait=wait_exponential(multiplier=1, min=1, max=30),
+        reraise=True,
+    )
+    async def _connect_with_retry() -> None:
+        await session.run()
 
-    if attempts >= MAX_RECONNECT_ATTEMPTS:
+    try:
+        await _connect_with_retry()
+    except (websockets.ConnectionClosedError, ConnectionRefusedError):
         logger.error("Max reconnection attempts reached, exiting")
         sys.exit(1)
+    except asyncio.CancelledError:
+        logger.info("Shutting down")
 
 
 if __name__ == "__main__":

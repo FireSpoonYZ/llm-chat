@@ -59,6 +59,15 @@
             :icon="RefreshRight"
             @click="$emit('regenerate', message.id)"
           />
+          <el-button
+            v-if="message.role === 'assistant' && !isStreaming"
+            class="action-btn copy-btn"
+            text
+            size="small"
+            title="Copy message"
+            :icon="CopyDocument"
+            @click="copyMessage"
+          />
         </div>
       </template>
     </div>
@@ -67,12 +76,45 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { EditPen, RefreshRight } from '@element-plus/icons-vue'
+import { EditPen, RefreshRight, CopyDocument } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import MarkdownIt from 'markdown-it'
+import DOMPurify from 'dompurify'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
 import type { Message, ContentBlock } from '../types'
 import ToolCallDisplay from './ToolCallDisplay.vue'
+
+// Module-level singleton — shared across all ChatMessage instances
+const md = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: true,
+  highlight(str: string, lang: string) {
+    if (lang && hljs.getLanguage(lang)) {
+      try {
+        return hljs.highlight(str, { language: lang }).value
+      } catch {
+        // fall through
+      }
+    }
+    return ''
+  },
+})
+
+// Memoization cache for rendered markdown
+const renderCache = new Map<string, string>()
+
+function renderMarkdown(text: string): string {
+  const key = text || ''
+  const cached = renderCache.get(key)
+  if (cached !== undefined) return cached
+  const html = DOMPurify.sanitize(md.render(key))
+  // Cap cache size to prevent unbounded growth
+  if (renderCache.size > 500) renderCache.clear()
+  renderCache.set(key, html)
+  return html
+}
 
 const props = defineProps<{
   message: Message
@@ -95,30 +137,6 @@ const emit = defineEmits<{
 
 const isEditing = ref(false)
 const editContent = ref('')
-
-const md = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,
-  highlight(str: string, lang: string) {
-    if (lang && hljs.getLanguage(lang)) {
-      try {
-        return hljs.highlight(str, { language: lang }).value
-      } catch {
-        // fall through
-      }
-    }
-    return ''
-  },
-})
-
-const renderedContent = computed(() => {
-  return md.render(props.message.content || '')
-})
-
-function renderMarkdown(text: string): string {
-  return md.render(text || '')
-}
 
 const contentBlocks = computed<ContentBlock[]>(() => {
   if (props.streamingBlocks && props.streamingBlocks.length > 0) {
@@ -216,6 +234,19 @@ function saveEdit() {
 function cancelEdit() {
   isEditing.value = false
   editContent.value = ''
+}
+
+async function copyMessage() {
+  const text = contentBlocks.value
+    .filter((b): b is { type: 'text'; content: string } => b.type === 'text')
+    .map(b => b.content)
+    .join('\n\n')
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success({ message: 'Copied', duration: 1500 })
+  } catch {
+    ElMessage.error('Copy failed')
+  }
 }
 </script>
 

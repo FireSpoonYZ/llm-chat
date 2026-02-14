@@ -1,8 +1,10 @@
 use axum::{Router, routing::get};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
+use axum::http::HeaderValue;
 
 mod api;
 mod auth;
@@ -45,10 +47,21 @@ async fn main() {
         docker_manager: docker_manager.clone(),
     });
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = if let Some(ref origins) = config.cors_allowed_origins {
+        let allowed: Vec<HeaderValue> = origins
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(allowed)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    } else {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    };
 
     // Main API router (frontend-facing)
     let app = Router::new()
@@ -90,7 +103,7 @@ async fn main() {
 
     let dm = docker_manager.clone();
     tokio::select! {
-        r = axum::serve(main_listener, app)
+        r = axum::serve(main_listener, app.into_make_service_with_connect_info::<SocketAddr>())
             .with_graceful_shutdown(shutdown_signal) => {
             if let Err(e) = r { tracing::error!("Main server error: {e}"); }
         }

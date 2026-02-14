@@ -75,10 +75,10 @@
         <ChatInput @send="handleSend" :disabled="chatStore.isStreaming" :deep-thinking="deepThinking" @update:deep-thinking="toggleDeepThinking" />
         <div v-if="!chatStore.wsConnected" class="ws-status-bar ws-disconnected">
           <span class="ws-dot pulse"></span>
-          <span>连接中断，正在重连...</span>
+          <span>Connection lost, reconnecting...</span>
         </div>
         <div v-if="chatStore.sendFailed" class="ws-status-bar ws-send-failed">
-          <span>消息发送失败，请检查网络连接</span>
+          <span>Failed to send message. Please check your connection.</span>
         </div>
       </template>
       <template v-else>
@@ -170,12 +170,14 @@ const deepThinking = computed(() => currentConversation.value?.deep_thinking ?? 
 const presets = computed(() => settingsStore.presets)
 
 onMounted(async () => {
-  await chatStore.loadConversations()
-  await settingsStore.loadProviders()
+  await Promise.all([
+    chatStore.loadConversations(),
+    settingsStore.loadProviders(),
+    settingsStore.loadPresets(),
+  ])
   if (auth.accessToken) {
     chatStore.connectWs(auth.accessToken)
   }
-  await settingsStore.loadPresets()
   if (settingsStore.defaultPreset) {
     newChatPresetId.value = settingsStore.defaultPreset.id
     newChatPrompt.value = settingsStore.defaultPreset.content
@@ -196,24 +198,34 @@ function handlePresetSelect(presetId: string) {
 }
 
 async function handleCreateChat() {
-  const prompt = newChatPrompt.value.trim() || undefined
-  const defaultProvider = settingsStore.providers.find(p => p.is_default)
-  const provider = defaultProvider?.provider
-  const modelName = defaultProvider?.models[0]
-  const conv = await chatStore.createConversation(undefined, prompt, provider, modelName)
-  await chatStore.selectConversation(conv.id)
-  showNewChatDialog.value = false
-  if (settingsStore.defaultPreset) {
-    newChatPresetId.value = settingsStore.defaultPreset.id
-    newChatPrompt.value = settingsStore.defaultPreset.content
-  } else {
-    newChatPresetId.value = ''
-    newChatPrompt.value = ''
+  try {
+    const prompt = newChatPrompt.value.trim() || undefined
+    const defaultProvider = settingsStore.providers.find(p => p.is_default)
+    const provider = defaultProvider?.provider
+    const modelName = defaultProvider?.models[0]
+    const conv = await chatStore.createConversation(undefined, prompt, provider, modelName)
+    await chatStore.selectConversation(conv.id)
+    showNewChatDialog.value = false
+    if (settingsStore.defaultPreset) {
+      newChatPresetId.value = settingsStore.defaultPreset.id
+      newChatPrompt.value = settingsStore.defaultPreset.content
+    } else {
+      newChatPresetId.value = ''
+      newChatPrompt.value = ''
+    }
+  } catch (e) {
+    ElMessage.error('Failed to create chat')
+    console.error(e)
   }
 }
 
 async function handleSelectConversation(id: string) {
-  await chatStore.selectConversation(id)
+  try {
+    await chatStore.selectConversation(id)
+  } catch (e) {
+    ElMessage.error('Failed to load conversation')
+    console.error(e)
+  }
 }
 
 async function handleDeleteConversation(id: string) {

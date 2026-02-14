@@ -9,26 +9,7 @@ from typing import Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _resolve_path(file_path: str, workspace: str) -> Path:
-    """Return an absolute *Path* that is guaranteed to live under *workspace*.
-
-    Raises ``ValueError`` if the resolved path escapes the workspace.
-    """
-    ws = Path(workspace).resolve()
-    p = Path(file_path)
-    if not p.is_absolute():
-        p = ws / p
-    resolved = p.resolve()
-    if not str(resolved).startswith(str(ws)):
-        raise ValueError(
-            f"Access denied: {file_path!r} resolves outside the workspace."
-        )
-    return resolved
+from ._paths import resolve_workspace_path as _resolve_path
 
 
 # ---------------------------------------------------------------------------

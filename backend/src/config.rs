@@ -18,6 +18,15 @@ fn default_container_idle_timeout() -> u64 {
 fn default_internal_ws_port() -> u16 {
     3001
 }
+fn default_access_token_ttl() -> u64 {
+    7200
+}
+fn default_container_token_ttl() -> u64 {
+    3600
+}
+fn default_refresh_token_ttl_days() -> i64 {
+    30
+}
 
 #[derive(Clone, Deserialize)]
 pub struct Config {
@@ -38,6 +47,17 @@ pub struct Config {
     pub docker_network: Option<String>,
     pub host_data_dir: Option<String>,
     pub fileserver_url: Option<String>,
+    /// Comma-separated list of allowed CORS origins. If empty, allows all origins.
+    pub cors_allowed_origins: Option<String>,
+    /// Access token TTL in seconds (default: 7200 = 2 hours)
+    #[serde(default = "default_access_token_ttl")]
+    pub access_token_ttl_secs: u64,
+    /// Container token TTL in seconds (default: 3600 = 1 hour)
+    #[serde(default = "default_container_token_ttl")]
+    pub container_token_ttl_secs: u64,
+    /// Refresh token TTL in days (default: 30)
+    #[serde(default = "default_refresh_token_ttl_days")]
+    pub refresh_token_ttl_days: i64,
 }
 
 impl Config {

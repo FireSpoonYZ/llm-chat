@@ -23,7 +23,7 @@ class TestBasePrompt:
 
 class TestToolDescriptions:
     def test_all_tools_have_descriptions(self):
-        expected = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "code_interpreter"]
+        expected = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "code_interpreter"]
         for name in expected:
             assert name in TOOL_DESCRIPTIONS
 

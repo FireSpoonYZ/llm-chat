@@ -382,3 +382,243 @@ describe('chat store - sendMessage failure', () => {
     expect(store.sendFailed).toBe(true)
   })
 })
+
+describe('chat store - assistant_delta handler', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockWsInstances.length = 0
+  })
+
+  it('accumulates text into streaming blocks', () => {
+    const store = useChatStore()
+    store.connectWs('test-token')
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const handler = getWsHandler(mockWs, 'assistant_delta')!
+
+    handler({ type: 'assistant_delta', delta: 'Hello' })
+    handler({ type: 'assistant_delta', delta: ' world' })
+
+    expect(store.streamingBlocks).toHaveLength(1)
+    const block = store.streamingBlocks[0]
+    expect(block.type).toBe('text')
+    if (block.type === 'text') expect(block.content).toBe('Hello world')
+    expect(store.isStreaming).toBe(true)
+    expect(store.isWaiting).toBe(false)
+  })
+
+  it('creates new text block after non-text block', () => {
+    const store = useChatStore()
+    store.connectWs('test-token')
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const thinkHandler = getWsHandler(mockWs, 'thinking_delta')!
+    const deltaHandler = getWsHandler(mockWs, 'assistant_delta')!
+
+    thinkHandler({ type: 'thinking_delta', delta: 'thinking...' })
+    deltaHandler({ type: 'assistant_delta', delta: 'answer' })
+
+    expect(store.streamingBlocks).toHaveLength(2)
+    expect(store.streamingBlocks[0].type).toBe('thinking')
+    expect(store.streamingBlocks[1].type).toBe('text')
+    const textBlock = store.streamingBlocks[1]
+    if (textBlock.type === 'text') expect(textBlock.content).toBe('answer')
+  })
+})
+
+describe('chat store - thinking_delta handler', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockWsInstances.length = 0
+  })
+
+  it('accumulates thinking content', () => {
+    const store = useChatStore()
+    store.connectWs('test-token')
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const handler = getWsHandler(mockWs, 'thinking_delta')!
+
+    handler({ type: 'thinking_delta', delta: 'Let me ' })
+    handler({ type: 'thinking_delta', delta: 'think...' })
+
+    expect(store.streamingBlocks).toHaveLength(1)
+    const block = store.streamingBlocks[0]
+    expect(block.type).toBe('thinking')
+    if (block.type === 'thinking') expect(block.content).toBe('Let me think...')
+  })
+})
+
+describe('chat store - tool_call / tool_result handlers', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockWsInstances.length = 0
+  })
+
+  it('tool_call adds a tool_call block', () => {
+    const store = useChatStore()
+    store.connectWs('test-token')
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const handler = getWsHandler(mockWs, 'tool_call')!
+
+    handler({ type: 'tool_call', tool_call_id: 'tc-1', tool_name: 'search', tool_input: { q: 'test' } })
+
+    expect(store.streamingBlocks).toHaveLength(1)
+    const block = store.streamingBlocks[0]
+    expect(block.type).toBe('tool_call')
+    if (block.type === 'tool_call') {
+      expect(block.id).toBe('tc-1')
+      expect(block.name).toBe('search')
+      expect(block.isLoading).toBe(true)
+    }
+  })
+
+  it('tool_result matches by tool_call_id and updates the correct block', () => {
+    const store = useChatStore()
+    store.connectWs('test-token')
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const tcHandler = getWsHandler(mockWs, 'tool_call')!
+    const trHandler = getWsHandler(mockWs, 'tool_result')!
+
+    tcHandler({ type: 'tool_call', tool_call_id: 'tc-1', tool_name: 'search' })
+    tcHandler({ type: 'tool_call', tool_call_id: 'tc-2', tool_name: 'bash' })
+    trHandler({ type: 'tool_result', tool_call_id: 'tc-1', result: 'found it', is_error: false })
+
+    expect(store.streamingBlocks).toHaveLength(2)
+    const block1 = store.streamingBlocks[0]
+    const block2 = store.streamingBlocks[1]
+    if (block1.type === 'tool_call') {
+      expect(block1.result).toBe('found it')
+      expect(block1.isLoading).toBe(false)
+      expect(block1.isError).toBe(false)
+    }
+    if (block2.type === 'tool_call') {
+      expect(block2.result).toBeUndefined()
+      expect(block2.isLoading).toBe(true)
+    }
+  })
+})
+
+describe('chat store - error handler', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockWsInstances.length = 0
+  })
+
+  it('saves partial content as a message on error', () => {
+    const store = useChatStore()
+    store.connectWs('test-token')
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const deltaHandler = getWsHandler(mockWs, 'assistant_delta')!
+    const errorHandler = getWsHandler(mockWs, 'error')!
+
+    deltaHandler({ type: 'assistant_delta', delta: 'partial response' })
+    errorHandler({ type: 'error', message: 'timeout' })
+
+    expect(store.messages).toHaveLength(1)
+    expect(store.messages[0].content).toBe('partial response')
+    expect(store.isStreaming).toBe(false)
+  })
+
+  it('does not save message when no streaming content', () => {
+    const store = useChatStore()
+    store.connectWs('test-token')
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const errorHandler = getWsHandler(mockWs, 'error')!
+
+    errorHandler({ type: 'error', message: 'timeout' })
+
+    expect(store.messages).toHaveLength(0)
+    expect(store.isStreaming).toBe(false)
+  })
+})
+
+describe('chat store - sendMessage success path', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockWsInstances.length = 0
+  })
+
+  it('adds optimistic message and sets isWaiting', () => {
+    const store = useChatStore()
+    store.connectWs('test-token')
+    store.currentConversationId = 'conv-1'
+
+    store.sendMessage('Hello')
+
+    expect(store.messages).toHaveLength(1)
+    expect(store.messages[0].role).toBe('user')
+    expect(store.messages[0].content).toBe('Hello')
+    expect(store.messages[0].id).toMatch(/^pending-/)
+    expect(store.isWaiting).toBe(true)
+  })
+
+  it('does nothing without a current conversation', () => {
+    const store = useChatStore()
+    store.connectWs('test-token')
+    store.currentConversationId = null
+
+    store.sendMessage('Hello')
+
+    expect(store.messages).toHaveLength(0)
+  })
+})
+
+describe('chat store - selectConversation', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockWsInstances.length = 0
+    vi.clearAllMocks()
+  })
+
+  it('loads messages and sends WS join', async () => {
+    const mockMessages = [makeMessage({ id: 'msg-1' })]
+    vi.mocked(convApi.listMessages).mockResolvedValueOnce({ messages: mockMessages, total: 1 })
+
+    const store = useChatStore()
+    store.connectWs('test-token')
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+
+    await store.selectConversation('conv-1')
+
+    expect(store.currentConversationId).toBe('conv-1')
+    expect(store.messages).toEqual(mockMessages)
+    expect(store.totalMessages).toBe(1)
+    expect(mockWs.send).toHaveBeenCalledWith(
+      { type: 'join_conversation', conversation_id: 'conv-1' }
+    )
+  })
+})
+
+describe('chat store - deleteConversation', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('removes conversation from list', async () => {
+    vi.mocked(convApi.deleteConversation).mockResolvedValueOnce(undefined)
+    const store = useChatStore()
+    store.conversations = [
+      { id: 'conv-1', title: 'A', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '' },
+      { id: 'conv-2', title: 'B', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '' },
+    ]
+
+    await store.deleteConversation('conv-1')
+
+    expect(store.conversations).toHaveLength(1)
+    expect(store.conversations[0].id).toBe('conv-2')
+  })
+
+  it('clears current if deleted conversation is active', async () => {
+    vi.mocked(convApi.deleteConversation).mockResolvedValueOnce(undefined)
+    const store = useChatStore()
+    store.currentConversationId = 'conv-1'
+    store.messages = [makeMessage()]
+    store.conversations = [
+      { id: 'conv-1', title: 'A', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '' },
+    ]
+
+    await store.deleteConversation('conv-1')
+
+    expect(store.currentConversationId).toBeNull()
+    expect(store.messages).toHaveLength(0)
+  })
+})

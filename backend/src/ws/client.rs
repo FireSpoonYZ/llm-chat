@@ -60,7 +60,7 @@ async fn send_to_container_or_start(
                         serde_json::json!({
                             "type": "error",
                             "code": "container_start_failed",
-                            "message": format!("Failed to start container: {e}")
+                            "message": "Failed to start container. Please try again later."
                         })
                         .to_string(),
                     );
@@ -253,7 +253,7 @@ async fn handle_client_ws(
                 };
 
                 // Update content and delete subsequent messages
-                let all_msgs = db::messages::list_messages(&state.db, &conv_id, 1000, 0).await.unwrap_or_default();
+                let all_msgs = db::messages::list_messages(&state.db, &conv_id, super::WS_MAX_HISTORY_MESSAGES, 0).await.unwrap_or_default();
                 let keep_turns = all_msgs.iter()
                     .take_while(|m| m.id != msg.id)
                     .filter(|m| m.role == "user")
@@ -319,7 +319,7 @@ async fn handle_client_ws(
                 };
 
                 // Find the last user message before this assistant message
-                let all_msgs = db::messages::list_messages(&state.db, &conv_id, 1000, 0).await.unwrap_or_default();
+                let all_msgs = db::messages::list_messages(&state.db, &conv_id, super::WS_MAX_HISTORY_MESSAGES, 0).await.unwrap_or_default();
                 let msg_idx = all_msgs.iter().position(|m| m.id == msg.id);
                 let last_user_msg = msg_idx.and_then(|idx| {
                     all_msgs[..idx].iter().rev().find(|m| m.role == "user")

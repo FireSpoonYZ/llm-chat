@@ -80,11 +80,27 @@ export type ContentBlock =
   | { type: 'tool_call'; id: string; name: string; input?: Record<string, unknown>;
       result?: string; isError?: boolean; isLoading?: boolean }
 
-// WebSocket message types
+// WebSocket message — index-signature for backward compat with existing handlers
 export interface WsMessage {
   type: string
   [key: string]: unknown
 }
+
+// Discriminated union for type-safe WS message handling (use with type narrowing)
+export type WsMessageEvent =
+  | { type: 'ws_connected' }
+  | { type: 'ws_disconnected' }
+  | { type: 'auth_failed' }
+  | { type: 'message_saved'; message_id: string }
+  | { type: 'assistant_delta'; delta: string }
+  | { type: 'thinking_delta'; delta: string }
+  | { type: 'tool_call'; tool_call_id: string; tool_name: string; tool_input?: Record<string, unknown> }
+  | { type: 'tool_result'; tool_call_id: string; result: string; is_error: boolean }
+  | { type: 'complete'; message_id: string; content: string; tool_calls?: unknown[] }
+  | { type: 'error'; message: string }
+  | { type: 'container_status'; status: string; message?: string }
+  | { type: 'messages_truncated'; after_message_id: string; updated_content?: string }
+  | { type: 'pong' }
 
 export interface FileEntry {
   name: string

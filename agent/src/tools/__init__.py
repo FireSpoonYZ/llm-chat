@@ -1,5 +1,9 @@
 """Built-in tools for the Claude Chat agent."""
 
+from __future__ import annotations
+
+from langchain_core.tools import BaseTool
+
 from .bash import BashTool
 from .file_ops import ReadTool, WriteTool, EditTool
 from .search import GlobTool, GrepTool
@@ -19,7 +23,7 @@ ALL_TOOLS = [
 ]
 
 
-def create_all_tools(workspace: str = "/workspace"):
+def create_all_tools(workspace: str = "/workspace") -> list[BaseTool]:
     """Create instances of all built-in tools."""
     return [
         BashTool(workspace=workspace),

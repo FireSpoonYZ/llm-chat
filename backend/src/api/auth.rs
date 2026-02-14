@@ -6,6 +6,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer, key_extractor::SmartIpKeyExtractor};
+use validator::Validate;
 
 use crate::auth;
 use crate::auth::middleware::AppState;
@@ -14,17 +16,28 @@ use crate::db;
 use crate::error::AppError;
 
 pub fn router() -> Router<Arc<AppState>> {
+    let governor_conf = GovernorConfigBuilder::default()
+        .per_second(6)
+        .burst_size(10)
+        .key_extractor(SmartIpKeyExtractor)
+        .finish()
+        .unwrap();
+
     Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
         .route("/refresh", post(refresh))
         .route("/logout", post(logout))
+        .layer(GovernorLayer::new(governor_conf))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct RegisterRequest {
+    #[validate(length(min = 3, max = 50, message = "Username must be 3-50 characters"))]
     pub username: String,
+    #[validate(email(message = "Invalid email address"))]
     pub email: String,
+    #[validate(length(min = 8, message = "Password must be at least 8 characters"))]
     pub password: String,
 }
 
@@ -52,12 +65,7 @@ async fn register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<AuthResponse>, AppError> {
-    if req.username.len() < 3 || req.username.len() > 50 {
-        return Err(AppError::BadRequest("Username must be 3-50 characters".into()));
-    }
-    if req.password.len() < 8 {
-        return Err(AppError::BadRequest("Password must be at least 8 characters".into()));
-    }
+    req.validate().map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     if db::users::get_user_by_username(&state.db, &req.username).await?.is_some() {
         return Err(AppError::Conflict("Username already taken".into()));
@@ -66,16 +74,19 @@ async fn register(
         return Err(AppError::Conflict("Email already registered".into()));
     }
 
-    let password_hash = password::hash_password(&req.password)
-        .map_err(AppError::Internal)?;
+    let pw = req.password.clone();
+    let password_hash = tokio::task::spawn_blocking(move || password::hash_password(&pw))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .map_err(|e| AppError::from(e))?;
 
     let user = db::users::create_user(&state.db, &req.username, &req.email, &password_hash).await?;
 
-    let access_token = auth::create_access_token(&user.id, &user.username, user.is_admin, &state.config.jwt_secret)
+    let access_token = auth::create_access_token(&user.id, &user.username, user.is_admin, &state.config.jwt_secret, state.config.access_token_ttl_secs)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let (refresh_token, token_hash) = generate_refresh_token();
-    let expires_at = chrono::Utc::now() + chrono::Duration::days(30);
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(state.config.refresh_token_ttl_days);
     db::refresh_tokens::create_refresh_token(&state.db, &user.id, &token_hash, &expires_at.to_rfc3339()).await?;
 
     Ok(Json(AuthResponse {
@@ -103,18 +114,22 @@ async fn login(
     let user = db::users::get_user_by_username(&state.db, &req.username).await?
         .ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
 
-    let valid = password::verify_password(&req.password, &user.password_hash)
-        .map_err(AppError::Internal)?;
+    let pw = req.password.clone();
+    let hash = user.password_hash.clone();
+    let valid = tokio::task::spawn_blocking(move || password::verify_password(&pw, &hash))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .map_err(|e| AppError::from(e))?;
 
     if !valid {
         return Err(AppError::Unauthorized("Invalid credentials".into()));
     }
 
-    let access_token = auth::create_access_token(&user.id, &user.username, user.is_admin, &state.config.jwt_secret)
+    let access_token = auth::create_access_token(&user.id, &user.username, user.is_admin, &state.config.jwt_secret, state.config.access_token_ttl_secs)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let (refresh_token, token_hash) = generate_refresh_token();
-    let expires_at = chrono::Utc::now() + chrono::Duration::days(30);
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(state.config.refresh_token_ttl_days);
     db::refresh_tokens::create_refresh_token(&state.db, &user.id, &token_hash, &expires_at.to_rfc3339()).await?;
 
     Ok(Json(AuthResponse {
@@ -157,7 +172,7 @@ async fn refresh(
     let user = db::users::get_user_by_id(&state.db, &stored.user_id).await?
         .ok_or_else(|| AppError::Unauthorized("User not found".into()))?;
 
-    let access_token = auth::create_access_token(&user.id, &user.username, user.is_admin, &state.config.jwt_secret)
+    let access_token = auth::create_access_token(&user.id, &user.username, user.is_admin, &state.config.jwt_secret, state.config.access_token_ttl_secs)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let (new_refresh_token, new_token_hash) = generate_refresh_token();

@@ -23,10 +23,13 @@ from .prompts.assembler import assemble_system_prompt
 from .prompts.presets import get_preset
 from .providers import create_chat_model
 
+MAX_ITERATIONS = 25
+
 
 def _default_system_prompt() -> str:
     preset = get_preset("default")
-    assert preset is not None
+    if preset is None:
+        raise RuntimeError("Built-in 'default' preset is missing")
     return preset.content
 
 
@@ -164,7 +167,7 @@ class ChatAgent:
                         self.config.provider, getattr(llm, 'kwargs', {}))
 
         iteration = 0
-        while True:
+        while iteration < MAX_ITERATIONS:
             iteration += 1
             logger.info("Agent iteration %d", iteration)
             if self._cancelled:
@@ -278,7 +281,6 @@ class ChatAgent:
                 yield StreamEvent("complete", {
                     "content": total_content,
                     "tool_calls": all_content_blocks if has_rich_blocks else None,
-                    "token_usage": {"prompt": 0, "completion": 0},
                 })
                 return
 
@@ -332,6 +334,11 @@ class ChatAgent:
                     "isError": is_error,
                 })
 
+        # Exhausted MAX_ITERATIONS without a final response
+        yield StreamEvent("error", {
+            "code": "max_iterations",
+            "message": f"Agent exceeded maximum of {MAX_ITERATIONS} iterations",
+        })
 
     async def _execute_tool(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
         """Execute a tool by name and return (result, is_error)."""

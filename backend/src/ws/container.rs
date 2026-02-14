@@ -111,7 +111,7 @@ async fn handle_container_ws(
                         .unwrap_or("openai");
 
                     let messages =
-                        db::messages::list_messages(&state.db, &conversation_id, 50, 0).await.unwrap_or_default();
+                        db::messages::list_messages(&state.db, &conversation_id, super::CONTAINER_INIT_HISTORY_LIMIT, 0).await.unwrap_or_default();
 
                     // Check if last message is from user — it will be resent separately
                     let needs_resend = messages.last().map_or(false, |m| m.role == "user");

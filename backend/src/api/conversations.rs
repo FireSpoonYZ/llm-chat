@@ -81,7 +81,7 @@ async fn create_conversation(
 
     // Create workspace directory
     let workspace_dir = format!("data/conversations/{}", conv.id);
-    let _ = std::fs::create_dir_all(&workspace_dir);
+    let _ = tokio::fs::create_dir_all(&workspace_dir).await;
 
     Ok((StatusCode::CREATED, Json(conv.into())))
 }
@@ -153,7 +153,7 @@ async fn delete_conversation(
 ) -> Result<StatusCode, AppError> {
     if db::conversations::delete_conversation(&state.db, &id, &auth.user_id).await? {
         let workspace_dir = format!("data/conversations/{}", id);
-        let _ = std::fs::remove_dir_all(&workspace_dir);
+        let _ = tokio::fs::remove_dir_all(&workspace_dir).await;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(AppError::NotFound)

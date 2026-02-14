@@ -1,7 +1,6 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch",
       "WebFetch(domain:github.com)",
       "Bash(gh repo clone:*)",
       "WebFetch(domain:raw.githubusercontent.com)",
@@ -82,7 +81,14 @@
       "Bash(PATH=\"$HOME/.local/bin:$PATH\" uv add:*)",
       "Bash($HOME/.local/bin/uv add:*)",
       "Bash(/home/firespoon/.local/bin/uv add:*)",
-      "Bash(/home/firespoon/.local/bin/uv run python:*)"
+      "Bash(/home/firespoon/.local/bin/uv run python:*)",
+      "Bash(pnpm remove:*)",
+      "Bash(~/.local/bin/uv sync:*)",
+      "Bash(~/.local/bin/uv run python:*)",
+      "Bash(~/.local/bin/uv lock:*)",
+      "WebFetch(domain:stepci.com)",
+      "WebFetch(domain:testcontainers-python.readthedocs.io)",
+      "Bash(git diff:*)"
     ]
   }
 }

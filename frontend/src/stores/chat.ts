@@ -6,7 +6,10 @@ import { refreshAccessToken } from '../api/auth'
 import { WebSocketManager } from '../api/websocket'
 
 function generateUUID(): string {
-  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  // Fallback for non-secure contexts / older browsers
   return '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, c =>
     (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16)
   )

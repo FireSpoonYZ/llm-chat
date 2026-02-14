@@ -3,12 +3,18 @@ from __future__ import annotations
 import json
 from typing import Type
 
+import html2text
 import httpx
-from bs4 import BeautifulSoup
+import httpx_sse
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 EXA_MCP_URL = "https://mcp.exa.ai/mcp"
+
+_h2t = html2text.HTML2Text()
+_h2t.ignore_links = False
+_h2t.ignore_images = True
+_h2t.body_width = 0  # no wrapping
 
 
 class WebFetchInput(BaseModel):
@@ -57,11 +63,7 @@ class WebFetchTool(BaseTool):
         body = response.text
 
         if "html" in content_type.lower():
-            soup = BeautifulSoup(body, "html.parser")
-            # Remove script and style elements
-            for element in soup(["script", "style", "noscript"]):
-                element.decompose()
-            text = soup.get_text(separator="\n", strip=True)
+            text = _h2t.handle(body)
         else:
             text = body
 
@@ -118,31 +120,27 @@ class WebSearchTool(BaseTool):
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(25.0)) as client:
-                response = await client.post(
+                async with httpx_sse.aconnect_sse(
+                    client,
+                    "POST",
                     EXA_MCP_URL,
                     json=payload,
                     headers={
                         "accept": "application/json, text/event-stream",
                         "content-type": "application/json",
                     },
-                )
-                response.raise_for_status()
+                ) as event_source:
+                    async for event in event_source.aiter_sse():
+                        try:
+                            data = json.loads(event.data)
+                            content = data.get("result", {}).get("content") or []
+                            if content:
+                                return content[0].get("text", "")
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            continue
         except httpx.TimeoutException:
             return "Error: web search request timed out after 25 seconds."
         except httpx.HTTPError as exc:
             return f"Error: web search request failed: {exc}"
-
-        # Parse SSE response — look for data: lines containing JSON-RPC result
-        for line in response.text.split("\n"):
-            if line.startswith("data: "):
-                try:
-                    data = json.loads(line[6:])
-                    content = (
-                        data.get("result", {}).get("content") or []
-                    )
-                    if content:
-                        return content[0].get("text", "")
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
 
         return "No search results found. Please try a different query."

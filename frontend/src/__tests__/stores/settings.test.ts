@@ -101,3 +101,77 @@ describe('settings store - presets', () => {
     expect(presetsApi.listPresets).toHaveBeenCalled()
   })
 })
+
+import * as usersApi from '../../api/users'
+import type { ProviderConfig, McpServer } from '../../types'
+
+const mockProviders: ProviderConfig[] = [
+  {
+    id: 'prov-1',
+    name: 'OpenAI',
+    provider: 'openai',
+    endpoint_url: null,
+    models: ['gpt-4o'],
+    is_default: true,
+    has_api_key: true,
+  },
+  {
+    id: 'prov-2',
+    name: 'Anthropic',
+    provider: 'anthropic',
+    endpoint_url: null,
+    models: ['claude-3-opus'],
+    is_default: false,
+    has_api_key: true,
+  },
+]
+
+const mockMcpServers: McpServer[] = [
+  { id: 'mcp-1', name: 'Server A', description: 'Test server', transport: 'stdio', is_enabled: true },
+]
+
+describe('settings store - providers', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('should load providers from API', async () => {
+    vi.mocked(usersApi.listProviders).mockResolvedValueOnce(mockProviders)
+    const store = useSettingsStore()
+    await store.loadProviders()
+    expect(store.providers).toHaveLength(2)
+    expect(store.providers[0].name).toBe('OpenAI')
+  })
+
+  it('should call upsertProvider and reload on saveProvider', async () => {
+    vi.mocked(usersApi.listProviders).mockResolvedValue(mockProviders)
+    const store = useSettingsStore()
+    await store.saveProvider('Test', 'openai', 'sk-xxx', undefined, ['gpt-4o'], false)
+    expect(usersApi.upsertProvider).toHaveBeenCalledWith('Test', 'openai', 'sk-xxx', undefined, ['gpt-4o'], false)
+    expect(usersApi.listProviders).toHaveBeenCalled()
+  })
+
+  it('should call deleteProvider and reload on removeProvider', async () => {
+    vi.mocked(usersApi.listProviders).mockResolvedValue(mockProviders)
+    const store = useSettingsStore()
+    await store.removeProvider('OpenAI')
+    expect(usersApi.deleteProvider).toHaveBeenCalledWith('OpenAI')
+    expect(usersApi.listProviders).toHaveBeenCalled()
+  })
+})
+
+describe('settings store - MCP servers', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('should load MCP servers from API', async () => {
+    vi.mocked(usersApi.listMcpServers).mockResolvedValueOnce(mockMcpServers)
+    const store = useSettingsStore()
+    await store.loadMcpServers()
+    expect(store.mcpServers).toHaveLength(1)
+    expect(store.mcpServers[0].name).toBe('Server A')
+  })
+})

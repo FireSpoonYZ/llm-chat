@@ -33,7 +33,6 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
 import type { McpServer } from '../types'
 
 const props = defineProps<{

@@ -27,9 +27,14 @@ hex = "0.4"
 dotenvy = "0.15"
 envy = "0.4"
 tower = "0.5"
+tower_governor = "0.8"
 thiserror = "2"
+validator = { version = "0.19", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+http-body-util = "0.1"

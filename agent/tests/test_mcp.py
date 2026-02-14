@@ -166,16 +166,16 @@ class TestMcpManager:
             assert manager.connected_servers == []
             assert manager._client is None
 
-    async def test_shutdown_calls_aexit(self):
-        """Shutdown should call client.__aexit__ for cleanup."""
+    async def test_shutdown_calls_close_or_aexit(self):
+        """Shutdown should call client.close() if available, else __aexit__."""
         manager = McpManager()
         mock_client = MagicMock()
-        mock_client.__aexit__ = AsyncMock()
+        mock_client.close = AsyncMock()
         manager._client = mock_client
         manager._server_names = ["test"]
 
         await manager.shutdown()
-        mock_client.__aexit__.assert_awaited_once_with(None, None, None)
+        mock_client.close.assert_awaited_once()
         assert manager._client is None
 
     async def test_setup_replaces_previous_client(self):

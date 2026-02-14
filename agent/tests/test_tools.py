@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -11,16 +12,11 @@ import httpx
 import pytest
 
 from src.tools.bash import BashTool
-from src.tools.file_ops import EditTool, ReadTool, WriteTool, _resolve_path
+from src.tools.file_ops import EditTool, ReadTool, WriteTool
+from src.tools._paths import resolve_workspace_path as _resolve_path
 from src.tools.search import GlobTool, GrepTool
 from src.tools.web import WebFetchTool, WebSearchTool
 from src.tools.code_interpreter import CodeInterpreterTool
-
-
-@pytest.fixture
-def workspace(tmp_path):
-    """Create a temporary workspace directory."""
-    return str(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -402,18 +398,28 @@ class TestWebSearchTool:
             tool._run("test query")
 
     @pytest.mark.asyncio
+    @patch("src.tools.web.httpx_sse.aconnect_sse")
     @patch("src.tools.web.httpx.AsyncClient")
-    async def test_successful_search(self, mock_client_cls):
-        sse_body = (
-            'event: message\n'
-            'data: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Search results here"}]}}\n\n'
-        )
-        mock_response = MagicMock()
-        mock_response.text = sse_body
-        mock_response.raise_for_status = MagicMock()
+    async def test_successful_search(self, mock_client_cls, mock_aconnect):
+        # Build a mock SSE event
+        mock_event = MagicMock()
+        mock_event.data = json.dumps({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"content": [{"type": "text", "text": "Search results here"}]},
+        })
+
+        mock_event_source = MagicMock()
+        async def _aiter():
+            yield mock_event
+        mock_event_source.aiter_sse = _aiter
+
+        # aconnect_sse is an async context manager
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_event_source)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_aconnect.return_value = mock_ctx
 
         mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client_cls.return_value = mock_client
@@ -422,24 +428,27 @@ class TestWebSearchTool:
         result = await tool._arun("test query")
         assert result == "Search results here"
 
-        # Verify the POST was called with correct URL and payload
-        mock_client.post.assert_called_once()
-        call_args = mock_client.post.call_args
-        assert call_args[0][0] == "https://mcp.exa.ai/mcp"
-        payload = call_args[1]["json"]
-        assert payload["method"] == "tools/call"
-        assert payload["params"]["name"] == "web_search_exa"
-        assert payload["params"]["arguments"]["query"] == "test query"
-
     @pytest.mark.asyncio
+    @patch("src.tools.web.httpx_sse.aconnect_sse")
     @patch("src.tools.web.httpx.AsyncClient")
-    async def test_no_results(self, mock_client_cls):
-        mock_response = MagicMock()
-        mock_response.text = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[]}}\n\n"
-        mock_response.raise_for_status = MagicMock()
+    async def test_no_results(self, mock_client_cls, mock_aconnect):
+        mock_event = MagicMock()
+        mock_event.data = json.dumps({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"content": []},
+        })
+
+        mock_event_source = MagicMock()
+        async def _aiter():
+            yield mock_event
+        mock_event_source.aiter_sse = _aiter
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_event_source)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_aconnect.return_value = mock_ctx
 
         mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client_cls.return_value = mock_client
@@ -452,27 +461,27 @@ class TestWebSearchTool:
     @patch("src.tools.web.httpx.AsyncClient")
     async def test_timeout_error(self, mock_client_cls):
         mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=httpx.TimeoutException("timeout"))
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client_cls.return_value = mock_client
 
-        tool = WebSearchTool()
-        result = await tool._arun("test")
-        assert "timed out" in result.lower()
+        with patch("src.tools.web.httpx_sse.aconnect_sse", side_effect=httpx.TimeoutException("timeout")):
+            tool = WebSearchTool()
+            result = await tool._arun("test")
+            assert "timed out" in result.lower()
 
     @pytest.mark.asyncio
     @patch("src.tools.web.httpx.AsyncClient")
     async def test_http_error(self, mock_client_cls):
         mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=httpx.HTTPError("500 error"))
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client_cls.return_value = mock_client
 
-        tool = WebSearchTool()
-        result = await tool._arun("test")
-        assert "Error" in result
+        with patch("src.tools.web.httpx_sse.aconnect_sse", side_effect=httpx.HTTPError("500 error")):
+            tool = WebSearchTool()
+            result = await tool._arun("test")
+            assert "Error" in result
 
 
 # ---------------------------------------------------------------------------

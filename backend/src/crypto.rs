@@ -4,23 +4,35 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use rand::RngCore;
 
+#[derive(Debug, thiserror::Error)]
+pub enum CryptoError {
+    #[error("invalid hex key: {0}")]
+    InvalidHexKey(#[from] hex::FromHexError),
+    #[error("encryption key must be 32 bytes, got {0}")]
+    InvalidKeyLength(usize),
+    #[error("invalid base64: {0}")]
+    InvalidBase64(#[from] base64::DecodeError),
+    #[error("ciphertext too short to contain nonce")]
+    CiphertextTooShort,
+    #[error("cipher error: {0}")]
+    Cipher(String),
+    #[error("decrypted data is not valid UTF-8: {0}")]
+    InvalidUtf8(#[from] std::string::FromUtf8Error),
+}
+
 /// Encrypt a plaintext string using AES-256-GCM.
 ///
 /// `key_hex` must be a 64-character hex string representing 32 bytes.
 /// Returns a base64-encoded string containing the 12-byte nonce
 /// prepended to the ciphertext.
-pub fn encrypt(plaintext: &str, key_hex: &str) -> Result<String, String> {
-    let key_bytes = hex::decode(key_hex)
-        .map_err(|e| format!("invalid hex key: {e}"))?;
+pub fn encrypt(plaintext: &str, key_hex: &str) -> Result<String, CryptoError> {
+    let key_bytes = hex::decode(key_hex)?;
     if key_bytes.len() != 32 {
-        return Err(format!(
-            "encryption key must be 32 bytes, got {}",
-            key_bytes.len()
-        ));
+        return Err(CryptoError::InvalidKeyLength(key_bytes.len()));
     }
 
     let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-        .map_err(|e| format!("failed to create cipher: {e}"))?;
+        .map_err(|e| CryptoError::Cipher(e.to_string()))?;
 
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -28,7 +40,7 @@ pub fn encrypt(plaintext: &str, key_hex: &str) -> Result<String, String> {
 
     let ciphertext = cipher
         .encrypt(nonce, plaintext.as_bytes())
-        .map_err(|e| format!("encryption failed: {e}"))?;
+        .map_err(|e| CryptoError::Cipher(e.to_string()))?;
 
     // Prepend the nonce to the ciphertext, then base64-encode.
     let mut combined = Vec::with_capacity(12 + ciphertext.len());
@@ -42,35 +54,34 @@ pub fn encrypt(plaintext: &str, key_hex: &str) -> Result<String, String> {
 ///
 /// The first 12 bytes of the decoded payload are the nonce; the rest is
 /// the AES-256-GCM ciphertext (including the authentication tag).
-pub fn decrypt(encrypted: &str, key_hex: &str) -> Result<String, String> {
-    let key_bytes = hex::decode(key_hex)
-        .map_err(|e| format!("invalid hex key: {e}"))?;
+pub fn decrypt(encrypted: &str, key_hex: &str) -> Result<String, CryptoError> {
+    let key_bytes = hex::decode(key_hex)?;
     if key_bytes.len() != 32 {
-        return Err(format!(
-            "encryption key must be 32 bytes, got {}",
-            key_bytes.len()
-        ));
+        return Err(CryptoError::InvalidKeyLength(key_bytes.len()));
     }
 
-    let combined = BASE64
-        .decode(encrypted)
-        .map_err(|e| format!("invalid base64: {e}"))?;
+    let combined = BASE64.decode(encrypted)?;
     if combined.len() < 12 {
-        return Err("ciphertext too short to contain nonce".into());
+        return Err(CryptoError::CiphertextTooShort);
     }
 
     let (nonce_bytes, ciphertext) = combined.split_at(12);
     let nonce = Nonce::from_slice(nonce_bytes);
 
     let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-        .map_err(|e| format!("failed to create cipher: {e}"))?;
+        .map_err(|e| CryptoError::Cipher(e.to_string()))?;
 
     let plaintext_bytes = cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|e| format!("decryption failed: {e}"))?;
+        .map_err(|e| CryptoError::Cipher(e.to_string()))?;
 
-    String::from_utf8(plaintext_bytes)
-        .map_err(|e| format!("decrypted data is not valid UTF-8: {e}"))
+    Ok(String::from_utf8(plaintext_bytes)?)
+}
+
+impl From<CryptoError> for crate::error::AppError {
+    fn from(e: CryptoError) -> Self {
+        crate::error::AppError::Internal(e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -79,7 +90,6 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        // 32 bytes = 64 hex chars
         let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let plaintext = "sk-ant-api03-secret-key-value";
         let encrypted = encrypt(plaintext, key).unwrap();

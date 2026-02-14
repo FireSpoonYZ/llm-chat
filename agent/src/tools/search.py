@@ -9,6 +9,8 @@ from typing import Optional, Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from ._paths import resolve_workspace_path
+
 
 class GlobInput(BaseModel):
     """Input for the GlobTool."""
@@ -30,14 +32,7 @@ class GlobTool(BaseTool):
 
     def _resolve_and_validate(self, path: str) -> Path:
         """Resolve a path and ensure it is within the workspace."""
-        ws = Path(self.workspace).resolve()
-        if path:
-            resolved = (ws / path).resolve()
-        else:
-            resolved = ws
-        if not str(resolved).startswith(str(ws)):
-            raise ValueError(f"Path '{path}' is outside the workspace.")
-        return resolved
+        return resolve_workspace_path(path or ".", self.workspace)
 
     def _run(self, pattern: str, path: str = "") -> str:
         base = self._resolve_and_validate(path)

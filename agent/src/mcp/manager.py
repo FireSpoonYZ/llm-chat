@@ -104,7 +104,10 @@ class McpManager:
         """Disconnect all MCP servers."""
         if self._client is not None:
             try:
-                await self._client.__aexit__(None, None, None)
+                if hasattr(self._client, 'close'):
+                    await self._client.close()
+                else:
+                    await self._client.__aexit__(None, None, None)
             except Exception:
                 pass
             self._client = None

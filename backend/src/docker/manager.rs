@@ -12,6 +12,16 @@ use super::registry::ContainerRegistry;
 use crate::auth;
 use crate::config;
 
+#[derive(Debug, thiserror::Error)]
+pub enum DockerError {
+    #[error("failed to create container token: {0}")]
+    TokenCreation(#[from] jsonwebtoken::errors::Error),
+    #[error("Docker API error: {0}")]
+    Bollard(#[from] bollard::errors::Error),
+    #[error("{0}")]
+    Other(String),
+}
+
 pub struct DockerManager {
     docker: Docker,
     registry: Arc<ContainerRegistry>,
@@ -28,12 +38,25 @@ impl DockerManager {
         }
     }
 
+    /// Create a DockerManager for testing (does not panic if Docker socket is missing).
+    #[cfg(test)]
+    pub fn new_for_test(config: config::Config, registry: Arc<ContainerRegistry>) -> Self {
+        let docker = Docker::connect_with_local_defaults()
+            .or_else(|_| Docker::connect_with_defaults())
+            .expect("Failed to create Docker client for test");
+        Self {
+            docker,
+            registry,
+            config,
+        }
+    }
+
     /// Start a container for a conversation. Returns the container ID.
     pub async fn start_container(
         &self,
         conversation_id: &str,
         user_id: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, DockerError> {
         // Check if already running
         if let Some(info) = self.registry.get(conversation_id).await {
             self.registry.touch(conversation_id).await;
@@ -42,8 +65,7 @@ impl DockerManager {
 
         // Generate container token
         let container_token =
-            auth::create_container_token(conversation_id, user_id, &self.config.jwt_secret)
-                .map_err(|e| format!("Failed to create container token: {e}"))?;
+            auth::create_container_token(conversation_id, user_id, &self.config.jwt_secret, self.config.container_token_ttl_secs)?;
 
         let backend_ws_url = if self.config.docker_network.is_some() {
             format!(
@@ -58,12 +80,13 @@ impl DockerManager {
         };
 
         let container_data_path = format!("data/conversations/{conversation_id}");
-        std::fs::create_dir_all(&container_data_path).ok();
+        tokio::fs::create_dir_all(&container_data_path).await.ok();
 
         let workspace_host_path = if let Some(ref host_dir) = self.config.host_data_dir {
             format!("{}/conversations/{}", host_dir, conversation_id)
         } else {
-            std::fs::canonicalize(&container_data_path)
+            tokio::fs::canonicalize(&container_data_path)
+                .await
                 .unwrap_or_else(|_| std::path::PathBuf::from(&container_data_path))
                 .to_string_lossy()
                 .to_string()
@@ -125,16 +148,14 @@ impl DockerManager {
                 }),
                 container_config,
             )
-            .await
-            .map_err(|e| format!("Failed to create container: {e}"))?;
+            .await?;
 
         let container_id = create_result.id;
 
         // Start container
         self.docker
             .start_container(&container_id, None::<StartContainerOptions<String>>)
-            .await
-            .map_err(|e| format!("Failed to start container: {e}"))?;
+            .await?;
 
         // Register in registry
         self.registry
@@ -151,12 +172,12 @@ impl DockerManager {
     }
 
     /// Stop and remove a container for a conversation.
-    pub async fn stop_container(&self, conversation_id: &str) -> Result<(), String> {
+    pub async fn stop_container(&self, conversation_id: &str) -> Result<(), DockerError> {
         let info = self
             .registry
             .unregister(conversation_id)
             .await
-            .ok_or_else(|| "Container not found in registry".to_string())?;
+            .ok_or_else(|| DockerError::Other("Container not found in registry".into()))?;
 
         // Stop container
         let _ = self

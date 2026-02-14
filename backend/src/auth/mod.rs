@@ -31,23 +31,22 @@ pub struct ContainerClaims {
     pub exp: usize,
     /// Issued-at time as a UTC Unix timestamp.
     pub iat: usize,
-    /// Whether this token may only be used once.
-    pub single_use: bool,
 }
 
-/// Create an access token (2 hours) for a user.
+/// Create an access token for a user with the given TTL in seconds.
 pub fn create_access_token(
     user_id: &str,
     username: &str,
     is_admin: bool,
     secret: &str,
+    ttl_secs: u64,
 ) -> Result<String, jsonwebtoken::errors::Error> {
     let now = Utc::now().timestamp() as usize;
     let claims = Claims {
         sub: user_id.to_owned(),
         username: username.to_owned(),
         is_admin,
-        exp: now + 2 * 60 * 60, // 2 hours
+        exp: now + ttl_secs as usize,
         iat: now,
     };
     encode(
@@ -57,19 +56,19 @@ pub fn create_access_token(
     )
 }
 
-/// Create a container token (1 hour) scoped to a single conversation.
+/// Create a container token scoped to a single conversation with the given TTL in seconds.
 pub fn create_container_token(
     conversation_id: &str,
     user_id: &str,
     secret: &str,
+    ttl_secs: u64,
 ) -> Result<String, jsonwebtoken::errors::Error> {
     let now = Utc::now().timestamp() as usize;
     let claims = ContainerClaims {
         sub: conversation_id.to_owned(),
         user_id: user_id.to_owned(),
-        exp: now + 60 * 60, // 1 hour
+        exp: now + ttl_secs as usize,
         iat: now,
-        single_use: false,
     };
     encode(
         &Header::default(),
@@ -112,7 +111,7 @@ mod tests {
 
     #[test]
     fn access_token_round_trip() {
-        let token = create_access_token("user-1", "alice", false, SECRET).unwrap();
+        let token = create_access_token("user-1", "alice", false, SECRET, 7200).unwrap();
         let claims = verify_access_token(&token, SECRET).unwrap();
         assert_eq!(claims.sub, "user-1");
         assert_eq!(claims.username, "alice");
@@ -121,23 +120,22 @@ mod tests {
 
     #[test]
     fn admin_flag_preserved() {
-        let token = create_access_token("user-2", "bob", true, SECRET).unwrap();
+        let token = create_access_token("user-2", "bob", true, SECRET, 7200).unwrap();
         let claims = verify_access_token(&token, SECRET).unwrap();
         assert!(claims.is_admin);
     }
 
     #[test]
     fn container_token_round_trip() {
-        let token = create_container_token("conv-1", "user-1", SECRET).unwrap();
+        let token = create_container_token("conv-1", "user-1", SECRET, 3600).unwrap();
         let claims = verify_container_token(&token, SECRET).unwrap();
         assert_eq!(claims.sub, "conv-1");
         assert_eq!(claims.user_id, "user-1");
-        assert!(!claims.single_use);
     }
 
     #[test]
     fn wrong_secret_fails() {
-        let token = create_access_token("user-1", "alice", false, SECRET).unwrap();
+        let token = create_access_token("user-1", "alice", false, SECRET, 7200).unwrap();
         assert!(verify_access_token(&token, "wrong-secret").is_err());
     }
 }

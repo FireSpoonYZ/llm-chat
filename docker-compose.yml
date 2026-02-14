@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
+      network: host
     ports:
       - "${PORT:-3000}:3000"
       - "${INTERNAL_WS_PORT:-3001}:3001"
@@ -23,6 +24,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.frontend
+      network: host
     ports:
       - "${FRONTEND_PORT:-80}:80"
     depends_on:
@@ -40,5 +42,6 @@ services:
     build:
       context: ./agent
       dockerfile: ../docker/Dockerfile.agent
+      network: host
     image: claude-chat-agent:latest
     entrypoint: ["echo", "Agent image built"]

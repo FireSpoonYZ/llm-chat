@@ -6,6 +6,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
+/// Maximum number of messages to fetch for WS history operations.
+pub const WS_MAX_HISTORY_MESSAGES: i64 = 1000;
+/// Number of recent messages to send to a container on init.
+pub const CONTAINER_INIT_HISTORY_LIMIT: i64 = 50;
+
 pub type WsSender = mpsc::UnboundedSender<String>;
 
 #[derive(Default)]
@@ -180,5 +185,45 @@ mod tests {
         state.remove_client("user1", "conv1").await;
         state.send_to_client("user1", "conv2", "msg3").await;
         assert_eq!(rx2.recv().await.unwrap(), "msg3");
+    }
+
+    #[tokio::test]
+    async fn test_set_and_take_pending_message() {
+        let state = WsState::new();
+
+        // No pending message initially
+        assert!(state.take_pending_message("conv1").await.is_none());
+
+        // Set a pending message
+        state.set_pending_message("conv1", "init msg".to_string()).await;
+
+        // Take it — should return the message
+        let msg = state.take_pending_message("conv1").await;
+        assert_eq!(msg.as_deref(), Some("init msg"));
+
+        // Take again — should be gone
+        assert!(state.take_pending_message("conv1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pending_message_overwrite() {
+        let state = WsState::new();
+
+        state.set_pending_message("conv1", "first".to_string()).await;
+        state.set_pending_message("conv1", "second".to_string()).await;
+
+        let msg = state.take_pending_message("conv1").await;
+        assert_eq!(msg.as_deref(), Some("second"));
+    }
+
+    #[tokio::test]
+    async fn test_pending_messages_isolated_by_conversation() {
+        let state = WsState::new();
+
+        state.set_pending_message("conv1", "msg1".to_string()).await;
+        state.set_pending_message("conv2", "msg2".to_string()).await;
+
+        assert_eq!(state.take_pending_message("conv1").await.as_deref(), Some("msg1"));
+        assert_eq!(state.take_pending_message("conv2").await.as_deref(), Some("msg2"));
     }
 }

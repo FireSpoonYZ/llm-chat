@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use validator::Validate;
 
 use crate::auth::middleware::{AdminOnly, AppState};
 use crate::db;
@@ -56,10 +57,21 @@ async fn list_mcp_servers(
     Ok(Json(servers.into_iter().map(Into::into).collect()))
 }
 
-#[derive(Deserialize)]
+fn validate_transport(transport: &str) -> Result<(), validator::ValidationError> {
+    if transport == "stdio" || transport == "sse" {
+        Ok(())
+    } else {
+        Err(validator::ValidationError::new("invalid_transport")
+            .with_message("Transport must be 'stdio' or 'sse'".into()))
+    }
+}
+
+#[derive(Deserialize, Validate)]
 pub struct CreateMcpServerRequest {
+    #[validate(length(min = 1, message = "Name is required"))]
     pub name: String,
     pub description: Option<String>,
+    #[validate(custom(function = "validate_transport"))]
     pub transport: String,
     pub command: Option<String>,
     pub args: Option<String>,
@@ -72,9 +84,7 @@ async fn create_mcp_server(
     _admin: AdminOnly,
     Json(req): Json<CreateMcpServerRequest>,
 ) -> Result<(StatusCode, Json<McpServerDetailResponse>), AppError> {
-    if req.transport != "stdio" && req.transport != "sse" {
-        return Err(AppError::BadRequest("Transport must be 'stdio' or 'sse'".into()));
-    }
+    req.validate().map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     let server = db::mcp_servers::create_mcp_server(
         &state.db,
