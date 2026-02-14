@@ -18,6 +18,8 @@ dependencies = [
     "html2text>=2024.2",
     "tenacity>=9.0",
     "beautifulsoup4>=4.12",
+    "openai>=1.66",
+    "google-genai>=1.0",
 ]
 
 [dependency-groups]

@@ -112,6 +112,7 @@ const mockProviders: ProviderConfig[] = [
     provider: 'openai',
     endpoint_url: null,
     models: ['gpt-4o'],
+    image_models: [],
     is_default: true,
     has_api_key: true,
   },
@@ -121,6 +122,7 @@ const mockProviders: ProviderConfig[] = [
     provider: 'anthropic',
     endpoint_url: null,
     models: ['claude-3-opus'],
+    image_models: [],
     is_default: false,
     has_api_key: true,
   },
@@ -147,8 +149,8 @@ describe('settings store - providers', () => {
   it('should call upsertProvider and reload on saveProvider', async () => {
     vi.mocked(usersApi.listProviders).mockResolvedValue(mockProviders)
     const store = useSettingsStore()
-    await store.saveProvider('Test', 'openai', 'sk-xxx', undefined, ['gpt-4o'], false)
-    expect(usersApi.upsertProvider).toHaveBeenCalledWith('Test', 'openai', 'sk-xxx', undefined, ['gpt-4o'], false)
+    await store.saveProvider('Test', 'openai', 'sk-xxx', undefined, ['gpt-4o'], false, [])
+    expect(usersApi.upsertProvider).toHaveBeenCalledWith('Test', 'openai', 'sk-xxx', undefined, ['gpt-4o'], false, [])
     expect(usersApi.listProviders).toHaveBeenCalled()
   })
 

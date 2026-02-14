@@ -11,13 +11,14 @@ export async function listProviders(): Promise<ProviderConfig[]> {
   return data
 }
 
-export async function upsertProvider(name: string, providerType: string, apiKey: string, endpointUrl?: string, models: string[] = [], isDefault = false): Promise<ProviderConfig> {
+export async function upsertProvider(name: string, providerType: string, apiKey: string, endpointUrl?: string, models: string[] = [], isDefault = false, imageModels: string[] = []): Promise<ProviderConfig> {
   const { data } = await client.post<ProviderConfig>('/users/me/providers', {
     name,
     provider_type: providerType,
     api_key: apiKey,
     endpoint_url: endpointUrl || null,
     models,
+    image_models: imageModels,
     is_default: isDefault,
   })
   return data

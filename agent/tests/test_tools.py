@@ -14,7 +14,7 @@ import pytest
 from src.tools.bash import BashTool
 from src.tools.file_ops import EditTool, ReadTool, WriteTool
 from src.tools._paths import resolve_workspace_path as _resolve_path
-from src.tools.search import GlobTool, GrepTool
+from src.tools.search import GlobTool, GrepTool, _expand_braces
 from src.tools.web import WebFetchTool, WebSearchTool
 from src.tools.code_interpreter import CodeInterpreterTool
 
@@ -135,6 +135,157 @@ class TestReadTool:
         tool = ReadTool(workspace=workspace)
         result = await tool._arun("test.txt")
         assert "async content" in result
+
+    def test_read_image_png(self, workspace):
+        path = os.path.join(workspace, "photo.png")
+        with open(path, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("photo.png")
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["type"] == "text"
+        assert "photo.png" in result[0]["text"]
+        assert result[1]["type"] == "image_url"
+        assert result[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_read_image_jpg(self, workspace):
+        path = os.path.join(workspace, "photo.jpg")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xd8\xff" + b"\x00" * 100)
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("photo.jpg")
+        assert isinstance(result, list)
+        assert result[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+    def test_read_image_webp(self, workspace):
+        path = os.path.join(workspace, "photo.webp")
+        with open(path, "wb") as f:
+            f.write(b"RIFF" + b"\x00" * 100)
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("photo.webp")
+        assert isinstance(result, list)
+        assert result[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+
+    def test_read_image_too_large(self, workspace):
+        path = os.path.join(workspace, "huge.png")
+        with open(path, "wb") as f:
+            f.write(b"\x00" * (11 * 1024 * 1024))  # 11MB
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("huge.png")
+        assert isinstance(result, str)
+        assert "too large" in result.lower()
+
+    def test_read_empty_image(self, workspace):
+        path = os.path.join(workspace, "empty.png")
+        with open(path, "wb") as f:
+            pass  # 0 bytes
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("empty.png")
+        assert isinstance(result, str)
+        assert "empty" in result.lower()
+
+    async def test_arun_image(self, workspace):
+        path = os.path.join(workspace, "async.png")
+        with open(path, "wb") as f:
+            f.write(b"\x89PNG" + b"\x00" * 50)
+        tool = ReadTool(workspace=workspace)
+        result = await tool._arun("async.png")
+        assert isinstance(result, list)
+        assert result[1]["type"] == "image_url"
+
+    def test_read_image_jpeg(self, workspace):
+        """'.jpeg' extension should also use image/jpeg MIME type."""
+        path = os.path.join(workspace, "photo.jpeg")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xd8\xff" + b"\x00" * 50)
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("photo.jpeg")
+        assert isinstance(result, list)
+        assert result[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+    def test_read_image_gif(self, workspace):
+        path = os.path.join(workspace, "anim.gif")
+        with open(path, "wb") as f:
+            f.write(b"GIF89a" + b"\x00" * 50)
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("anim.gif")
+        assert isinstance(result, list)
+        assert result[1]["image_url"]["url"].startswith("data:image/gif;base64,")
+
+    def test_read_image_uppercase_extension(self, workspace):
+        """Extension matching should be case-insensitive."""
+        path = os.path.join(workspace, "PHOTO.PNG")
+        with open(path, "wb") as f:
+            f.write(b"\x89PNG" + b"\x00" * 50)
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("PHOTO.PNG")
+        assert isinstance(result, list)
+        assert result[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_read_image_nonexistent(self, workspace):
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("missing.png")
+        assert isinstance(result, str)
+        assert "not found" in result.lower()
+
+    def test_read_image_path_traversal(self, workspace):
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("../../etc/secret.png")
+        assert isinstance(result, str)
+        assert "error" in result.lower()
+
+    def test_read_image_exactly_max_size(self, workspace):
+        """File exactly at 10MB limit should succeed."""
+        path = os.path.join(workspace, "exact.png")
+        with open(path, "wb") as f:
+            f.write(b"\x89" * (10 * 1024 * 1024))
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("exact.png")
+        assert isinstance(result, list)
+        assert result[1]["type"] == "image_url"
+
+    def test_read_image_in_subdirectory(self, workspace):
+        """Path in text block should preserve the original user-provided path."""
+        sub = os.path.join(workspace, "images")
+        os.makedirs(sub)
+        with open(os.path.join(sub, "cat.jpg"), "wb") as f:
+            f.write(b"\xff\xd8\xff" + b"\x00" * 50)
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("images/cat.jpg")
+        assert isinstance(result, list)
+        assert "images/cat.jpg" in result[0]["text"]
+
+    def test_read_image_base64_roundtrip(self, workspace):
+        """Base64 content should decode back to original bytes."""
+        import base64 as b64mod
+        original = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+        path = os.path.join(workspace, "roundtrip.png")
+        with open(path, "wb") as f:
+            f.write(original)
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("roundtrip.png")
+        url = result[1]["image_url"]["url"]
+        encoded = url.split(",", 1)[1]
+        assert b64mod.b64decode(encoded) == original
+
+    def test_read_image_is_directory(self, workspace):
+        """A directory with an image extension should return an error."""
+        dir_path = os.path.join(workspace, "fake.png")
+        os.makedirs(dir_path)
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("fake.png")
+        assert isinstance(result, str)
+        assert "error" in result.lower()
+
+    def test_read_non_image_binary_stays_text(self, workspace):
+        """Non-image binary files should still go through text path, not image path."""
+        path = os.path.join(workspace, "data.bin")
+        with open(path, "wb") as f:
+            f.write(b"\x00\x01\x02\x03")
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("data.bin")
+        assert isinstance(result, str)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +423,89 @@ class TestGlobTool:
         result = await tool._arun("*.py")
         assert "test.py" in result
 
+    def test_glob_brace_expansion(self, workspace):
+        for name in ["a.py", "b.txt", "c.rs"]:
+            with open(os.path.join(workspace, name), "w") as f:
+                f.write("")
+        tool = GlobTool(workspace=workspace)
+        result = tool._run("*.{py,txt}")
+        assert "a.py" in result
+        assert "b.txt" in result
+        assert "c.rs" not in result
+
+    def test_glob_brace_expansion_recursive(self, workspace):
+        sub = os.path.join(workspace, "sub")
+        os.makedirs(sub)
+        for name in ["root.py", "root.txt"]:
+            with open(os.path.join(workspace, name), "w") as f:
+                f.write("")
+        for name in ["deep.py", "deep.txt", "deep.rs"]:
+            with open(os.path.join(sub, name), "w") as f:
+                f.write("")
+        tool = GlobTool(workspace=workspace)
+        result = tool._run("**/*.{py,txt}")
+        assert "root.py" in result
+        assert "root.txt" in result
+        assert "sub/deep.py" in result or "sub\\deep.py" in result
+        assert "sub/deep.txt" in result or "sub\\deep.txt" in result
+        assert "deep.rs" not in result
+
+    def test_glob_brace_no_matches(self, workspace):
+        with open(os.path.join(workspace, "a.py"), "w") as f:
+            f.write("")
+        tool = GlobTool(workspace=workspace)
+        result = tool._run("*.{xyz,abc}")
+        assert "no files" in result.lower()
+
+    def test_glob_explicit_empty_path(self, workspace):
+        with open(os.path.join(workspace, "hello.py"), "w") as f:
+            f.write("")
+        tool = GlobTool(workspace=workspace)
+        result = tool._run("*.py", path="")
+        assert "hello.py" in result
+
+    def test_glob_path_is_subdirectory(self, workspace):
+        sub = os.path.join(workspace, "pkg")
+        os.makedirs(sub)
+        with open(os.path.join(workspace, "root.py"), "w") as f:
+            f.write("")
+        with open(os.path.join(sub, "mod.py"), "w") as f:
+            f.write("")
+        tool = GlobTool(workspace=workspace)
+        result = tool._run("*.py", path="pkg")
+        assert "mod.py" in result
+        assert "root.py" not in result
+
+    def test_glob_result_limit(self, workspace):
+        for i in range(1100):
+            with open(os.path.join(workspace, f"f{i}.txt"), "w") as f:
+                f.write("")
+        tool = GlobTool(workspace=workspace)
+        result = tool._run("*.{txt,py}")
+        lines = result.strip().split("\n")
+        assert len(lines) == 1000
+
+
+# ---------------------------------------------------------------------------
+# _expand_braces helper
+# ---------------------------------------------------------------------------
+
+class TestExpandBraces:
+    def test_no_braces(self):
+        assert _expand_braces("**/*.py") == ["**/*.py"]
+
+    def test_single_brace(self):
+        result = _expand_braces("*.{py,txt}")
+        assert sorted(result) == ["*.py", "*.txt"]
+
+    def test_multiple_braces(self):
+        result = _expand_braces("{src,lib}/*.{py,txt}")
+        assert sorted(result) == ["lib/*.py", "lib/*.txt", "src/*.py", "src/*.txt"]
+
+    def test_single_alternative(self):
+        result = _expand_braces("*.{py}")
+        assert result == ["*.py"]
+
 
 # ---------------------------------------------------------------------------
 # GrepTool
@@ -373,6 +607,60 @@ class TestCodeInterpreterTool:
         tool = CodeInterpreterTool(workspace=workspace)
         result = await tool._arun("print('async python')")
         assert "async python" in result
+
+    def test_detects_new_image_file(self, workspace):
+        tool = CodeInterpreterTool(workspace=workspace)
+        code = (
+            "import os\n"
+            "with open('chart.png', 'wb') as f:\n"
+            "    f.write(b'\\x89PNG fake image data')\n"
+            "print('done')\n"
+        )
+        result = tool._run(code)
+        assert "done" in result
+        assert "sandbox:///chart.png" in result
+
+    def test_detects_new_video_file(self, workspace):
+        tool = CodeInterpreterTool(workspace=workspace)
+        code = (
+            "with open('output.mp4', 'wb') as f:\n"
+            "    f.write(b'fake video')\n"
+            "print('ok')\n"
+        )
+        result = tool._run(code)
+        assert "sandbox:///output.mp4" in result
+        assert "[Video:" in result
+
+    def test_detects_new_audio_file(self, workspace):
+        tool = CodeInterpreterTool(workspace=workspace)
+        code = (
+            "with open('sound.mp3', 'wb') as f:\n"
+            "    f.write(b'fake audio')\n"
+            "print('ok')\n"
+        )
+        result = tool._run(code)
+        assert "sandbox:///sound.mp3" in result
+        assert "[Audio:" in result
+
+    def test_ignores_preexisting_media(self, workspace):
+        # Create a pre-existing image
+        with open(os.path.join(workspace, "old.png"), "wb") as f:
+            f.write(b"old image")
+        tool = CodeInterpreterTool(workspace=workspace)
+        result = tool._run("print('no new media')")
+        assert "sandbox://" not in result
+
+    def test_detects_media_in_subdirectory(self, workspace):
+        tool = CodeInterpreterTool(workspace=workspace)
+        code = (
+            "import os\n"
+            "os.makedirs('plots', exist_ok=True)\n"
+            "with open('plots/fig.png', 'wb') as f:\n"
+            "    f.write(b'\\x89PNG data')\n"
+            "print('saved')\n"
+        )
+        result = tool._run(code)
+        assert "sandbox:///plots/fig.png" in result
 
 
 # ---------------------------------------------------------------------------
@@ -489,9 +777,16 @@ class TestWebSearchTool:
 # ---------------------------------------------------------------------------
 
 class TestCreateAllTools:
-    def test_creates_all_tools(self, workspace):
+    def test_creates_all_tools_with_image_config(self, workspace):
         from src.tools import create_all_tools
-        tools = create_all_tools(workspace=workspace)
+        tools = create_all_tools(
+            workspace=workspace,
+            provider="openai",
+            api_key="test-key",
+            image_provider="google",
+            image_api_key="img-key",
+            image_model="gemini-img",
+        )
         names = {t.name for t in tools}
         assert "bash" in names
         assert "read" in names
@@ -502,4 +797,36 @@ class TestCreateAllTools:
         assert "web_fetch" in names
         assert "web_search" in names
         assert "code_interpreter" in names
+        assert "image_generation" in names
+        assert len(tools) == 10
+
+    def test_creates_tools_without_image_config(self, workspace):
+        from src.tools import create_all_tools
+        tools = create_all_tools(workspace=workspace, provider="openai", api_key="test-key")
+        names = {t.name for t in tools}
+        assert "image_generation" not in names
         assert len(tools) == 9
+
+    def test_creates_tools_without_provider(self, workspace):
+        from src.tools import create_all_tools
+        tools = create_all_tools(workspace=workspace)
+        names = {t.name for t in tools}
+        assert "image_generation" not in names
+        assert len(tools) == 9
+
+    def test_image_tool_uses_image_config(self, workspace):
+        from src.tools import create_all_tools
+        tools = create_all_tools(
+            workspace=workspace,
+            provider="openai",
+            api_key="chat-key",
+            image_provider="google",
+            image_api_key="img-key",
+            image_model="gemini-img",
+            image_endpoint_url="https://img.example.com",
+        )
+        img_tool = next(t for t in tools if t.name == "image_generation")
+        assert img_tool.provider == "google"
+        assert img_tool.api_key == "img-key"
+        assert img_tool.model == "gemini-img"
+        assert img_tool.endpoint_url == "https://img.example.com"

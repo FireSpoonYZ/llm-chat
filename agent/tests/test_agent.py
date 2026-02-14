@@ -15,6 +15,7 @@ from src.agent import (
     ChatAgent,
     StreamEvent,
     _accumulate_tool_call,
+    _build_multimodal_content,
     build_message_history,
 )
 from src.prompts.presets import BUILTIN_PRESETS
@@ -32,6 +33,10 @@ class TestAgentConfig:
         assert config.tools_enabled is True
         assert config.mcp_servers == []
         assert config.history == []
+        assert config.image_provider == ""
+        assert config.image_model == ""
+        assert config.image_api_key == ""
+        assert config.image_endpoint_url is None
 
     def test_full_config(self):
         data = {
@@ -44,6 +49,10 @@ class TestAgentConfig:
             "tools_enabled": False,
             "mcp_servers": [{"name": "test-mcp"}],
             "history": [{"role": "user", "content": "hello"}],
+            "image_provider": "google",
+            "image_model": "gemini-3-pro-image-preview",
+            "image_api_key": "goog-key",
+            "image_endpoint_url": "https://img.custom.com",
         }
         config = AgentConfig(data)
         assert config.provider == "anthropic"
@@ -54,6 +63,10 @@ class TestAgentConfig:
         assert config.tools_enabled is False
         assert len(config.mcp_servers) == 1
         assert len(config.history) == 1
+        assert config.image_provider == "google"
+        assert config.image_model == "gemini-3-pro-image-preview"
+        assert config.image_api_key == "goog-key"
+        assert config.image_endpoint_url == "https://img.custom.com"
 
     def test_null_system_prompt_uses_default(self):
         config = AgentConfig({"conversation_id": "c", "system_prompt": None})
@@ -66,6 +79,19 @@ class TestAgentConfig:
     def test_missing_conversation_id_raises(self):
         with pytest.raises(KeyError):
             AgentConfig({})
+
+    def test_null_image_fields_coerced_to_empty(self):
+        config = AgentConfig({
+            "conversation_id": "c",
+            "image_provider": None,
+            "image_model": None,
+            "image_api_key": None,
+            "image_endpoint_url": None,
+        })
+        assert config.image_provider == ""
+        assert config.image_model == ""
+        assert config.image_api_key == ""
+        assert config.image_endpoint_url is None
 
 
 class TestBuildMessageHistory:
@@ -103,6 +129,55 @@ class TestBuildMessageHistory:
         assert isinstance(msgs[0], HumanMessage)
         assert isinstance(msgs[1], AIMessage)
         assert isinstance(msgs[2], HumanMessage)
+
+
+class TestBuildMultimodalContent:
+    def test_no_attachments_returns_string(self):
+        result = _build_multimodal_content("hello", [])
+        assert result == "hello"
+
+    def test_non_image_attachments_returns_string(self):
+        result = _build_multimodal_content("hello", [{"path": "doc.pdf", "data": "abc"}])
+        assert result == "hello"
+
+    def test_image_attachment_returns_list(self):
+        result = _build_multimodal_content("describe this", [
+            {"path": "photo.png", "data": "iVBORw0KGgo="},
+        ])
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0] == {"type": "text", "text": "describe this"}
+        assert result[1]["type"] == "image_url"
+        assert "data:image/png;base64," in result[1]["image_url"]["url"]
+
+    def test_jpg_mime_type(self):
+        result = _build_multimodal_content("test", [
+            {"path": "photo.jpg", "data": "abc123"},
+        ])
+        assert isinstance(result, list)
+        assert "data:image/jpeg;base64," in result[1]["image_url"]["url"]
+
+    def test_multiple_images(self):
+        result = _build_multimodal_content("compare", [
+            {"path": "a.png", "data": "data1"},
+            {"path": "b.jpeg", "data": "data2"},
+        ])
+        assert isinstance(result, list)
+        assert len(result) == 3  # text + 2 images
+
+    def test_mixed_attachments_only_images(self):
+        result = _build_multimodal_content("test", [
+            {"path": "doc.pdf", "data": "pdf_data"},
+            {"path": "img.png", "data": "img_data"},
+        ])
+        assert isinstance(result, list)
+        assert len(result) == 2  # text + 1 image (pdf skipped)
+
+    def test_missing_data_skipped(self):
+        result = _build_multimodal_content("test", [
+            {"path": "img.png"},  # no data
+        ])
+        assert result == "test"
 
 
 class TestStreamEvent:
@@ -424,3 +499,187 @@ class TestChatAgent:
         assert len(agent.messages) == 5
         assert isinstance(agent.messages[3], ToolMessage)
         assert agent.messages[4].content == "a1"
+
+    @patch("src.agent.create_chat_model")
+    async def test_execute_tool_multimodal_result(self, mock_create):
+        """When a tool returns a list (multimodal), _execute_tool should pass it through."""
+        mock_create.return_value = MagicMock()
+        multimodal_result = [
+            {"type": "text", "text": "Image file: photo.png"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc123"}},
+        ]
+        mock_tool = MagicMock()
+        mock_tool.name = "read"
+        mock_tool.ainvoke = AsyncMock(return_value=multimodal_result)
+
+        agent = ChatAgent(self._make_config(), tools=[mock_tool])
+        result, is_error = await agent._execute_tool("read", {"file_path": "photo.png"})
+        assert is_error is False
+        assert isinstance(result, list)
+        assert result == multimodal_result
+
+    @patch("src.agent.create_chat_model")
+    async def test_tool_result_event_display_string(self, mock_create):
+        """tool_result event sent to frontend should not contain base64 data."""
+        from langchain_core.messages import AIMessageChunk, ToolCallChunk
+
+        call_count = 0
+
+        async def fake_astream(messages):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        ToolCallChunk(name="read", args='{"file_path": "img.png"}', id="tc-1", index=0),
+                    ],
+                )
+            else:
+                yield AIMessageChunk(content="I see a cat.", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        multimodal_result = [
+            {"type": "text", "text": "Image file: img.png"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+        ]
+        mock_tool = MagicMock()
+        mock_tool.name = "read"
+        mock_tool.ainvoke = AsyncMock(return_value=multimodal_result)
+
+        agent = ChatAgent(self._make_config(), tools=[mock_tool])
+        events = []
+        async for event in agent.handle_message("describe img.png"):
+            events.append(event)
+
+        tool_result_events = [e for e in events if e.type == "tool_result"]
+        assert len(tool_result_events) == 1
+        tr = tool_result_events[0]
+        # Frontend display result should be the text portion only, no base64
+        assert "base64" not in tr.data["result"]
+        assert "img.png" in tr.data["result"]
+
+        # The complete event's content blocks should also not contain base64
+        complete_event = next(e for e in events if e.type == "complete")
+        blocks = complete_event.data["tool_calls"]
+        tool_block = next(b for b in blocks if b.get("type") == "tool_call")
+        assert "base64" not in tool_block["result"]
+
+    @patch("src.agent.create_chat_model")
+    async def test_tool_message_contains_full_multimodal(self, mock_create):
+        """ToolMessage appended to agent.messages should contain the full list content."""
+        from langchain_core.messages import AIMessageChunk, ToolCallChunk, ToolMessage
+
+        call_count = 0
+
+        async def fake_astream(messages):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        ToolCallChunk(name="read", args='{"file_path": "x.png"}', id="tc-1", index=0),
+                    ],
+                )
+            else:
+                yield AIMessageChunk(content="Got it.", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        multimodal_result = [
+            {"type": "text", "text": "Image file: x.png"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]
+        mock_tool = MagicMock()
+        mock_tool.name = "read"
+        mock_tool.ainvoke = AsyncMock(return_value=multimodal_result)
+
+        agent = ChatAgent(self._make_config(), tools=[mock_tool])
+        events = []
+        async for event in agent.handle_message("read x.png"):
+            events.append(event)
+
+        # Find the ToolMessage in agent.messages
+        tool_msgs = [m for m in agent.messages if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 1
+        # ToolMessage.content should be the full multimodal list (not stringified)
+        assert isinstance(tool_msgs[0].content, list)
+        assert tool_msgs[0].content == multimodal_result
+
+    @patch("src.agent.create_chat_model")
+    async def test_mixed_tool_calls_string_and_multimodal(self, mock_create):
+        """When multiple tools run, string and multimodal results should both work."""
+        from langchain_core.messages import AIMessageChunk, ToolCallChunk
+
+        call_count = 0
+
+        async def fake_astream(messages):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        ToolCallChunk(name="bash", args='{"command": "ls"}', id="tc-1", index=0),
+                        ToolCallChunk(name="read", args='{"file_path": "img.png"}', id="tc-2", index=1),
+                    ],
+                )
+            else:
+                yield AIMessageChunk(content="Done.", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        bash_tool = MagicMock()
+        bash_tool.name = "bash"
+        bash_tool.ainvoke = AsyncMock(return_value="file1.txt\nimg.png")
+
+        read_tool = MagicMock()
+        read_tool.name = "read"
+        read_tool.ainvoke = AsyncMock(return_value=[
+            {"type": "text", "text": "Image file: img.png"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+        ])
+
+        agent = ChatAgent(self._make_config(), tools=[bash_tool, read_tool])
+        events = []
+        async for event in agent.handle_message("list and show"):
+            events.append(event)
+
+        tool_results = [e for e in events if e.type == "tool_result"]
+        assert len(tool_results) == 2
+        # First tool (bash) returns plain string
+        assert isinstance(tool_results[0].data["result"], str)
+        assert "file1.txt" in tool_results[0].data["result"]
+        # Second tool (read) returns display text only
+        assert "base64" not in tool_results[1].data["result"]
+        assert "img.png" in tool_results[1].data["result"]
+
+    @patch("src.agent.create_chat_model")
+    async def test_display_result_joins_multiple_text_blocks(self, mock_create):
+        """If multimodal result has multiple text blocks, display should join them."""
+        mock_create.return_value = MagicMock()
+        multi_text_result = [
+            {"type": "text", "text": "Part one."},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+            {"type": "text", "text": "Part two."},
+        ]
+        mock_tool = MagicMock()
+        mock_tool.name = "read"
+        mock_tool.ainvoke = AsyncMock(return_value=multi_text_result)
+
+        agent = ChatAgent(self._make_config(), tools=[mock_tool])
+        result, is_error = await agent._execute_tool("read", {"file_path": "x.png"})
+        assert is_error is False
+        assert isinstance(result, list)
+        assert len(result) == 3

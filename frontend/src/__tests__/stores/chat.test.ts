@@ -282,11 +282,12 @@ describe('chat store - createConversation', () => {
     const mockConv = {
       id: 'conv-1', title: 'Test', provider: null, model_name: null,
       system_prompt_override: 'Be helpful', deep_thinking: false, created_at: '', updated_at: '',
+      image_provider: null, image_model: null,
     }
     vi.mocked(convApi.createConversation).mockResolvedValueOnce(mockConv)
     const store = useChatStore()
     const result = await store.createConversation('Test', 'Be helpful')
-    expect(convApi.createConversation).toHaveBeenCalledWith('Test', 'Be helpful', undefined, undefined)
+    expect(convApi.createConversation).toHaveBeenCalledWith('Test', 'Be helpful', undefined, undefined, undefined, undefined)
     expect(result.id).toBe('conv-1')
     expect(store.conversations).toHaveLength(1)
   })
@@ -295,11 +296,12 @@ describe('chat store - createConversation', () => {
     const mockConv = {
       id: 'conv-2', title: 'New Conversation', provider: 'openai', model_name: 'gpt-4o',
       system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '',
+      image_provider: null, image_model: null,
     }
     vi.mocked(convApi.createConversation).mockResolvedValueOnce(mockConv)
     const store = useChatStore()
     const result = await store.createConversation(undefined, 'prompt', 'openai', 'gpt-4o')
-    expect(convApi.createConversation).toHaveBeenCalledWith(undefined, 'prompt', 'openai', 'gpt-4o')
+    expect(convApi.createConversation).toHaveBeenCalledWith(undefined, 'prompt', 'openai', 'gpt-4o', undefined, undefined)
     expect(result.provider).toBe('openai')
     expect(result.model_name).toBe('gpt-4o')
   })
@@ -308,11 +310,12 @@ describe('chat store - createConversation', () => {
     const mockConv = {
       id: 'conv-3', title: 'Third', provider: null, model_name: null,
       system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '',
+      image_provider: null, image_model: null,
     }
     vi.mocked(convApi.createConversation).mockResolvedValueOnce(mockConv)
     const store = useChatStore()
     store.conversations = [
-      { id: 'existing', title: 'Old', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '' },
+      { id: 'existing', title: 'Old', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '', image_provider: null, image_model: null },
     ]
     await store.createConversation()
     expect(store.conversations).toHaveLength(2)
@@ -597,8 +600,8 @@ describe('chat store - deleteConversation', () => {
     vi.mocked(convApi.deleteConversation).mockResolvedValueOnce(undefined)
     const store = useChatStore()
     store.conversations = [
-      { id: 'conv-1', title: 'A', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '' },
-      { id: 'conv-2', title: 'B', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '' },
+      { id: 'conv-1', title: 'A', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '', image_provider: null, image_model: null },
+      { id: 'conv-2', title: 'B', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '', image_provider: null, image_model: null },
     ]
 
     await store.deleteConversation('conv-1')
@@ -613,7 +616,7 @@ describe('chat store - deleteConversation', () => {
     store.currentConversationId = 'conv-1'
     store.messages = [makeMessage()]
     store.conversations = [
-      { id: 'conv-1', title: 'A', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '' },
+      { id: 'conv-1', title: 'A', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '', image_provider: null, image_model: null },
     ]
 
     await store.deleteConversation('conv-1')

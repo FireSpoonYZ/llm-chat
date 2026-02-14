@@ -23,7 +23,7 @@
       </template>
       <template v-else>
         <template v-for="(block, idx) in contentBlocks" :key="idx">
-          <div v-if="block.type === 'text'" class="message-content" v-html="renderMarkdown(block.content)"></div>
+          <div v-if="block.type === 'text'" class="message-content" v-html="renderMarkdown(block.content, props.conversationId)"></div>
           <div v-else-if="block.type === 'thinking'" class="thinking-block">
             <details>
               <summary class="thinking-summary">Thinking</summary>
@@ -38,6 +38,7 @@
             :tool-result="block.result"
             :is-error="block.isError"
             :is-loading="block.isLoading"
+            :conversation-id="props.conversationId"
           />
         </template>
         <div class="message-footer">
@@ -84,6 +85,7 @@ import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
 import type { Message, ContentBlock } from '../types'
 import ToolCallDisplay from './ToolCallDisplay.vue'
+import { fileViewUrl } from '../utils/fileUrl'
 
 // Module-level singleton — shared across all ChatMessage instances
 const md = new MarkdownIt({
@@ -102,22 +104,67 @@ const md = new MarkdownIt({
   },
 })
 
+// Custom image renderer to handle sandbox:// URLs
+if (md.renderer && md.renderer.rules) {
+  const defaultImageRender = md.renderer.rules.image || function (tokens: any[], idx: number, options: any, _env: any, self: any) {
+    return self.renderToken(tokens, idx, options)
+  }
+  md.renderer.rules.image = function (tokens: any[], idx: number, options: any, env: any, self: any) {
+    const token = tokens[idx]
+    const srcIdx = token.attrIndex('src')
+    if (srcIdx >= 0) {
+      const src = token.attrs[srcIdx][1]
+      if (src.startsWith('sandbox://')) {
+        const path = src.replace('sandbox://', '')
+        token.attrs[srcIdx][1] = fileViewUrl(env.conversationId, path)
+      }
+    }
+    return defaultImageRender(tokens, idx, options, env, self)
+  }
+}
+
 // Memoization cache for rendered markdown
 const renderCache = new Map<string, string>()
 
-function renderMarkdown(text: string): string {
-  const key = text || ''
-  const cached = renderCache.get(key)
+// Regex to detect sandbox:// video/audio links in markdown
+const SANDBOX_VIDEO_RE = /\[Video:\s*([^\]]*)\]\(sandbox:\/\/([^)]+)\)/g
+const SANDBOX_AUDIO_RE = /\[Audio:\s*([^\]]*)\]\(sandbox:\/\/([^)]+)\)/g
+
+function renderMarkdown(text: string, conversationId?: string): string {
+  const cacheKey = `${conversationId || ''}:${text || ''}`
+  const cached = renderCache.get(cacheKey)
   if (cached !== undefined) return cached
-  const html = DOMPurify.sanitize(md.render(key))
+
+  let processed = text || ''
+
+  // Replace video sandbox links with <video> tags before markdown rendering
+  if (conversationId) {
+    processed = processed.replace(SANDBOX_VIDEO_RE, (_match, _name, path) => {
+      const url = fileViewUrl(conversationId, path)
+      return `<video controls preload="metadata" src="${url}"></video>`
+    })
+    processed = processed.replace(SANDBOX_AUDIO_RE, (_match, _name, path) => {
+      const url = fileViewUrl(conversationId, path)
+      return `<audio controls preload="metadata" src="${url}"></audio>`
+    })
+  }
+
+  const html = DOMPurify.sanitize(
+    md.render(processed, { conversationId: conversationId || '' }),
+    {
+      ADD_TAGS: ['video', 'audio', 'source'],
+      ADD_ATTR: ['controls', 'preload', 'src', 'type', 'autoplay', 'loop', 'muted'],
+    },
+  )
   // Cap cache size to prevent unbounded growth
   if (renderCache.size > 500) renderCache.clear()
-  renderCache.set(key, html)
+  renderCache.set(cacheKey, html)
   return html
 }
 
 const props = defineProps<{
   message: Message
+  conversationId?: string
   isStreaming?: boolean
   streamingBlocks?: ContentBlock[]
   toolCalls?: Array<{
@@ -245,7 +292,19 @@ async function copyMessage() {
     await navigator.clipboard.writeText(text)
     ElMessage.success({ message: 'Copied', duration: 1500 })
   } catch {
-    ElMessage.error('Copy failed')
+    try {
+      const textarea = document.createElement('textarea')
+      textarea.value = text
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+      ElMessage.success({ message: 'Copied', duration: 1500 })
+    } catch {
+      ElMessage.error('Copy failed')
+    }
   }
 }
 </script>
@@ -377,6 +436,22 @@ async function copyMessage() {
 }
 .message-content :deep(a:hover) {
   text-decoration: underline;
+}
+.message-content :deep(img) {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-md);
+  margin: 8px 0;
+  cursor: pointer;
+}
+.message-content :deep(video) {
+  max-width: 100%;
+  border-radius: var(--radius-md);
+  margin: 8px 0;
+}
+.message-content :deep(audio) {
+  width: 100%;
+  margin: 8px 0;
 }
 
 .thinking-block {

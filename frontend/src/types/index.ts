@@ -20,6 +20,8 @@ export interface Conversation {
   deep_thinking: boolean
   created_at: string
   updated_at: string
+  image_provider: string | null
+  image_model: string | null
 }
 
 export interface Message {
@@ -43,6 +45,7 @@ export interface ProviderConfig {
   provider: string
   endpoint_url: string | null
   models: string[]
+  image_models: string[]
   is_default: boolean
   has_api_key: boolean
 }
@@ -113,4 +116,14 @@ export interface FileEntry {
 export interface ListFilesResponse {
   path: string
   entries: FileEntry[]
+}
+
+export interface UploadedFile {
+  name: string
+  size: number
+  path: string
+}
+
+export interface UploadResponse {
+  uploaded: UploadedFile[]
 }

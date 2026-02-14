@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from .agent import AgentConfig, ChatAgent
+from .agent import AgentConfig, ChatAgent, _build_multimodal_content
 from .mcp.manager import McpManager
 from .prompts.assembler import assemble_system_prompt
 from .tools import create_all_tools
@@ -90,7 +91,16 @@ class AgentSession:
             config.provider,
             config.model,
         )
-        tools = create_all_tools() if config.tools_enabled else []
+        tools = create_all_tools(
+            provider=config.provider,
+            api_key=config.api_key,
+            endpoint_url=config.endpoint_url,
+            model=config.model,
+            image_provider=config.image_provider,
+            image_model=config.image_model,
+            image_api_key=config.image_api_key,
+            image_endpoint_url=config.image_endpoint_url,
+        ) if config.tools_enabled else []
 
         # Set up MCP servers and add their tools
         if config.mcp_servers:
@@ -122,6 +132,18 @@ class AgentSession:
 
         deep_thinking = msg.get("deep_thinking", False)
 
+        # Build multimodal content if attachments are present
+        attachments = msg.get("attachments", [])
+        processed_attachments = []
+        for att in attachments:
+            path = att.get("path", "")
+            full_path = os.path.join("/workspace", path.lstrip("/"))
+            if os.path.isfile(full_path):
+                with open(full_path, "rb") as f:
+                    data = base64.b64encode(f.read()).decode()
+                processed_attachments.append({"path": path, "data": data})
+        final_content = _build_multimodal_content(content, processed_attachments)
+
         # Cancel any running generation
         if self._current_task and not self._current_task.done():
             self.agent.cancel()
@@ -132,10 +154,10 @@ class AgentSession:
                 pass
 
         self._current_task = asyncio.create_task(
-            self._run_agent(content, deep_thinking)
+            self._run_agent(final_content, deep_thinking)
         )
 
-    async def _run_agent(self, content: str, deep_thinking: bool = False) -> None:
+    async def _run_agent(self, content: str | list, deep_thinking: bool = False) -> None:
         """Stream agent response back through WebSocket."""
         if self.agent is None:
             raise RuntimeError("Agent not initialized before _run_agent")

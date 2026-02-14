@@ -29,6 +29,8 @@ pub struct ConversationResponse {
     pub deep_thinking: bool,
     pub created_at: String,
     pub updated_at: String,
+    pub image_provider: Option<String>,
+    pub image_model: Option<String>,
 }
 
 impl From<db::conversations::Conversation> for ConversationResponse {
@@ -42,6 +44,8 @@ impl From<db::conversations::Conversation> for ConversationResponse {
             deep_thinking: c.deep_thinking,
             created_at: c.created_at,
             updated_at: c.updated_at,
+            image_provider: c.image_provider,
+            image_model: c.image_model,
         }
     }
 }
@@ -61,6 +65,8 @@ pub struct CreateConversationRequest {
     pub provider: Option<String>,
     pub model_name: Option<String>,
     pub deep_thinking: Option<bool>,
+    pub image_provider: Option<String>,
+    pub image_model: Option<String>,
 }
 
 async fn create_conversation(
@@ -77,6 +83,8 @@ async fn create_conversation(
         req.provider.as_deref(),
         req.model_name.as_deref(),
         req.deep_thinking.unwrap_or(false),
+        req.image_provider.as_deref(),
+        req.image_model.as_deref(),
     ).await?;
 
     // Create workspace directory
@@ -103,6 +111,8 @@ pub struct UpdateConversationRequest {
     pub model_name: Option<String>,
     pub system_prompt_override: Option<String>,
     pub deep_thinking: Option<bool>,
+    pub image_provider: Option<String>,
+    pub image_model: Option<String>,
 }
 
 async fn update_conversation(
@@ -131,6 +141,27 @@ async fn update_conversation(
         None => existing.system_prompt_override.as_deref(),
     };
     let deep_thinking = req.deep_thinking.unwrap_or(existing.deep_thinking);
+    let image_provider = match req.image_provider.as_deref() {
+        Some("") => None,
+        Some(v) => Some(v),
+        None => existing.image_provider.as_deref(),
+    };
+    let image_model = match req.image_model.as_deref() {
+        Some("") => None,
+        Some(v) => Some(v),
+        None => existing.image_model.as_deref(),
+    };
+
+    // If provider or model changed, stop the running container so it
+    // re-initialises with the new config on the next message.
+    let provider_changed = provider != existing.provider.as_deref();
+    let model_changed = model_name != existing.model_name.as_deref();
+    let image_provider_changed = image_provider != existing.image_provider.as_deref();
+    let image_model_changed = image_model != existing.image_model.as_deref();
+    if provider_changed || model_changed || image_provider_changed || image_model_changed {
+        let _ = state.docker_manager.stop_container(&id).await;
+        state.ws_state.remove_container(&id).await;
+    }
 
     let conv = db::conversations::update_conversation(
         &state.db,
@@ -141,6 +172,8 @@ async fn update_conversation(
         model_name,
         system_prompt,
         deep_thinking,
+        image_provider,
+        image_model,
     ).await?
     .ok_or(AppError::NotFound)?;
     Ok(Json(conv.into()))

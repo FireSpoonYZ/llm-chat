@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import os
 from pathlib import Path
-from typing import Type
+from typing import Any, Type
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from ._paths import resolve_workspace_path as _resolve_path
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
 # ---------------------------------------------------------------------------
@@ -66,9 +71,28 @@ class ReadTool(BaseTool):
 
     def _run(
         self, file_path: str, offset: int = 0, limit: int = 2000
-    ) -> str:
+    ) -> str | list[dict[str, Any]]:
         try:
             resolved = _resolve_path(file_path, self.workspace)
+            ext = os.path.splitext(resolved)[1].lower()
+
+            # Image files: return multimodal content
+            if ext in IMAGE_EXTENSIONS:
+                size = resolved.stat().st_size
+                if size == 0:
+                    return f"Error: image file is empty: {file_path}"
+                if size > MAX_IMAGE_SIZE:
+                    return f"Error: image file too large ({size} bytes, max {MAX_IMAGE_SIZE}): {file_path}"
+                data = resolved.read_bytes()
+                b64 = base64.b64encode(data).decode("ascii")
+                mime = f"image/{ext.lstrip('.')}"
+                if ext == ".jpg":
+                    mime = "image/jpeg"
+                return [
+                    {"type": "text", "text": f"Image file: {file_path}"},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                ]
+
             with open(resolved, "r", encoding="utf-8", errors="replace") as fh:
                 lines = fh.readlines()
             selected = lines[offset : offset + limit]
@@ -88,7 +112,7 @@ class ReadTool(BaseTool):
 
     async def _arun(
         self, file_path: str, offset: int = 0, limit: int = 2000
-    ) -> str:
+    ) -> str | list[dict[str, Any]]:
         return await asyncio.to_thread(self._run, file_path, offset, limit)
 
 

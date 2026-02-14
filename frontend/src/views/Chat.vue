@@ -49,6 +49,17 @@
               class="model-cascader"
               @change="handleCascaderChange"
             />
+            <span class="toolbar-label">Image</span>
+            <el-cascader
+              :model-value="imageCascaderValue"
+              :options="imageCascaderOptions"
+              :props="{ expandTrigger: 'hover' }"
+              placeholder="Select image model"
+              clearable
+              size="small"
+              class="model-cascader"
+              @change="handleImageCascaderChange"
+            />
             <el-button class="toolbar-btn" text @click="showPromptDrawer = true">System Prompt</el-button>
             <el-button class="toolbar-btn" text @click="showFilesDrawer = true">Files</el-button>
           </div>
@@ -59,6 +70,7 @@
               v-for="msg in chatStore.messages"
               :key="msg.id"
               :message="msg"
+              :conversation-id="chatStore.currentConversationId || undefined"
               :is-streaming="chatStore.isStreaming"
               @edit="handleEditMessage"
               @regenerate="handleRegenerateMessage"
@@ -67,12 +79,13 @@
             <ChatMessage
               v-if="chatStore.isStreaming"
               :message="{ id: 'streaming', role: 'assistant', content: chatStore.streamingContent, tool_calls: null, tool_call_id: null, token_count: null, created_at: '' }"
+              :conversation-id="chatStore.currentConversationId || undefined"
               :is-streaming="true"
               :streaming-blocks="chatStore.streamingBlocks"
             />
           </div>
         </div>
-        <ChatInput @send="handleSend" :disabled="chatStore.isStreaming" :deep-thinking="deepThinking" @update:deep-thinking="toggleDeepThinking" />
+        <ChatInput @send="handleSend" :disabled="chatStore.isStreaming" :deep-thinking="deepThinking" @update:deep-thinking="toggleDeepThinking" @attach-files="handleAttachFiles" />
         <div v-if="!chatStore.wsConnected" class="ws-status-bar ws-disconnected">
           <span class="ws-dot pulse"></span>
           <span>Connection lost, reconnecting...</span>
@@ -151,6 +164,7 @@ import ConversationList from '../components/ConversationList.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
 import FileBrowser from '../components/FileBrowser.vue'
+import { uploadFiles } from '../api/conversations'
 
 const auth = useAuthStore()
 const chatStore = useChatStore()
@@ -201,7 +215,7 @@ async function handleCreateChat() {
   try {
     const prompt = newChatPrompt.value.trim() || undefined
     const defaultProvider = settingsStore.providers.find(p => p.is_default)
-    const provider = defaultProvider?.provider
+    const provider = defaultProvider?.name
     const modelName = defaultProvider?.models[0]
     const conv = await chatStore.createConversation(undefined, prompt, provider, modelName)
     await chatStore.selectConversation(conv.id)
@@ -237,6 +251,19 @@ async function handleDeleteConversation(id: string) {
 
 function handleSend(content: string) {
   chatStore.sendMessage(content)
+}
+
+async function handleAttachFiles(files: File[]) {
+  if (!chatStore.currentConversationId) return
+  try {
+    await uploadFiles(chatStore.currentConversationId, files)
+    ElMessage.success(`Uploaded ${files.length} file(s)`)
+    if (showFilesDrawer.value) {
+      fileBrowserRef.value?.refresh()
+    }
+  } catch {
+    ElMessage.error('Upload failed')
+  }
 }
 
 function handleEditMessage(messageId: string, newContent: string) {
@@ -275,7 +302,7 @@ const currentConversation = computed(() =>
 
 const cascaderOptions = computed(() => {
   return settingsStore.providers.map(p => ({
-    value: p.provider,
+    value: p.name,
     label: p.name || p.provider,
     children: p.models.map(m => ({
       value: m,
@@ -303,6 +330,42 @@ async function handleCascaderChange(val: string[] | null) {
     await chatStore.updateConversation(chatStore.currentConversationId, {
       provider: '',
       model_name: '',
+    })
+  }
+}
+
+const imageCascaderOptions = computed(() => {
+  return settingsStore.providers
+    .filter(p => p.image_models.length > 0)
+    .map(p => ({
+      value: p.name,
+      label: p.name || p.provider,
+      children: p.image_models.map(m => ({
+        value: m,
+        label: m,
+      })),
+    }))
+})
+
+const imageCascaderValue = computed(() => {
+  const conv = currentConversation.value
+  if (conv?.image_provider && conv?.image_model) {
+    return [conv.image_provider, conv.image_model]
+  }
+  return []
+})
+
+async function handleImageCascaderChange(val: string[] | null) {
+  if (!chatStore.currentConversationId) return
+  if (val && val.length === 2) {
+    await chatStore.updateConversation(chatStore.currentConversationId, {
+      image_provider: val[0],
+      image_model: val[1],
+    })
+  } else {
+    await chatStore.updateConversation(chatStore.currentConversationId, {
+      image_provider: '',
+      image_model: '',
     })
   }
 }

@@ -47,7 +47,7 @@ async fn handle_container_ws(
     let (mut ws_sink, mut ws_stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    ws_state.add_container(&conversation_id, tx.clone()).await;
+    let container_gen = ws_state.add_container(&conversation_id, tx.clone()).await;
 
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -100,15 +100,24 @@ async fn handle_container_ws(
                         .ok()
                         .flatten()
                 {
-                    let provider_name = conv.provider.as_deref().unwrap_or("");
-                    let provider = if provider_name.is_empty() {
+                    // Look up chat provider by name (not type)
+                    let chat_provider_name = conv.provider.as_deref().unwrap_or("");
+                    let provider = if chat_provider_name.is_empty() {
                         db::providers::get_default_provider(&state.db, &user_id).await.ok().flatten()
                     } else {
-                        db::providers::get_provider(&state.db, &user_id, provider_name).await.ok().flatten()
+                        db::providers::get_provider_by_name(&state.db, &user_id, chat_provider_name).await.ok().flatten()
                     };
-                    let provider_name = provider.as_ref()
+                    let provider_type = provider.as_ref()
                         .map(|p| p.provider.as_str())
                         .unwrap_or("openai");
+
+                    // Look up image provider (separate from chat provider)
+                    let image_provider_name = conv.image_provider.as_deref().unwrap_or("");
+                    let image_provider = if image_provider_name.is_empty() {
+                        None
+                    } else {
+                        db::providers::get_provider_by_name(&state.db, &user_id, image_provider_name).await.ok().flatten()
+                    };
 
                     let messages =
                         db::messages::list_messages(&state.db, &conversation_id, super::CONTAINER_INIT_HISTORY_LIMIT, 0).await.unwrap_or_default();
@@ -170,10 +179,27 @@ async fn handle_container_ws(
                         .or(first_model_from_provider)
                         .unwrap_or_else(|| "gpt-4o".to_string());
 
+                    // Decrypt image provider API key and resolve type
+                    let image_api_key = image_provider
+                        .as_ref()
+                        .map(|p| {
+                            crate::crypto::decrypt(
+                                &p.api_key_encrypted,
+                                &state.config.encryption_key,
+                            )
+                            .unwrap_or_default()
+                        })
+                        .unwrap_or_default();
+                    let image_provider_type = image_provider.as_ref()
+                        .map(|p| p.provider.as_str())
+                        .unwrap_or("");
+                    let image_endpoint_url = image_provider.as_ref()
+                        .and_then(|p| p.endpoint_url.clone());
+
                     let init_msg = serde_json::json!({
                         "type": "init",
                         "conversation_id": conversation_id,
-                        "provider": provider_name,
+                        "provider": provider_type,
                         "model": model,
                         "api_key": api_key,
                         "endpoint_url": provider.as_ref().and_then(|p| p.endpoint_url.clone()),
@@ -181,6 +207,10 @@ async fn handle_container_ws(
                         "tools_enabled": true,
                         "mcp_servers": mcp_configs,
                         "history": history,
+                        "image_provider": image_provider_type,
+                        "image_model": conv.image_model,
+                        "image_api_key": image_api_key,
+                        "image_endpoint_url": image_endpoint_url,
                     });
 
                     let _ = tx.send(init_msg.to_string());
@@ -276,20 +306,27 @@ async fn handle_container_ws(
         }
     }
 
-    ws_state.remove_container(&conversation_id).await;
-    ws_state
-        .send_to_client(
-            &user_id,
-            &conversation_id,
-            &serde_json::json!({
-                "type": "container_status",
-                "conversation_id": conversation_id,
-                "status": "disconnected",
-                "message": "Container disconnected"
-            })
-            .to_string(),
-        )
+    // Only clean up if this is still the active container for this conversation.
+    // A newer container may have already replaced us (e.g. after a model switch).
+    let removed = ws_state
+        .remove_container_if_gen(&conversation_id, container_gen)
         .await;
+
+    if removed {
+        ws_state
+            .send_to_client(
+                &user_id,
+                &conversation_id,
+                &serde_json::json!({
+                    "type": "container_status",
+                    "conversation_id": conversation_id,
+                    "status": "disconnected",
+                    "message": "Container disconnected"
+                })
+                .to_string(),
+            )
+            .await;
+    }
 
     send_task.abort();
 }

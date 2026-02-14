@@ -23,6 +23,13 @@
           <div class="section-label">
             {{ isError ? 'Error' : 'Result' }}
           </div>
+          <div v-if="mediaRefs.length > 0" class="tool-media">
+            <template v-for="(media, i) in mediaRefs" :key="i">
+              <img v-if="media.type === 'image'" :src="media.url" :alt="media.name" class="tool-media-img" loading="lazy" />
+              <video v-else-if="media.type === 'video'" controls preload="metadata" :src="media.url" class="tool-media-video" />
+              <audio v-else-if="media.type === 'audio'" controls preload="metadata" :src="media.url" class="tool-media-audio" />
+            </template>
+          </div>
           <pre class="tool-content" :class="{ 'tool-error': isError }">{{
             truncatedResult
           }}</pre>
@@ -43,7 +50,9 @@ import {
   Search,
   Link,
   VideoPlay,
+  Picture,
 } from '@element-plus/icons-vue'
+import { fileViewUrl } from '../utils/fileUrl'
 
 const props = defineProps<{
   toolName: string
@@ -52,6 +61,7 @@ const props = defineProps<{
   toolResult?: string
   isError?: boolean
   isLoading?: boolean
+  conversationId?: string
 }>()
 
 const expanded = ref(false)
@@ -74,9 +84,44 @@ const toolIcon = computed(() => {
       return Link
     case 'code_interpreter':
       return VideoPlay
+    case 'image_generation':
+      return Picture
     default:
       return Monitor
   }
+})
+
+const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']
+const VIDEO_EXTS = ['.mp4', '.webm', '.mov']
+const AUDIO_EXTS = ['.mp3', '.wav', '.ogg', '.m4a']
+
+interface MediaRef {
+  type: 'image' | 'video' | 'audio'
+  url: string
+  name: string
+}
+
+const SANDBOX_RE = /sandbox:\/\/\/([^\s)]+)/g
+
+const mediaRefs = computed<MediaRef[]>(() => {
+  if (!props.toolResult || !props.conversationId) return []
+  const refs: MediaRef[] = []
+  let match: RegExpExecArray | null
+  const re = new RegExp(SANDBOX_RE.source, 'g')
+  while ((match = re.exec(props.toolResult)) !== null) {
+    const path = match[1]
+    const ext = path.substring(path.lastIndexOf('.')).toLowerCase()
+    const name = path.substring(path.lastIndexOf('/') + 1)
+    const url = fileViewUrl(props.conversationId, '/' + path)
+    if (IMAGE_EXTS.includes(ext)) {
+      refs.push({ type: 'image', url, name })
+    } else if (VIDEO_EXTS.includes(ext)) {
+      refs.push({ type: 'video', url, name })
+    } else if (AUDIO_EXTS.includes(ext)) {
+      refs.push({ type: 'audio', url, name })
+    }
+  }
+  return refs
 })
 
 const statusType = computed(() => {
@@ -187,5 +232,25 @@ const truncatedResult = computed(() => {
 
 .tool-error {
   color: #DC2626;
+}
+
+.tool-media {
+  margin: 8px 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tool-media-img {
+  max-width: 100%;
+  max-height: 400px;
+  border-radius: var(--radius-md);
+  object-fit: contain;
+}
+.tool-media-video {
+  max-width: 100%;
+  border-radius: var(--radius-md);
+}
+.tool-media-audio {
+  width: 100%;
 }
 </style>

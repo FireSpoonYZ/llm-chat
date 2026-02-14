@@ -15,11 +15,13 @@ const mockEntries = [
 const mockListFiles = vi.fn().mockResolvedValue({ path: '/', entries: mockEntries })
 const mockDownloadFile = vi.fn().mockResolvedValue(undefined)
 const mockDownloadBatch = vi.fn().mockResolvedValue(undefined)
+const mockUploadFiles = vi.fn().mockResolvedValue({ uploaded: [{ name: 'test.txt', size: 100, path: '/test.txt' }] })
 
 vi.mock('../../api/conversations', () => ({
   listFiles: (...args: unknown[]) => mockListFiles(...args),
   downloadFile: (...args: unknown[]) => mockDownloadFile(...args),
   downloadBatch: (...args: unknown[]) => mockDownloadBatch(...args),
+  uploadFiles: (...args: unknown[]) => mockUploadFiles(...args),
 }))
 
 async function mountBrowser() {
@@ -138,5 +140,27 @@ describe('FileBrowser', () => {
     const wrapper = await mountBrowser()
     expect(wrapper.find('.fb-error').exists()).toBe(true)
     expect(wrapper.find('.fb-error').text()).toBe('Failed to load files')
+  })
+
+  it('renders upload button', async () => {
+    const wrapper = await mountBrowser()
+    expect(wrapper.find('[data-testid="upload-btn"]').exists()).toBe(true)
+  })
+
+  it('calls uploadFiles and refreshes after file selection', async () => {
+    const wrapper = await mountBrowser()
+    mockListFiles.mockClear()
+
+    const fileInput = wrapper.find('[data-testid="file-input"]')
+    const file = new File(['hello'], 'test.txt', { type: 'text/plain' })
+
+    // Simulate file selection
+    Object.defineProperty(fileInput.element, 'files', { value: [file] })
+    await fileInput.trigger('change')
+    await flushPromises()
+
+    expect(mockUploadFiles).toHaveBeenCalledWith('conv-1', [file], '', expect.any(Function))
+    // Should refresh file list after upload
+    expect(mockListFiles).toHaveBeenCalled()
   })
 })

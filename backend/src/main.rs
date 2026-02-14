@@ -1,4 +1,4 @@
-use axum::{Router, routing::get};
+use axum::{Router, extract::DefaultBodyLimit, routing::get};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -70,7 +70,10 @@ async fn main() {
         .nest("/api/auth", api::auth::router())
         .nest("/api/users", api::users::router())
         .nest("/api/conversations", api::conversations::router())
-        .nest("/api/conversations/{id}/files", api::files::router())
+        .nest(
+            "/api/conversations/{id}/files",
+            api::files::router().layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
         .nest("/api/admin", api::admin::router())
         .nest("/api/mcp-servers", mcp_servers_public_router())
         .nest("/api/presets", api::presets::router())

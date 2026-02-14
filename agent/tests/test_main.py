@@ -188,3 +188,48 @@ class TestAgentSession:
             })
             config = MockAgent.call_args[0][0]
             assert "Available Tools" not in config.system_prompt
+
+    async def test_handle_init_passes_image_config_to_tools(self):
+        session = AgentSession("ws://test", "tok")
+        session.ws = AsyncMock()
+
+        with patch("src.main.ChatAgent") as MockAgent, \
+             patch("src.main.create_all_tools") as mock_create_tools:
+            mock_create_tools.return_value = []
+            await session._handle_init({
+                "conversation_id": "conv-1",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "key",
+                "tools_enabled": True,
+                "image_provider": "google",
+                "image_model": "gemini-img",
+                "image_api_key": "img-key",
+                "image_endpoint_url": "https://img.example.com",
+            })
+            mock_create_tools.assert_called_once()
+            kwargs = mock_create_tools.call_args[1]
+            assert kwargs["image_provider"] == "google"
+            assert kwargs["image_model"] == "gemini-img"
+            assert kwargs["image_api_key"] == "img-key"
+            assert kwargs["image_endpoint_url"] == "https://img.example.com"
+
+    async def test_handle_init_no_image_config_passes_empty(self):
+        session = AgentSession("ws://test", "tok")
+        session.ws = AsyncMock()
+
+        with patch("src.main.ChatAgent") as MockAgent, \
+             patch("src.main.create_all_tools") as mock_create_tools:
+            mock_create_tools.return_value = []
+            await session._handle_init({
+                "conversation_id": "conv-1",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "key",
+                "tools_enabled": True,
+            })
+            kwargs = mock_create_tools.call_args[1]
+            assert kwargs["image_provider"] == ""
+            assert kwargs["image_model"] == ""
+            assert kwargs["image_api_key"] == ""
+            assert kwargs["image_endpoint_url"] is None

@@ -10,9 +10,26 @@
           @change="toggleSelectAll"
           data-testid="select-all"
         >All</el-checkbox>
+        <el-button text :icon="Upload" @click="triggerUpload" title="Upload" data-testid="upload-btn" />
         <el-button text :icon="Refresh" @click="loadFiles" title="Refresh" />
+        <input
+          ref="fileInputRef"
+          type="file"
+          multiple
+          style="display: none"
+          data-testid="file-input"
+          @change="handleFileSelect"
+        />
       </div>
     </div>
+
+    <el-progress
+      v-if="uploading"
+      :percentage="uploadProgress"
+      :stroke-width="3"
+      class="fb-upload-progress"
+      data-testid="upload-progress"
+    />
 
     <div v-if="loading" v-loading="true" class="fb-loading" element-loading-background="transparent" />
     <div v-else-if="error" class="fb-error">{{ error }}</div>
@@ -64,8 +81,9 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { Refresh, Download, Document, Folder, FolderOpened } from '@element-plus/icons-vue'
-import { listFiles, downloadFile, downloadBatch } from '../api/conversations'
+import { Refresh, Download, Upload, Document, Folder, FolderOpened } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { listFiles, downloadFile, downloadBatch, uploadFiles } from '../api/conversations'
 import type { FileEntry } from '../types'
 import type { TreeInstance } from 'element-plus'
 
@@ -82,6 +100,9 @@ const loading = ref(false)
 const error = ref('')
 const batchDownloading = ref(false)
 const checkedCount = ref(0)
+const fileInputRef = ref<HTMLInputElement>()
+const uploading = ref(false)
+const uploadProgress = ref(0)
 
 const treeProps = { label: 'name', children: 'children' }
 
@@ -168,6 +189,32 @@ async function handleBatchDownload() {
     }
   } finally {
     batchDownloading.value = false
+  }
+}
+
+function triggerUpload() {
+  fileInputRef.value?.click()
+}
+
+async function handleFileSelect(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  if (files.length === 0) return
+
+  uploading.value = true
+  uploadProgress.value = 0
+  try {
+    await uploadFiles(props.conversationId, files, '', (pct) => {
+      uploadProgress.value = pct
+    })
+    ElMessage.success(`Uploaded ${files.length} file(s)`)
+    await loadFiles()
+  } catch {
+    ElMessage.error('Upload failed')
+  } finally {
+    uploading.value = false
+    uploadProgress.value = 0
+    input.value = ''
   }
 }
 
@@ -270,5 +317,8 @@ defineExpose({ refresh: loadFiles })
 .fb-selection-count {
   color: var(--text-secondary);
   margin-right: auto;
+}
+.fb-upload-progress {
+  padding: 4px 0;
 }
 </style>

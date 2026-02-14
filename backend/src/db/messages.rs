@@ -126,7 +126,7 @@ mod tests {
     async fn setup() -> (SqlitePool, String) {
         let pool = init_db("sqlite::memory:").await;
         let user = create_user(&pool, "testuser", "test@example.com", "hash").await.unwrap();
-        let conv = create_conversation(&pool, &user.id, "Test Conv", None, None, None, false).await.unwrap();
+        let conv = create_conversation(&pool, &user.id, "Test Conv", None, None, None, false, None, None).await.unwrap();
         (pool, conv.id)
     }
 

@@ -12,6 +12,23 @@ from pydantic import BaseModel, Field
 from ._paths import resolve_workspace_path
 
 
+def _expand_braces(pattern: str) -> list[str]:
+    """Expand bash-style brace patterns (e.g. ``*.{py,txt}``) into separate globs.
+
+    Python's ``pathlib.glob`` does not support brace expansion, so this helper
+    recursively expands ``{a,b,c}`` groups into individual patterns.
+    """
+    match = re.search(r"\{([^{}]+)\}", pattern)
+    if not match:
+        return [pattern]
+    prefix = pattern[: match.start()]
+    suffix = pattern[match.end() :]
+    results: list[str] = []
+    for alt in match.group(1).split(","):
+        results.extend(_expand_braces(prefix + alt.strip() + suffix))
+    return results
+
+
 class GlobInput(BaseModel):
     """Input for the GlobTool."""
 
@@ -25,6 +42,7 @@ class GlobTool(BaseTool):
     name: str = "glob"
     description: str = (
         "Fast file pattern matching tool. Supports glob patterns like '**/*.py' or 'src/**/*.ts'. "
+        "Brace expansion is supported (e.g. '**/*.{py,txt}'). "
         "Returns matching file paths relative to the workspace root."
     )
     args_schema: Type[BaseModel] = GlobInput
@@ -43,21 +61,28 @@ class GlobTool(BaseTool):
 
         ws = Path(self.workspace).resolve()
         results: list[str] = []
+        seen: set[str] = set()
         try:
-            for i, match in enumerate(sorted(base.glob(pattern))):
-                if i >= 1000:
+            for expanded in _expand_braces(pattern):
+                for match in base.glob(expanded):
+                    if len(results) >= 1000:
+                        break
+                    if match.is_file():
+                        try:
+                            rel = str(match.relative_to(ws))
+                        except ValueError:
+                            continue
+                        if rel not in seen:
+                            seen.add(rel)
+                            results.append(rel)
+                if len(results) >= 1000:
                     break
-                if match.is_file():
-                    try:
-                        rel = match.relative_to(ws)
-                    except ValueError:
-                        continue
-                    results.append(str(rel))
         except OSError as exc:
             return f"Error during glob: {exc}"
 
         if not results:
             return "No files matched the pattern."
+        results.sort()
         return "\n".join(results)
 
     async def _arun(self, pattern: str, path: str = "") -> str:
@@ -100,7 +125,14 @@ class GrepTool(BaseTool):
         if base.is_file():
             return [base]
         if glob_filter:
-            return sorted(f for f in base.glob(glob_filter) if f.is_file())
+            seen: set[Path] = set()
+            files: list[Path] = []
+            for expanded in _expand_braces(glob_filter):
+                for f in base.glob(expanded):
+                    if f.is_file() and f not in seen:
+                        seen.add(f)
+                        files.append(f)
+            return sorted(files)
         return sorted(f for f in base.rglob("*") if f.is_file())
 
     def _is_binary(self, filepath: Path) -> bool:

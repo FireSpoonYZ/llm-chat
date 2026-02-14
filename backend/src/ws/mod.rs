@@ -3,6 +3,7 @@ pub mod container;
 pub mod messages;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
@@ -16,9 +17,11 @@ pub type WsSender = mpsc::UnboundedSender<String>;
 #[derive(Default)]
 pub struct WsState {
     pub client_connections: RwLock<HashMap<String, HashMap<String, WsSender>>>,
-    pub container_connections: RwLock<HashMap<String, WsSender>>,
+    pub container_connections: RwLock<HashMap<String, (WsSender, u64)>>,
     /// Messages queued while a container was starting (keyed by conversation_id).
     pub pending_messages: RwLock<HashMap<String, String>>,
+    /// Monotonically increasing generation counter for container connections.
+    container_gen: AtomicU64,
 }
 
 impl WsState {
@@ -53,9 +56,11 @@ impl WsState {
         }
     }
 
-    pub async fn add_container(&self, conversation_id: &str, sender: WsSender) {
+    pub async fn add_container(&self, conversation_id: &str, sender: WsSender) -> u64 {
+        let generation = self.container_gen.fetch_add(1, Ordering::Relaxed) + 1;
         let mut conns = self.container_connections.write().await;
-        conns.insert(conversation_id.to_string(), sender);
+        conns.insert(conversation_id.to_string(), (sender, generation));
+        generation
     }
 
     pub async fn remove_container(&self, conversation_id: &str) {
@@ -63,9 +68,22 @@ impl WsState {
         conns.remove(conversation_id);
     }
 
+    /// Remove the container connection only if the stored generation matches.
+    /// Returns `true` if removed, `false` if a newer connection has replaced it.
+    pub async fn remove_container_if_gen(&self, conversation_id: &str, generation: u64) -> bool {
+        let mut conns = self.container_connections.write().await;
+        if let Some((_, stored_gen)) = conns.get(conversation_id) {
+            if *stored_gen == generation {
+                conns.remove(conversation_id);
+                return true;
+            }
+        }
+        false
+    }
+
     pub async fn send_to_container(&self, conversation_id: &str, msg: &str) -> bool {
         let conns = self.container_connections.read().await;
-        if let Some(sender) = conns.get(conversation_id) {
+        if let Some((sender, _)) = conns.get(conversation_id) {
             sender.send(msg.to_string()).is_ok()
         } else {
             false
@@ -225,5 +243,58 @@ mod tests {
 
         assert_eq!(state.take_pending_message("conv1").await.as_deref(), Some("msg1"));
         assert_eq!(state.take_pending_message("conv2").await.as_deref(), Some("msg2"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_container_if_gen_matching() {
+        let state = WsState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let generation = state.add_container("conv1", tx).await;
+        assert!(state.remove_container_if_gen("conv1", generation).await);
+        assert!(!state.send_to_container("conv1", "ping").await);
+    }
+
+    #[tokio::test]
+    async fn test_remove_container_if_gen_stale() {
+        let state = WsState::new();
+
+        let (tx_old, _rx_old) = mpsc::unbounded_channel();
+        let gen_old = state.add_container("conv1", tx_old).await;
+
+        // New container replaces old one (simulates model switch + new container start)
+        let (tx_new, mut rx_new) = mpsc::unbounded_channel();
+        let gen_new = state.add_container("conv1", tx_new).await;
+        assert_ne!(gen_old, gen_new);
+
+        // Old container cleanup with stale generation — must NOT remove new sender
+        assert!(!state.remove_container_if_gen("conv1", gen_old).await);
+
+        // New container's sender still works
+        assert!(state.send_to_container("conv1", "hello").await);
+        assert_eq!(rx_new.recv().await.unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_remove_container_if_gen_nonexistent() {
+        let state = WsState::new();
+        assert!(!state.remove_container_if_gen("noconv", 1).await);
+    }
+
+    #[tokio::test]
+    async fn test_generation_increments() {
+        let state = WsState::new();
+
+        let (tx1, _) = mpsc::unbounded_channel();
+        let (tx2, _) = mpsc::unbounded_channel();
+        let (tx3, _) = mpsc::unbounded_channel();
+
+        let g1 = state.add_container("a", tx1).await;
+        let g2 = state.add_container("b", tx2).await;
+        let g3 = state.add_container("a", tx3).await;
+
+        assert_eq!(g1, 1);
+        assert_eq!(g2, 2);
+        assert_eq!(g3, 3);
     }
 }

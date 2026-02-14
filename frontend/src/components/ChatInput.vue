@@ -2,6 +2,22 @@
   <div class="chat-input-wrapper">
     <div class="chat-input-inner">
       <div class="input-container">
+        <button
+          class="attach-btn"
+          @click="triggerFileInput"
+          aria-label="Attach files"
+          data-testid="attach-btn"
+        >
+          <el-icon :size="18"><Paperclip /></el-icon>
+        </button>
+        <input
+          ref="fileInputRef"
+          type="file"
+          multiple
+          style="display: none"
+          data-testid="attach-file-input"
+          @change="handleAttach"
+        />
         <textarea
           ref="textareaRef"
           v-model="content"
@@ -36,13 +52,18 @@
 
 <script setup lang="ts">
 import { ref, nextTick } from 'vue'
-import { Promotion } from '@element-plus/icons-vue'
+import { Promotion, Paperclip } from '@element-plus/icons-vue'
 
 defineProps<{ disabled: boolean; deepThinking: boolean }>()
-const emit = defineEmits<{ send: [content: string]; 'update:deepThinking': [value: boolean] }>()
+const emit = defineEmits<{
+  send: [content: string]
+  'update:deepThinking': [value: boolean]
+  'attach-files': [files: File[]]
+}>()
 
 const content = ref('')
 const textareaRef = ref<HTMLTextAreaElement>()
+const fileInputRef = ref<HTMLInputElement>()
 
 function handleSend() {
   if (!content.value.trim()) return
@@ -60,6 +81,19 @@ function autoGrow() {
   if (!el) return
   el.style.height = 'auto'
   el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+}
+
+function triggerFileInput() {
+  fileInputRef.value?.click()
+}
+
+function handleAttach(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  if (files.length > 0) {
+    emit('attach-files', files)
+  }
+  input.value = ''
 }
 </script>
 
@@ -99,6 +133,24 @@ function autoGrow() {
   background: transparent;
   padding: 5px 0;
   max-height: 200px;
+}
+.attach-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-full);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.attach-btn:hover {
+  color: var(--text-primary);
+  background: var(--border-light);
 }
 .chat-textarea::placeholder {
   color: var(--text-muted);

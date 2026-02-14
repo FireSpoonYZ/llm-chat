@@ -52,6 +52,7 @@ pub struct ProviderResponse {
     pub provider: String,
     pub endpoint_url: Option<String>,
     pub models: Vec<String>,
+    pub image_models: Vec<String>,
     pub is_default: bool,
     pub has_api_key: bool,
 }
@@ -76,6 +77,7 @@ async fn list_providers(
                 provider: p.provider,
                 endpoint_url: p.endpoint_url,
                 models: parse_models_json(p.models.as_deref()),
+                image_models: parse_models_json(p.image_models.as_deref()),
                 is_default: p.is_default,
                 has_api_key: true,
             })
@@ -102,6 +104,7 @@ pub struct UpsertProviderRequest {
     pub api_key: String,
     pub endpoint_url: Option<String>,
     pub models: Option<Vec<String>>,
+    pub image_models: Option<Vec<String>>,
     pub is_default: bool,
 }
 
@@ -127,6 +130,7 @@ async fn upsert_provider(
     };
 
     let models_json = req.models.as_ref().and_then(|m| serde_json::to_string(m).ok());
+    let image_models_json = req.image_models.as_ref().and_then(|m| serde_json::to_string(m).ok());
     let first_model = req.models.as_ref().and_then(|m| m.first().cloned());
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -141,6 +145,7 @@ async fn upsert_provider(
         req.is_default,
         models_json.as_deref(),
         Some(&req.name),
+        image_models_json.as_deref(),
     ).await?;
 
     Ok(Json(ProviderResponse {
@@ -149,6 +154,7 @@ async fn upsert_provider(
         provider: provider.provider,
         endpoint_url: provider.endpoint_url,
         models: parse_models_json(provider.models.as_deref()),
+        image_models: parse_models_json(provider.image_models.as_deref()),
         is_default: provider.is_default,
         has_api_key: true,
     }))

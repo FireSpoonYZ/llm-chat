@@ -24,6 +24,8 @@ TOOL_DESCRIPTIONS = {
         "  Usage:\n"
         "  - Returns content in 'line_number | content' format.\n"
         "  - Supports offset and limit parameters for large files.\n"
+        "  - Image files (.png, .jpg, .jpeg, .gif, .webp) are returned as "
+        "visual content for direct recognition — no need to use bash.\n"
         "  - Always read a file before editing it to understand "
         "existing content and structure.\n"
         "  - Can read multiple files in parallel for efficiency.\n"
@@ -95,7 +97,20 @@ TOOL_DESCRIPTIONS = {
         "and quick code experiments.\n"
         "  - Output is captured and returned as text.\n"
         "  - Suitable for tasks that need computation "
-        "without modifying workspace files."
+        "without modifying workspace files.\n"
+        "  - Generated media files (images, charts) will be "
+        "automatically detected and displayed inline."
+    ),
+    "image_generation": (
+        "**image_generation** - Generate images from text descriptions "
+        "using AI.\n"
+        "  Usage:\n"
+        "  - Provide a detailed prompt describing the desired image.\n"
+        "  - Supports size options: 1024x1024, 1024x1792, 1792x1024.\n"
+        "  - Quality options: standard, hd.\n"
+        "  - Can generate 1-4 images at once.\n"
+        "  - Returns sandbox:// URLs that display inline in chat.\n"
+        "  - Available for OpenAI and Google providers. Uses the conversation's configured model."
     ),
 }
 

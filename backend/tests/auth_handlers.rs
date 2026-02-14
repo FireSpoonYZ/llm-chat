@@ -352,3 +352,48 @@ async fn wrong_auth_scheme_returns_401() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ── Query Param Token Fallback ──
+
+#[tokio::test]
+async fn query_param_token_authenticates_successfully() {
+    let state = test_state().await;
+
+    // Register to get a token
+    let app = auth_app(state.clone());
+    let resp = app.oneshot(post_json(
+        "/api/auth/register",
+        r#"{"username":"grace","email":"grace@example.com","password":"password123"}"#,
+    )).await.unwrap();
+    let body = json_body(resp).await;
+    let access_token = body["access_token"].as_str().unwrap().to_string();
+
+    // Use token via query param (no Authorization header)
+    let app = Router::new()
+        .nest("/api/conversations", api::conversations::router())
+        .with_state(state);
+    let uri = format!("/api/conversations?token={}", access_token);
+    let req = Request::builder()
+        .method("GET")
+        .uri(&uri)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn query_param_invalid_token_returns_401() {
+    let state = test_state().await;
+    let app = Router::new()
+        .nest("/api/conversations", api::conversations::router())
+        .with_state(state);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/conversations?token=invalid-token")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

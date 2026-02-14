@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
 from typing import Any, AsyncIterator, Sequence
 
@@ -46,6 +47,11 @@ class AgentConfig:
         self.tools_enabled: bool = init_data.get("tools_enabled", True)
         self.mcp_servers: list[dict[str, Any]] = init_data.get("mcp_servers", [])
         self.history: list[dict[str, str]] = init_data.get("history", [])
+        # Image generation model config (separate from chat model)
+        self.image_provider: str = init_data.get("image_provider", "") or ""
+        self.image_model: str = init_data.get("image_model", "") or ""
+        self.image_api_key: str = init_data.get("image_api_key", "") or ""
+        self.image_endpoint_url: str | None = init_data.get("image_endpoint_url")
 
 
 def build_message_history(history: list[dict[str, str]]) -> list[BaseMessage]:
@@ -61,6 +67,43 @@ def build_message_history(history: list[dict[str, str]]) -> list[BaseMessage]:
         elif role == "system":
             messages.append(SystemMessage(content=content))
     return messages
+
+
+def _build_multimodal_content(
+    text: str, attachments: list[dict[str, Any]]
+) -> str | list[dict[str, Any]]:
+    """Build multimodal content from text and file attachments.
+
+    If attachments contain image files, returns a list of content blocks
+    (text + image_url). Otherwise returns the plain text string.
+    """
+    if not attachments:
+        return text
+
+    IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+    blocks: list[dict[str, Any]] = []
+    if text:
+        blocks.append({"type": "text", "text": text})
+
+    for att in attachments:
+        path = att.get("path", "")
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in IMAGE_EXTENSIONS:
+            continue
+        data = att.get("data")
+        if not data:
+            continue
+        mime = f"image/{ext.lstrip('.')}"
+        if ext == ".jpg":
+            mime = "image/jpeg"
+        blocks.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{data}"},
+        })
+
+    if len(blocks) <= 1 and not any(b["type"] == "image_url" for b in blocks):
+        return text
+    return blocks
 
 
 class StreamEvent:
@@ -120,8 +163,12 @@ class ChatAgent:
                     break
         self.messages = self.messages[:truncate_idx]
 
-    async def handle_message(self, content: str, deep_thinking: bool = False) -> AsyncIterator[StreamEvent]:
+    async def handle_message(self, content: str | list, deep_thinking: bool = False) -> AsyncIterator[StreamEvent]:
         """Process a user message and yield streaming events.
+
+        Args:
+            content: Plain text string or multimodal content list
+                     (text + image_url blocks).
 
         Yields StreamEvent objects for: assistant_delta, thinking_delta,
         tool_call, tool_result, complete, error.
@@ -315,9 +362,17 @@ class ChatAgent:
 
                 result, is_error = await self._execute_tool(tc_name, tc_args)
 
+                # For multimodal results, extract text-only display for frontend
+                if isinstance(result, list):
+                    display_result = " ".join(
+                        b.get("text", "") for b in result if b.get("type") == "text"
+                    )
+                else:
+                    display_result = result
+
                 yield StreamEvent("tool_result", {
                     "tool_call_id": tc_id,
-                    "result": result,
+                    "result": display_result,
                     "is_error": is_error,
                 })
 
@@ -330,7 +385,7 @@ class ChatAgent:
                     "id": tc_id,
                     "name": tc_name,
                     "input": tc_args,
-                    "result": result,
+                    "result": display_result,
                     "isError": is_error,
                 })
 
@@ -340,14 +395,19 @@ class ChatAgent:
             "message": f"Agent exceeded maximum of {MAX_ITERATIONS} iterations",
         })
 
-    async def _execute_tool(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
-        """Execute a tool by name and return (result, is_error)."""
+    async def _execute_tool(self, name: str, args: dict[str, Any]) -> tuple[str | list, bool]:
+        """Execute a tool by name and return (result, is_error).
+
+        Result may be a string or a list of content blocks (multimodal).
+        """
         tool = next((t for t in self.tools if t.name == name), None)
         if tool is None:
             return f"Unknown tool: {name}", True
 
         try:
             result = await tool.ainvoke(args)
+            if isinstance(result, list):
+                return result, False
             return str(result), False
         except Exception as exc:
             return f"Tool error: {exc}", True

@@ -131,19 +131,19 @@ class TestCreateChatModel:
         )
 
     @patch("src.providers.init_chat_model")
-    def test_google_ignores_endpoint_url(self, mock_init):
+    def test_google_custom_endpoint(self, mock_init):
         mock_init.return_value = MagicMock()
         create_chat_model(
             "google", "gemini-pro", "key",
             endpoint_url="https://custom.com",
         )
-        # Google should not get base_url or endpoint
         mock_init.assert_called_once_with(
             model="gemini-pro",
             model_provider="google_genai",
             api_key="key",
             streaming=True,
             temperature=0.0,
+            base_url="https://custom.com",
         )
 
     @patch("src.providers.init_chat_model")

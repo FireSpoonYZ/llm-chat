@@ -26,6 +26,18 @@
                 <span v-if="!row.models.length" class="text-muted">No models</span>
               </template>
             </el-table-column>
+            <el-table-column label="Image Models">
+              <template #default="{ row }">
+                <el-tag
+                  v-for="m in row.image_models"
+                  :key="m"
+                  size="small"
+                  type="warning"
+                  style="margin-right: 4px; margin-bottom: 2px"
+                >{{ m }}</el-tag>
+                <span v-if="!row.image_models.length" class="text-muted">—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="Default" width="80">
               <template #default="{ row }">
                 <el-tag v-if="row.is_default" type="success" size="small">Default</el-tag>
@@ -64,6 +76,16 @@
               <el-input v-model="modelToAdd" placeholder="Enter model name" @keyup.enter="addModel">
                 <template #append>
                   <el-button @click="addModel">Add</el-button>
+                </template>
+              </el-input>
+            </el-form-item>
+            <el-form-item label="Image Models (optional)">
+              <div class="model-tags">
+                <el-tag v-for="m in providerForm.imageModels" :key="m" type="warning" closable @close="removeImageModel(m)">{{ m }}</el-tag>
+              </div>
+              <el-input v-model="imageModelToAdd" placeholder="Enter image model name" @keyup.enter="addImageModel">
+                <template #append>
+                  <el-button @click="addImageModel">Add</el-button>
                 </template>
               </el-input>
             </el-form-item>
@@ -149,6 +171,7 @@ const providerForm = reactive({
   providerType: '',
   apiKey: '',
   models: [] as string[],
+  imageModels: [] as string[],
   endpointUrl: '',
   isDefault: false,
 })
@@ -161,6 +184,7 @@ const presetForm = reactive({
 })
 
 const modelToAdd = ref('')
+const imageModelToAdd = ref('')
 
 const providerFormRef = ref<FormInstance>()
 const presetFormRef = ref<FormInstance>()
@@ -204,6 +228,18 @@ function addModel() {
   modelToAdd.value = ''
 }
 
+function addImageModel() {
+  const val = imageModelToAdd.value.trim()
+  if (val && !providerForm.imageModels.includes(val)) {
+    providerForm.imageModels.push(val)
+  }
+  imageModelToAdd.value = ''
+}
+
+function removeImageModel(model: string) {
+  providerForm.imageModels = providerForm.imageModels.filter(m => m !== model)
+}
+
 function providerLabel(name: string) {
   return PROVIDER_LABELS[name] || name
 }
@@ -219,6 +255,7 @@ function resetProviderForm() {
   providerForm.providerType = ''
   providerForm.apiKey = ''
   providerForm.models = []
+  providerForm.imageModels = []
   providerForm.endpointUrl = ''
   providerForm.isDefault = false
   providerFormRef.value?.clearValidate()
@@ -230,6 +267,7 @@ function handleEditProvider(row: ProviderConfig) {
   providerForm.providerType = row.provider
   providerForm.apiKey = ''
   providerForm.models = [...row.models]
+  providerForm.imageModels = [...row.image_models]
   providerForm.endpointUrl = row.endpoint_url || ''
   providerForm.isDefault = row.is_default
 }
@@ -271,6 +309,7 @@ async function handleSaveProvider() {
       providerForm.endpointUrl || undefined,
       providerForm.models,
       providerForm.isDefault,
+      providerForm.imageModels,
     )
     ElMessage.success(isEditingProvider.value ? 'Provider updated' : 'Provider saved')
     resetProviderForm()

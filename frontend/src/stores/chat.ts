@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { ElMessage } from 'element-plus'
 import type { Conversation, Message, ContentBlock, WsMessage } from '../types'
 import * as convApi from '../api/conversations'
 import { refreshAccessToken } from '../api/auth'
@@ -101,6 +102,13 @@ export const useChatStore = defineStore('chat', () => {
         tc.result = msg.result as string
         tc.isError = (msg.is_error as boolean) || false
         tc.isLoading = false
+        if (tc.isError) {
+          ElMessage.error({
+            message: `${tc.name} failed: ${tc.result}`,
+            duration: 5000,
+            showClose: true,
+          })
+        }
       }
     })
 
@@ -181,8 +189,8 @@ export const useChatStore = defineStore('chat', () => {
     conversations.value = await convApi.listConversations()
   }
 
-  async function createConversation(title?: string, systemPromptOverride?: string, provider?: string, modelName?: string) {
-    const conv = await convApi.createConversation(title, systemPromptOverride, provider, modelName)
+  async function createConversation(title?: string, systemPromptOverride?: string, provider?: string, modelName?: string, imageProvider?: string, imageModel?: string) {
+    const conv = await convApi.createConversation(title, systemPromptOverride, provider, modelName, imageProvider, imageModel)
     conversations.value.unshift(conv)
     return conv
   }
@@ -210,7 +218,7 @@ export const useChatStore = defineStore('chat', () => {
     if (idx >= 0) conversations.value[idx] = updated
   }
 
-  function sendMessage(content: string) {
+  function sendMessage(content: string, attachments?: string[]) {
     if (!currentConversationId.value) return
     messages.value.push({
       id: `pending-${generateUUID()}`,
@@ -222,7 +230,11 @@ export const useChatStore = defineStore('chat', () => {
       created_at: new Date().toISOString(),
     })
     isWaiting.value = true
-    const sent = ws?.send({ type: 'user_message', content }) ?? false
+    const payload: WsMessage = { type: 'user_message', content }
+    if (attachments && attachments.length > 0) {
+      payload.attachments = attachments
+    }
+    const sent = ws?.send(payload) ?? false
     if (!sent) {
       messages.value.pop()
       isWaiting.value = false

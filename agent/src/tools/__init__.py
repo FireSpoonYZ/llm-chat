@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from langchain_core.tools import BaseTool
 
 from .bash import BashTool
@@ -9,6 +11,7 @@ from .file_ops import ReadTool, WriteTool, EditTool
 from .search import GlobTool, GrepTool
 from .web import WebFetchTool, WebSearchTool
 from .code_interpreter import CodeInterpreterTool
+from .image_gen import ImageGenerationTool
 
 ALL_TOOLS = [
     BashTool,
@@ -20,12 +23,24 @@ ALL_TOOLS = [
     WebFetchTool,
     WebSearchTool,
     CodeInterpreterTool,
+    ImageGenerationTool,
 ]
 
 
-def create_all_tools(workspace: str = "/workspace") -> list[BaseTool]:
+def create_all_tools(
+    workspace: str = "/workspace",
+    *,
+    provider: str = "",
+    api_key: str = "",
+    endpoint_url: Optional[str] = None,
+    model: str = "",
+    image_provider: str = "",
+    image_model: str = "",
+    image_api_key: str = "",
+    image_endpoint_url: Optional[str] = None,
+) -> list[BaseTool]:
     """Create instances of all built-in tools."""
-    return [
+    tools: list[BaseTool] = [
         BashTool(workspace=workspace),
         ReadTool(workspace=workspace),
         WriteTool(workspace=workspace),
@@ -36,3 +51,13 @@ def create_all_tools(workspace: str = "/workspace") -> list[BaseTool]:
         WebSearchTool(),
         CodeInterpreterTool(workspace=workspace),
     ]
+    # Use dedicated image config if provided, otherwise skip image tool
+    if image_provider and image_api_key and image_model:
+        tools.append(ImageGenerationTool(
+            workspace=workspace,
+            provider=image_provider,
+            api_key=image_api_key,
+            endpoint_url=image_endpoint_url,
+            model=image_model,
+        ))
+    return tools

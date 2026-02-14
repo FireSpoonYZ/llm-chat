@@ -63,7 +63,7 @@ def create_chat_model(
     if endpoint_url:
         if provider == "mistral":
             params["endpoint"] = endpoint_url
-        elif provider != "google":
+        else:
             params["base_url"] = endpoint_url
 
     return init_chat_model(

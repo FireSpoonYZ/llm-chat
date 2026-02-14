@@ -32,18 +32,28 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let auth_header = parts
+        // 1. Try Authorization header
+        // 2. Fallback to ?token= query param (for <img>/<video>/<audio> src requests)
+        let token = if let Some(auth_header) = parts
             .headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| AppError::Unauthorized("Missing authorization header".into()))?;
-
-        let token = auth_header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| AppError::Unauthorized("Invalid authorization scheme".into()))?;
+        {
+            auth_header
+                .strip_prefix("Bearer ")
+                .ok_or_else(|| AppError::Unauthorized("Invalid authorization scheme".into()))?
+                .to_owned()
+        } else if let Some(query) = parts.uri.query() {
+            form_urlencoded::parse(query.as_bytes())
+                .find(|(k, _)| k == "token")
+                .map(|(_, v)| v.into_owned())
+                .ok_or_else(|| AppError::Unauthorized("Missing authorization".into()))?
+        } else {
+            return Err(AppError::Unauthorized("Missing authorization".into()));
+        };
 
         let claims =
-            super::verify_access_token(token, &state.config.jwt_secret)
+            super::verify_access_token(&token, &state.config.jwt_secret)
                 .map_err(|_| AppError::Unauthorized("Invalid or expired token".into()))?;
 
         Ok(AuthUser {

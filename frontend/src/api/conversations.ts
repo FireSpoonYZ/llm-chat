@@ -1,17 +1,19 @@
 import client from './client'
-import type { Conversation, MessagesResponse, McpServer, ListFilesResponse } from '../types'
+import type { Conversation, MessagesResponse, McpServer, ListFilesResponse, UploadResponse } from '../types'
 
 export async function listConversations(): Promise<Conversation[]> {
   const { data } = await client.get<Conversation[]>('/conversations')
   return data
 }
 
-export async function createConversation(title?: string, systemPromptOverride?: string, provider?: string, modelName?: string): Promise<Conversation> {
+export async function createConversation(title?: string, systemPromptOverride?: string, provider?: string, modelName?: string, imageProvider?: string, imageModel?: string): Promise<Conversation> {
   const { data } = await client.post<Conversation>('/conversations', {
     title,
     system_prompt_override: systemPromptOverride || undefined,
     provider: provider || undefined,
     model_name: modelName || undefined,
+    image_provider: imageProvider || undefined,
+    image_model: imageModel || undefined,
   })
   return data
 }
@@ -84,4 +86,30 @@ export async function downloadBatch(id: string, paths: string[]): Promise<void> 
   })
   const filename = extractFilename(response.headers, 'download.zip')
   triggerBlobDownload(new Blob([response.data]), filename)
+}
+
+export async function uploadFiles(
+  id: string,
+  files: File[],
+  path = '',
+  onProgress?: (percent: number) => void,
+): Promise<UploadResponse> {
+  const formData = new FormData()
+  for (const file of files) {
+    formData.append('files', file)
+  }
+  const { data } = await client.post<UploadResponse>(
+    `/conversations/${id}/files/upload`,
+    formData,
+    {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: path ? { path } : undefined,
+      onUploadProgress(e) {
+        if (onProgress && e.total) {
+          onProgress(Math.round((e.loaded * 100) / e.total))
+        }
+      },
+    },
+  )
+  return data
 }

@@ -10,6 +10,42 @@ from typing import Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+MEDIA_EXTENSIONS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
+    ".mp4", ".webm", ".mov",
+    ".mp3", ".wav", ".ogg", ".m4a",
+})
+
+
+def _scan_media_files(workspace: str) -> set[str]:
+    """Return a set of relative paths for media files under workspace."""
+    media = set()
+    for root, _dirs, files in os.walk(workspace):
+        for f in files:
+            ext = os.path.splitext(f)[1].lower()
+            if ext in MEDIA_EXTENSIONS:
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, workspace)
+                media.add(rel)
+    return media
+
+
+def _format_media_refs(new_files: set[str]) -> str:
+    """Format sandbox:// references for newly created media files."""
+    if not new_files:
+        return ""
+    lines = []
+    for rel in sorted(new_files):
+        ext = os.path.splitext(rel)[1].lower()
+        sandbox_url = f"sandbox:///{rel}"
+        if ext in {".mp4", ".webm", ".mov"}:
+            lines.append(f"[Video: {os.path.basename(rel)}]({sandbox_url})")
+        elif ext in {".mp3", ".wav", ".ogg", ".m4a"}:
+            lines.append(f"[Audio: {os.path.basename(rel)}]({sandbox_url})")
+        else:
+            lines.append(f"![{os.path.basename(rel)}]({sandbox_url})")
+    return "\n\n" + "\n\n".join(lines)
+
 
 class CodeInterpreterInput(BaseModel):
     """Input schema for the CodeInterpreterTool."""
@@ -36,6 +72,9 @@ class CodeInterpreterTool(BaseTool):
         cmd_prefix = [sys.executable] if language == "python" else ["node"]
         tmp_path: str | None = None
 
+        # Scan media files before execution
+        before = _scan_media_files(self.workspace)
+
         try:
             with tempfile.NamedTemporaryFile(
                 mode="w",
@@ -55,7 +94,14 @@ class CodeInterpreterTool(BaseTool):
             )
 
             output = result.stdout + result.stderr
-            return output[:50000]
+            output = output[:50000]
+
+            # Scan for new media files after execution
+            after = _scan_media_files(self.workspace)
+            new_files = after - before
+            output += _format_media_refs(new_files)
+
+            return output
 
         except subprocess.TimeoutExpired:
             return "Error: Code execution timed out after 30 seconds."

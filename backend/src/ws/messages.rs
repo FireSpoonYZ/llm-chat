@@ -9,6 +9,8 @@ pub enum ClientMessage {
     },
     UserMessage {
         content: String,
+        #[serde(default)]
+        attachments: Vec<String>,
     },
     EditMessage {
         message_id: String,
@@ -53,7 +55,14 @@ mod tests {
     fn deserialize_user_message() {
         let json = r#"{"type": "user_message", "content": "hello"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
-        assert!(matches!(msg, ClientMessage::UserMessage { content } if content == "hello"));
+        assert!(matches!(msg, ClientMessage::UserMessage { content, attachments } if content == "hello" && attachments.is_empty()));
+    }
+
+    #[test]
+    fn deserialize_user_message_with_attachments() {
+        let json = r#"{"type": "user_message", "content": "look at this", "attachments": ["/uploads/img.png"]}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg, ClientMessage::UserMessage { content, attachments } if content == "look at this" && attachments.len() == 1));
     }
 
     #[test]

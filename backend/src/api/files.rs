@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
-    http::header,
+    extract::{Multipart, Path, Query, State},
+    http::{header, HeaderMap, StatusCode},
     response::Response,
     routing::{get, post},
     Json, Router,
@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Write as _};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 use zip::write::SimpleFileOptions;
 
@@ -23,6 +24,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/", get(list_files))
         .route("/download", get(download_file))
         .route("/download-batch", post(download_batch))
+        .route("/upload", post(upload_files))
+        .route("/view", get(view_file))
 }
 
 #[derive(Deserialize)]
@@ -333,6 +336,229 @@ async fn download_batch(
         .map_err(|e| AppError::Internal(e.to_string()))
 }
 
+#[derive(Serialize)]
+struct UploadedFileInfo {
+    name: String,
+    size: u64,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct UploadResponse {
+    uploaded: Vec<UploadedFileInfo>,
+}
+
+/// Returns true if the filename is safe (no path separators or traversal).
+fn is_safe_filename(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+}
+
+async fn upload_files(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(conversation_id): Path<String>,
+    Query(query): Query<FileQuery>,
+    mut multipart: Multipart,
+) -> Result<Json<UploadResponse>, AppError> {
+    db::conversations::get_conversation(&state.db, &conversation_id, &auth.user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let workspace_root = PathBuf::from(format!("data/conversations/{}", conversation_id));
+    tokio::fs::create_dir_all(&workspace_root)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    // Determine target directory within workspace
+    let requested = query.path.unwrap_or_default();
+    let target_dir = if requested.is_empty() || requested == "/" {
+        workspace_root
+            .canonicalize()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+    } else {
+        // Ensure the subdirectory exists
+        let cleaned = requested.trim_start_matches('/');
+        let candidate = workspace_root.join(cleaned);
+        tokio::fs::create_dir_all(&candidate)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let canonical = candidate
+            .canonicalize()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let root_canonical = workspace_root
+            .canonicalize()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        if !canonical.starts_with(&root_canonical) {
+            return Err(AppError::Forbidden("Path traversal denied".into()));
+        }
+        canonical
+    };
+
+    let mut uploaded = Vec::new();
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
+        let file_name = field
+            .file_name()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        if !is_safe_filename(&file_name) {
+            return Err(AppError::BadRequest(format!(
+                "Invalid filename: {}",
+                file_name
+            )));
+        }
+
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+        let dest = target_dir.join(&file_name);
+        tokio::fs::write(&dest, &data)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let rel_path = if requested.is_empty() || requested == "/" {
+            format!("/{}", file_name)
+        } else {
+            format!(
+                "/{}/{}",
+                requested.trim_start_matches('/'),
+                file_name
+            )
+        };
+
+        uploaded.push(UploadedFileInfo {
+            name: file_name,
+            size: data.len() as u64,
+            path: rel_path,
+        });
+    }
+
+    if uploaded.is_empty() {
+        return Err(AppError::BadRequest("No files provided".into()));
+    }
+
+    Ok(Json(UploadResponse { uploaded }))
+}
+
+/// Serve a file inline with correct MIME type and optional Range support.
+async fn view_file(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Path(conversation_id): Path<String>,
+    Query(query): Query<FileQuery>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    db::conversations::get_conversation(&state.db, &conversation_id, &auth.user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let requested = query
+        .path
+        .ok_or_else(|| AppError::BadRequest("Path required".into()))?;
+    let workspace_root = PathBuf::from(format!("data/conversations/{}", conversation_id));
+    let file_path = resolve_safe_path(&workspace_root, &requested)
+        .ok_or_else(|| AppError::Forbidden("Path traversal denied".into()))?;
+
+    if !file_path.is_file() {
+        return Err(AppError::NotFound);
+    }
+
+    let metadata = tokio::fs::metadata(&file_path)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let file_size = metadata.len();
+
+    let mime = mime_guess::from_path(&file_path)
+        .first_raw()
+        .unwrap_or("application/octet-stream");
+
+    // Check for Range header
+    if let Some(range_header) = headers.get(header::RANGE) {
+        let range_str = range_header
+            .to_str()
+            .map_err(|_| AppError::BadRequest("Invalid Range header".into()))?;
+
+        if let Some(range) = parse_range(range_str, file_size) {
+            let (start, end) = range;
+            let length = end - start + 1;
+
+            let file = tokio::fs::File::open(&file_path)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            use tokio::io::AsyncSeekExt;
+            let mut file = file;
+            file.seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            let limited = file.take(length);
+            let stream = ReaderStream::new(limited);
+            let body = Body::from_stream(stream);
+
+            return Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_TYPE, mime)
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(
+                    header::CONTENT_RANGE,
+                    format!("bytes {}-{}/{}", start, end, file_size),
+                )
+                .header(header::CONTENT_LENGTH, length.to_string())
+                .body(body)
+                .map_err(|e| AppError::Internal(e.to_string()));
+        }
+    }
+
+    // Full file response
+    let file = tokio::fs::File::open(&file_path)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, file_size.to_string())
+        .header(
+            header::CACHE_CONTROL,
+            "private, max-age=3600, immutable",
+        )
+        .body(body)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Parse a simple "bytes=START-END" or "bytes=START-" range header.
+fn parse_range(range_str: &str, file_size: u64) -> Option<(u64, u64)> {
+    let range_str = range_str.strip_prefix("bytes=")?;
+    let parts: Vec<&str> = range_str.splitn(2, '-').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let start: u64 = parts[0].parse().ok()?;
+    let end: u64 = if parts[1].is_empty() {
+        file_size - 1
+    } else {
+        parts[1].parse().ok()?
+    };
+    if start > end || end >= file_size {
+        return None;
+    }
+    Some((start, end))
+}
+
 fn add_dir_to_zip(
     zip: &mut zip::ZipWriter<Cursor<Vec<u8>>>,
     dir: &std::path::Path,
@@ -436,5 +662,49 @@ mod tests {
         assert_eq!(b_children[0].name, "c.txt");
         assert!(!b_children[0].is_dir);
         assert!(b_children[0].children.is_none());
+    }
+
+    #[test]
+    fn test_is_safe_filename_valid() {
+        assert!(is_safe_filename("hello.txt"));
+        assert!(is_safe_filename("my file (1).pdf"));
+        assert!(is_safe_filename("日本語.txt"));
+    }
+
+    #[test]
+    fn test_is_safe_filename_rejects_traversal() {
+        assert!(!is_safe_filename("../evil.txt"));
+        assert!(!is_safe_filename("foo/bar.txt"));
+        assert!(!is_safe_filename("foo\\bar.txt"));
+        assert!(!is_safe_filename(".."));
+        assert!(!is_safe_filename("."));
+        assert!(!is_safe_filename(""));
+    }
+
+    #[test]
+    fn test_parse_range_full() {
+        assert_eq!(parse_range("bytes=0-99", 100), Some((0, 99)));
+    }
+
+    #[test]
+    fn test_parse_range_open_end() {
+        assert_eq!(parse_range("bytes=50-", 100), Some((50, 99)));
+    }
+
+    #[test]
+    fn test_parse_range_invalid() {
+        assert_eq!(parse_range("bytes=50-200", 100), None);
+        assert_eq!(parse_range("invalid", 100), None);
+        assert_eq!(parse_range("bytes=abc-def", 100), None);
+    }
+
+    #[test]
+    fn test_parse_range_start_equals_end() {
+        assert_eq!(parse_range("bytes=10-10", 100), Some((10, 10)));
+    }
+
+    #[test]
+    fn test_parse_range_start_greater_than_end() {
+        assert_eq!(parse_range("bytes=50-10", 100), None);
     }
 }

@@ -154,7 +154,7 @@ async fn handle_client_ws(
                     .to_string(),
                 );
             }
-            ClientMessage::UserMessage { content } => {
+            ClientMessage::UserMessage { content, attachments } => {
                 let conv_id = match &current_conversation_id {
                     Some(id) => id.clone(),
                     None => {
@@ -198,6 +198,7 @@ async fn handle_client_ws(
                             &state.db, &conv_id, &user_id, &title,
                             c.provider.as_deref(), c.model_name.as_deref(),
                             c.system_prompt_override.as_deref(), c.deep_thinking,
+                            c.image_provider.as_deref(), c.image_model.as_deref(),
                         )
                         .await;
                     }
@@ -221,6 +222,7 @@ async fn handle_client_ws(
                         "message_id": msg.id,
                         "content": content,
                         "deep_thinking": deep_thinking,
+                        "attachments": attachments,
                     })
                     .to_string(),
                 )
