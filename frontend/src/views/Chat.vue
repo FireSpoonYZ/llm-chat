@@ -62,6 +62,7 @@
             />
             <el-button class="toolbar-btn" text @click="showPromptDrawer = true">System Prompt</el-button>
             <el-button class="toolbar-btn" text @click="showFilesDrawer = true">Files</el-button>
+            <el-button class="toolbar-btn" text @click="showShareDialog = true">Share</el-button>
           </div>
         </div>
         <div class="chat-messages">
@@ -150,6 +151,22 @@
     <el-drawer v-model="showFilesDrawer" title="Workspace Files" size="480px" @open="fileBrowserRef?.refresh()">
       <FileBrowser v-if="chatStore.currentConversationId" ref="fileBrowserRef" :conversation-id="chatStore.currentConversationId" />
     </el-drawer>
+
+    <!-- Share Dialog -->
+    <el-dialog v-model="showShareDialog" title="Share Conversation" width="480px">
+      <template v-if="!currentConversation?.share_token">
+        <p style="color: var(--text-secondary); margin: 0 0 16px">Anyone with the link can view this conversation in read-only mode. New messages will be visible when they refresh.</p>
+        <el-button type="primary" @click="handleCreateShare" :loading="shareLoading">Create Link</el-button>
+      </template>
+      <template v-else>
+        <p style="color: var(--text-secondary); margin: 0 0 12px">This conversation is shared. Anyone with the link can view it.</p>
+        <div style="display: flex; gap: 8px; margin-bottom: 16px">
+          <el-input :model-value="shareUrl" readonly />
+          <el-button @click="copyShareUrl">Copy</el-button>
+        </div>
+        <el-button type="danger" plain @click="handleRevokeShare" :loading="shareLoading">Stop Sharing</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -165,6 +182,7 @@ import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
 import FileBrowser from '../components/FileBrowser.vue'
 import { uploadFiles } from '../api/conversations'
+import { createShare, revokeShare } from '../api/sharing'
 
 const auth = useAuthStore()
 const chatStore = useChatStore()
@@ -178,6 +196,8 @@ const showPromptDrawer = ref(false)
 const editingPrompt = ref('')
 const showFilesDrawer = ref(false)
 const fileBrowserRef = ref<InstanceType<typeof FileBrowser> | null>(null)
+const showShareDialog = ref(false)
+const shareLoading = ref(false)
 
 const deepThinking = computed(() => currentConversation.value?.deep_thinking ?? false)
 
@@ -299,6 +319,50 @@ async function handleSavePrompt() {
 const currentConversation = computed(() =>
   chatStore.conversations.find(c => c.id === chatStore.currentConversationId)
 )
+
+const shareUrl = computed(() => {
+  const token = currentConversation.value?.share_token
+  if (!token) return ''
+  return `${window.location.origin}/share/${token}`
+})
+
+async function handleCreateShare() {
+  if (!chatStore.currentConversationId) return
+  shareLoading.value = true
+  try {
+    const resp = await createShare(chatStore.currentConversationId)
+    // Update the conversation in the store
+    const conv = chatStore.conversations.find(c => c.id === chatStore.currentConversationId)
+    if (conv) conv.share_token = resp.share_token
+  } catch {
+    ElMessage.error('Failed to create share link')
+  } finally {
+    shareLoading.value = false
+  }
+}
+
+async function handleRevokeShare() {
+  if (!chatStore.currentConversationId) return
+  shareLoading.value = true
+  try {
+    await revokeShare(chatStore.currentConversationId)
+    const conv = chatStore.conversations.find(c => c.id === chatStore.currentConversationId)
+    if (conv) conv.share_token = null
+  } catch {
+    ElMessage.error('Failed to revoke share link')
+  } finally {
+    shareLoading.value = false
+  }
+}
+
+async function copyShareUrl() {
+  try {
+    await navigator.clipboard.writeText(shareUrl.value)
+    ElMessage.success({ message: 'Link copied', duration: 1500 })
+  } catch {
+    ElMessage.error('Copy failed')
+  }
+}
 
 const cascaderOptions = computed(() => {
   return settingsStore.providers.map(p => ({

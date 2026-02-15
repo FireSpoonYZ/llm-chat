@@ -23,7 +23,7 @@
       </template>
       <template v-else>
         <template v-for="(block, idx) in contentBlocks" :key="idx">
-          <div v-if="block.type === 'text'" class="message-content" v-html="renderMarkdown(block.content, props.conversationId)"></div>
+          <div v-if="block.type === 'text'" class="message-content" v-html="renderMarkdown(block.content, props.conversationId, props.shareToken)"></div>
           <div v-else-if="block.type === 'thinking'" class="thinking-block">
             <details>
               <summary class="thinking-summary">Thinking</summary>
@@ -39,9 +39,10 @@
             :is-error="block.isError"
             :is-loading="block.isLoading"
             :conversation-id="props.conversationId"
+            :share-token="props.shareToken"
           />
         </template>
-        <div class="message-footer">
+        <div v-if="!props.readOnly" class="message-footer">
           <el-button
             v-if="message.role === 'user' && !isStreaming"
             class="action-btn edit-btn"
@@ -85,7 +86,7 @@ import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
 import type { Message, ContentBlock } from '../types'
 import ToolCallDisplay from './ToolCallDisplay.vue'
-import { fileViewUrl } from '../utils/fileUrl'
+import { fileViewUrl, sharedFileViewUrl } from '../utils/fileUrl'
 
 // Module-level singleton — shared across all ChatMessage instances
 const md = new MarkdownIt({
@@ -116,7 +117,9 @@ if (md.renderer && md.renderer.rules) {
       const src = token.attrs[srcIdx][1]
       if (src.startsWith('sandbox://')) {
         const path = src.replace('sandbox://', '')
-        token.attrs[srcIdx][1] = fileViewUrl(env.conversationId, path)
+        token.attrs[srcIdx][1] = env.shareToken
+          ? sharedFileViewUrl(env.shareToken, path)
+          : fileViewUrl(env.conversationId, path)
       }
     }
     return defaultImageRender(tokens, idx, options, env, self)
@@ -130,27 +133,29 @@ const renderCache = new Map<string, string>()
 const SANDBOX_VIDEO_RE = /\[Video:\s*([^\]]*)\]\(sandbox:\/\/([^)]+)\)/g
 const SANDBOX_AUDIO_RE = /\[Audio:\s*([^\]]*)\]\(sandbox:\/\/([^)]+)\)/g
 
-function renderMarkdown(text: string, conversationId?: string): string {
-  const cacheKey = `${conversationId || ''}:${text || ''}`
+function renderMarkdown(text: string, conversationId?: string, shareToken?: string): string {
+  const cacheKey = `${shareToken || ''}:${conversationId || ''}:${text || ''}`
   const cached = renderCache.get(cacheKey)
   if (cached !== undefined) return cached
 
   let processed = text || ''
 
   // Replace video sandbox links with <video> tags before markdown rendering
-  if (conversationId) {
+  if (conversationId || shareToken) {
+    const resolveUrl = (path: string) =>
+      shareToken ? sharedFileViewUrl(shareToken, path) : fileViewUrl(conversationId!, path)
     processed = processed.replace(SANDBOX_VIDEO_RE, (_match, _name, path) => {
-      const url = fileViewUrl(conversationId, path)
+      const url = resolveUrl(path)
       return `<video controls preload="metadata" src="${url}"></video>`
     })
     processed = processed.replace(SANDBOX_AUDIO_RE, (_match, _name, path) => {
-      const url = fileViewUrl(conversationId, path)
+      const url = resolveUrl(path)
       return `<audio controls preload="metadata" src="${url}"></audio>`
     })
   }
 
   const html = DOMPurify.sanitize(
-    md.render(processed, { conversationId: conversationId || '' }),
+    md.render(processed, { conversationId: conversationId || '', shareToken: shareToken || '' }),
     {
       ADD_TAGS: ['video', 'audio', 'source'],
       ADD_ATTR: ['controls', 'preload', 'src', 'type', 'autoplay', 'loop', 'muted'],
@@ -166,6 +171,8 @@ const props = defineProps<{
   message: Message
   conversationId?: string
   isStreaming?: boolean
+  readOnly?: boolean
+  shareToken?: string
   streamingBlocks?: ContentBlock[]
   toolCalls?: Array<{
     id: string

@@ -31,6 +31,7 @@ pub struct ConversationResponse {
     pub updated_at: String,
     pub image_provider: Option<String>,
     pub image_model: Option<String>,
+    pub share_token: Option<String>,
 }
 
 impl From<db::conversations::Conversation> for ConversationResponse {
@@ -46,6 +47,7 @@ impl From<db::conversations::Conversation> for ConversationResponse {
             updated_at: c.updated_at,
             image_provider: c.image_provider,
             image_model: c.image_model,
+            share_token: c.share_token,
         }
     }
 }

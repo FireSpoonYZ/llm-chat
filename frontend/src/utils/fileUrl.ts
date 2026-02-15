@@ -8,3 +8,11 @@ export function fileViewUrl(conversationId: string, path: string): string {
   const base = `/api/conversations/${conversationId}/files/view?path=${encodeURIComponent(path)}`
   return token ? `${base}&token=${encodeURIComponent(token)}` : base
 }
+
+/**
+ * Build a file-view URL for shared (public) conversations.
+ * No auth token needed.
+ */
+export function sharedFileViewUrl(shareToken: string, path: string): string {
+  return `/api/shared/${shareToken}/files/view?path=${encodeURIComponent(path)}`
+}

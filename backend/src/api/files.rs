@@ -52,7 +52,7 @@ struct ListFilesResponse {
 
 /// Resolve a user-provided path safely within the workspace root.
 /// Returns None if the resolved path escapes the workspace.
-fn resolve_safe_path(workspace_root: &std::path::Path, requested: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_safe_path(workspace_root: &std::path::Path, requested: &str) -> Option<PathBuf> {
     // Reject paths that try obvious traversal
     let cleaned = requested.trim_start_matches('/');
     let candidate = workspace_root.join(cleaned);
@@ -541,7 +541,7 @@ async fn view_file(
 }
 
 /// Parse a simple "bytes=START-END" or "bytes=START-" range header.
-fn parse_range(range_str: &str, file_size: u64) -> Option<(u64, u64)> {
+pub(crate) fn parse_range(range_str: &str, file_size: u64) -> Option<(u64, u64)> {
     let range_str = range_str.strip_prefix("bytes=")?;
     let parts: Vec<&str> = range_str.splitn(2, '-').collect();
     if parts.len() != 2 {

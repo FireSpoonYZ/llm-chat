@@ -15,6 +15,7 @@ pub struct Conversation {
     pub updated_at: String,
     pub image_provider: Option<String>,
     pub image_model: Option<String>,
+    pub share_token: Option<String>,
 }
 
 pub async fn create_conversation(
@@ -35,7 +36,7 @@ pub async fn create_conversation(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING id, user_id, title, provider, model_name,
                    system_prompt_override, deep_thinking, created_at, updated_at,
-                   image_provider, image_model",
+                   image_provider, image_model, share_token",
     )
     .bind(&id)
     .bind(user_id)
@@ -57,7 +58,7 @@ pub async fn list_conversations(
     sqlx::query_as::<_, Conversation>(
         "SELECT id, user_id, title, provider, model_name,
                 system_prompt_override, deep_thinking, created_at, updated_at,
-                image_provider, image_model
+                image_provider, image_model, share_token
          FROM conversations
          WHERE user_id = ?
          ORDER BY updated_at DESC",
@@ -75,7 +76,7 @@ pub async fn get_conversation(
     sqlx::query_as::<_, Conversation>(
         "SELECT id, user_id, title, provider, model_name,
                 system_prompt_override, deep_thinking, created_at, updated_at,
-                image_provider, image_model
+                image_provider, image_model, share_token
          FROM conversations
          WHERE id = ? AND user_id = ?",
     )
@@ -106,7 +107,7 @@ pub async fn update_conversation(
          WHERE id = ? AND user_id = ?
          RETURNING id, user_id, title, provider, model_name,
                    system_prompt_override, deep_thinking, created_at, updated_at,
-                   image_provider, image_model",
+                   image_provider, image_model, share_token",
     )
     .bind(title)
     .bind(provider)
@@ -135,6 +136,60 @@ pub async fn delete_conversation(
     .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn set_share_token(
+    pool: &SqlitePool,
+    id: &str,
+    user_id: &str,
+    share_token: &str,
+) -> Result<Option<Conversation>, sqlx::Error> {
+    // Only set if share_token is currently NULL to avoid race conditions
+    sqlx::query_as::<_, Conversation>(
+        "UPDATE conversations
+         SET share_token = ?, updated_at = datetime('now')
+         WHERE id = ? AND user_id = ? AND share_token IS NULL
+         RETURNING id, user_id, title, provider, model_name,
+                   system_prompt_override, deep_thinking, created_at, updated_at,
+                   image_provider, image_model, share_token",
+    )
+    .bind(share_token)
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn remove_share_token(
+    pool: &SqlitePool,
+    id: &str,
+    user_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE conversations SET share_token = NULL, updated_at = datetime('now')
+         WHERE id = ? AND user_id = ? AND share_token IS NOT NULL",
+    )
+    .bind(id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn get_conversation_by_share_token(
+    pool: &SqlitePool,
+    share_token: &str,
+) -> Result<Option<Conversation>, sqlx::Error> {
+    sqlx::query_as::<_, Conversation>(
+        "SELECT id, user_id, title, provider, model_name,
+                system_prompt_override, deep_thinking, created_at, updated_at,
+                image_provider, image_model, share_token
+         FROM conversations
+         WHERE share_token = ?",
+    )
+    .bind(share_token)
+    .fetch_optional(pool)
+    .await
 }
 
 #[cfg(test)]
@@ -267,5 +322,61 @@ mod tests {
         // The other user should not be able to see this conversation
         let fetched = get_conversation(&pool, &conv.id, &other_user.id).await.unwrap();
         assert!(fetched.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_share_token() {
+        let (pool, user_id) = setup().await;
+        let conv = create_conversation(&pool, &user_id, "Shared Chat", None, None, None, false, None, None).await.unwrap();
+        assert!(conv.share_token.is_none());
+
+        let updated = set_share_token(&pool, &conv.id, &user_id, "abc123").await.unwrap();
+        assert!(updated.is_some());
+        assert_eq!(updated.unwrap().share_token.as_deref(), Some("abc123"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_share_token() {
+        let (pool, user_id) = setup().await;
+        let conv = create_conversation(&pool, &user_id, "Shared Chat", None, None, None, false, None, None).await.unwrap();
+        set_share_token(&pool, &conv.id, &user_id, "abc123").await.unwrap();
+
+        let removed = remove_share_token(&pool, &conv.id, &user_id).await.unwrap();
+        assert!(removed);
+
+        let fetched = get_conversation(&pool, &conv.id, &user_id).await.unwrap().unwrap();
+        assert!(fetched.share_token.is_none());
+
+        // Removing again should return false
+        let removed_again = remove_share_token(&pool, &conv.id, &user_id).await.unwrap();
+        assert!(!removed_again);
+    }
+
+    #[tokio::test]
+    async fn test_get_by_share_token() {
+        let (pool, user_id) = setup().await;
+        let conv = create_conversation(&pool, &user_id, "Shared Chat", None, None, None, false, None, None).await.unwrap();
+        set_share_token(&pool, &conv.id, &user_id, "token123").await.unwrap();
+
+        let fetched = get_conversation_by_share_token(&pool, "token123").await.unwrap();
+        assert!(fetched.is_some());
+        assert_eq!(fetched.unwrap().id, conv.id);
+    }
+
+    #[tokio::test]
+    async fn test_get_by_invalid_token() {
+        let (pool, _user_id) = setup().await;
+        let fetched = get_conversation_by_share_token(&pool, "nonexistent").await.unwrap();
+        assert!(fetched.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_share_token_wrong_user() {
+        let (pool, user_id) = setup().await;
+        let other_user = create_user(&pool, "other", "other@example.com", "hash2").await.unwrap();
+        let conv = create_conversation(&pool, &user_id, "My Chat", None, None, None, false, None, None).await.unwrap();
+
+        let result = set_share_token(&pool, &conv.id, &other_user.id, "stolen").await.unwrap();
+        assert!(result.is_none());
     }
 }

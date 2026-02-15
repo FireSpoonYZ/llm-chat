@@ -4,3 +4,4 @@ pub mod conversations;
 pub mod admin;
 pub mod presets;
 pub mod files;
+pub mod sharing;

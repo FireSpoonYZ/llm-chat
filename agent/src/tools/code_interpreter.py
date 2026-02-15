@@ -10,11 +10,10 @@ from typing import Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
-MEDIA_EXTENSIONS = frozenset({
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
-    ".mp4", ".webm", ".mov",
-    ".mp3", ".wav", ".ogg", ".m4a",
-})
+from ._media import ALL_MEDIA_EXTENSIONS, classify_media, format_sandbox_ref
+
+# code_interpreter also supports SVG output
+_SCAN_EXTENSIONS = ALL_MEDIA_EXTENSIONS | frozenset({".svg"})
 
 
 def _scan_media_files(workspace: str) -> set[str]:
@@ -23,7 +22,7 @@ def _scan_media_files(workspace: str) -> set[str]:
     for root, _dirs, files in os.walk(workspace):
         for f in files:
             ext = os.path.splitext(f)[1].lower()
-            if ext in MEDIA_EXTENSIONS:
+            if ext in _SCAN_EXTENSIONS:
                 full = os.path.join(root, f)
                 rel = os.path.relpath(full, workspace)
                 media.add(rel)
@@ -37,13 +36,13 @@ def _format_media_refs(new_files: set[str]) -> str:
     lines = []
     for rel in sorted(new_files):
         ext = os.path.splitext(rel)[1].lower()
-        sandbox_url = f"sandbox:///{rel}"
-        if ext in {".mp4", ".webm", ".mov"}:
-            lines.append(f"[Video: {os.path.basename(rel)}]({sandbox_url})")
-        elif ext in {".mp3", ".wav", ".ogg", ".m4a"}:
-            lines.append(f"[Audio: {os.path.basename(rel)}]({sandbox_url})")
+        media_type = classify_media(ext)
+        if media_type:
+            lines.append(format_sandbox_ref(rel, media_type))
         else:
-            lines.append(f"![{os.path.basename(rel)}]({sandbox_url})")
+            # SVG or other non-classified media — treat as image
+            name = os.path.basename(rel)
+            lines.append(f"![{name}](sandbox:///{rel})")
     return "\n\n" + "\n\n".join(lines)
 
 

@@ -146,6 +146,7 @@ class TestReadTool:
         assert len(result) == 2
         assert result[0]["type"] == "text"
         assert "photo.png" in result[0]["text"]
+        assert "sandbox:///photo.png" in result[0]["text"]
         assert result[1]["type"] == "image_url"
         assert result[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
@@ -255,6 +256,7 @@ class TestReadTool:
         result = tool._run("images/cat.jpg")
         assert isinstance(result, list)
         assert "images/cat.jpg" in result[0]["text"]
+        assert "sandbox:///images/cat.jpg" in result[0]["text"]
 
     def test_read_image_base64_roundtrip(self, workspace):
         """Base64 content should decode back to original bytes."""
@@ -286,6 +288,54 @@ class TestReadTool:
         tool = ReadTool(workspace=workspace)
         result = tool._run("data.bin")
         assert isinstance(result, str)
+
+    def test_read_video_mp4(self, workspace):
+        path = os.path.join(workspace, "clip.mp4")
+        with open(path, "wb") as f:
+            f.write(b"\x00\x00\x00\x1cftyp" + b"\x00" * 100)
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("clip.mp4")
+        assert isinstance(result, str)
+        assert "sandbox:///clip.mp4" in result
+        assert "[Video:" in result
+
+    def test_read_audio_mp3(self, workspace):
+        path = os.path.join(workspace, "song.mp3")
+        with open(path, "wb") as f:
+            f.write(b"ID3" + b"\x00" * 100)
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("song.mp3")
+        assert isinstance(result, str)
+        assert "sandbox:///song.mp3" in result
+        assert "[Audio:" in result
+
+    def test_read_video_empty(self, workspace):
+        path = os.path.join(workspace, "empty.mp4")
+        with open(path, "wb") as f:
+            pass
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("empty.mp4")
+        assert isinstance(result, str)
+        assert "empty" in result.lower()
+
+    def test_read_audio_empty(self, workspace):
+        path = os.path.join(workspace, "empty.mp3")
+        with open(path, "wb") as f:
+            pass
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("empty.mp3")
+        assert isinstance(result, str)
+        assert "empty" in result.lower()
+
+    def test_read_video_in_subdirectory(self, workspace):
+        sub = os.path.join(workspace, "videos")
+        os.makedirs(sub)
+        with open(os.path.join(sub, "demo.webm"), "wb") as f:
+            f.write(b"\x1a\x45\xdf\xa3" + b"\x00" * 100)
+        tool = ReadTool(workspace=workspace)
+        result = tool._run("videos/demo.webm")
+        assert isinstance(result, str)
+        assert "sandbox:///videos/demo.webm" in result
 
 
 # ---------------------------------------------------------------------------

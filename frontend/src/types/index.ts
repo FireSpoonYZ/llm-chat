@@ -22,6 +22,14 @@ export interface Conversation {
   updated_at: string
   image_provider: string | null
   image_model: string | null
+  share_token: string | null
+}
+
+export interface SharedConversation {
+  title: string
+  model_name: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface Message {

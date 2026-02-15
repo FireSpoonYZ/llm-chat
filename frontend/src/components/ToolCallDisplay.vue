@@ -30,8 +30,8 @@
               <audio v-else-if="media.type === 'audio'" controls preload="metadata" :src="media.url" class="tool-media-audio" />
             </template>
           </div>
-          <pre class="tool-content" :class="{ 'tool-error': isError }">{{
-            truncatedResult
+          <pre v-if="cleanedResult" class="tool-content" :class="{ 'tool-error': isError }">{{
+            cleanedResult
           }}</pre>
         </div>
       </div>
@@ -52,7 +52,7 @@ import {
   VideoPlay,
   Picture,
 } from '@element-plus/icons-vue'
-import { fileViewUrl } from '../utils/fileUrl'
+import { fileViewUrl, sharedFileViewUrl } from '../utils/fileUrl'
 
 const props = defineProps<{
   toolName: string
@@ -62,6 +62,7 @@ const props = defineProps<{
   isError?: boolean
   isLoading?: boolean
   conversationId?: string
+  shareToken?: string
 }>()
 
 const expanded = ref(false)
@@ -104,7 +105,7 @@ interface MediaRef {
 const SANDBOX_RE = /sandbox:\/\/\/([^\s)]+)/g
 
 const mediaRefs = computed<MediaRef[]>(() => {
-  if (!props.toolResult || !props.conversationId) return []
+  if (!props.toolResult || (!props.conversationId && !props.shareToken)) return []
   const refs: MediaRef[] = []
   let match: RegExpExecArray | null
   const re = new RegExp(SANDBOX_RE.source, 'g')
@@ -112,7 +113,9 @@ const mediaRefs = computed<MediaRef[]>(() => {
     const path = match[1]
     const ext = path.substring(path.lastIndexOf('.')).toLowerCase()
     const name = path.substring(path.lastIndexOf('/') + 1)
-    const url = fileViewUrl(props.conversationId, '/' + path)
+    const url = props.shareToken
+      ? sharedFileViewUrl(props.shareToken, '/' + path)
+      : fileViewUrl(props.conversationId!, '/' + path)
     if (IMAGE_EXTS.includes(ext)) {
       refs.push({ type: 'image', url, name })
     } else if (VIDEO_EXTS.includes(ext)) {
@@ -147,6 +150,14 @@ const truncatedResult = computed(() => {
     return props.toolResult.slice(0, MAX_RESULT_LENGTH) + '\n... [truncated]'
   }
   return props.toolResult
+})
+
+const SANDBOX_MARKDOWN_RE = /!?\[[^\]]*\]\(sandbox:\/\/\/[^)]+\)\n?/g
+
+const cleanedResult = computed(() => {
+  const text = truncatedResult.value
+  if (mediaRefs.value.length === 0) return text
+  return text.replace(SANDBOX_MARKDOWN_RE, '').trim()
 })
 </script>
 

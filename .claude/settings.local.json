@@ -63,11 +63,9 @@
       "Bash(sudo iptables:*)",
       "Bash(npx vite build:*)",
       "Bash(npx vitest:*)",
-      "Bash($HOME/.local/bin/uv run pytest:*)",
       "Bash(/home/firespoon/.local/bin/uv run pytest:*)",
       "WebFetch(domain:docs.rs)",
       "Bash(wc:*)",
-      "Bash($HOME/.local/bin/uv add:*)",
       "Bash(/home/firespoon/.local/bin/uv add:*)",
       "Bash(/home/firespoon/.local/bin/uv run python:*)",
       "Bash(pnpm remove:*)",
@@ -79,8 +77,7 @@
       "Bash(git diff:*)",
       "Bash(docker system df:*)",
       "Bash(~/.local/bin/uv run --project /home/firespoon/llm-chat/agent pytest:*)",
-      "Bash(uv run python:*)",
-      "Bash(PATH=\"$HOME/.local/bin:$PATH\" uv run pytest:*)"
+      "Bash(uv run python:*)"
     ],
     "deny": [
       "WebSearch"

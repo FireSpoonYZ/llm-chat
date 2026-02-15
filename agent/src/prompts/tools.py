@@ -102,13 +102,16 @@ TOOL_DESCRIPTIONS = {
         "automatically detected and displayed inline."
     ),
     "image_generation": (
-        "**image_generation** - Generate images from text descriptions "
-        "using AI.\n"
+        "**image_generation** - Generate or edit images using AI.\n"
         "  Usage:\n"
         "  - Provide a detailed prompt describing the desired image.\n"
-        "  - Supports size options: 1024x1024, 1024x1792, 1792x1024.\n"
-        "  - Quality options: standard, hd.\n"
+        "  - Supports size options: 1024x1024, 1024x1536, 1536x1024.\n"
+        "  - Quality options: low, medium, high, auto.\n"
         "  - Can generate 1-4 images at once.\n"
+        "  - Optional `reference_image`: path (relative to /workspace) to an existing image file "
+        "to use as a starting point. When provided, the prompt describes "
+        "how to modify that image (e.g., change colors, add elements, "
+        "apply a style). Supported formats: PNG, JPEG, GIF, WebP.\n"
         "  - Returns sandbox:// URLs that display inline in chat.\n"
         "  - Available for OpenAI and Google providers. Uses the conversation's configured model."
     ),

@@ -17,6 +17,12 @@ const router = createRouter({
       component: () => import('../views/Settings.vue'),
       meta: { requiresAuth: true },
     },
+    {
+      path: '/share/:shareToken',
+      name: 'shared-chat',
+      component: () => import('../views/SharedChat.vue'),
+      props: true,
+    },
   ],
 })
 

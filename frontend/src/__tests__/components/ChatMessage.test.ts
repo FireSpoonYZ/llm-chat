@@ -205,3 +205,41 @@ describe('ChatMessage - contentBlocks parsing', () => {
     expect(wrapper.find('.message-content').text()).toContain('streaming')
   })
 })
+
+describe('ChatMessage - readOnly mode', () => {
+  it('hides message-footer when readOnly is true', () => {
+    const wrapper = mount(ChatMessage, {
+      props: {
+        message: makeMessage({ role: 'user' }),
+        readOnly: true,
+      },
+      global: globalConfig,
+    })
+    expect(wrapper.find('.message-footer').exists()).toBe(false)
+    expect(wrapper.find('.edit-btn').exists()).toBe(false)
+  })
+
+  it('hides regenerate and copy buttons for assistant in readOnly', () => {
+    const wrapper = mount(ChatMessage, {
+      props: {
+        message: makeMessage({ role: 'assistant' }),
+        readOnly: true,
+      },
+      global: globalConfig,
+    })
+    expect(wrapper.find('.message-footer').exists()).toBe(false)
+    expect(wrapper.find('.regenerate-btn').exists()).toBe(false)
+    expect(wrapper.find('.copy-btn').exists()).toBe(false)
+  })
+
+  it('shows message-footer when readOnly is false', () => {
+    const wrapper = mount(ChatMessage, {
+      props: {
+        message: makeMessage({ role: 'user' }),
+        readOnly: false,
+      },
+      global: globalConfig,
+    })
+    expect(wrapper.find('.message-footer').exists()).toBe(true)
+  })
+})

@@ -77,6 +77,8 @@ async fn main() {
         .nest("/api/admin", api::admin::router())
         .nest("/api/mcp-servers", mcp_servers_public_router())
         .nest("/api/presets", api::presets::router())
+        .nest("/api/conversations", api::sharing::share_management_router())
+        .nest("/api/shared", api::sharing::shared_router())
         .with_state(state.clone())
         .layer(cors.clone())
         .layer(TraceLayer::new_for_http());

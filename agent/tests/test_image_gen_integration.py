@@ -1,7 +1,7 @@
 """Integration tests for image generation — requires real API key.
 
 Run:
-    cd agent && PATH="$HOME/.local/bin:$PATH" uv run pytest tests/test_image_gen_integration.py -v -s
+    cd agent && uv run pytest tests/test_image_gen_integration.py -v -s
 """
 
 from __future__ import annotations

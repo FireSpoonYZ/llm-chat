@@ -11,10 +11,12 @@ from typing import Any, Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from ._media import MEDIA_TYPES, classify_media, sandbox_url
 from ._paths import resolve_workspace_path as _resolve_path
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+IMAGE_EXTENSIONS = MEDIA_TYPES["image"]
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_MEDIA_SIZE = 100 * 1024 * 1024  # 100 MB for video/audio
 
 
 # ---------------------------------------------------------------------------
@@ -86,12 +88,26 @@ class ReadTool(BaseTool):
                 data = resolved.read_bytes()
                 b64 = base64.b64encode(data).decode("ascii")
                 mime = f"image/{ext.lstrip('.')}"
-                if ext == ".jpg":
+                if ext in (".jpg", ".jpeg"):
                     mime = "image/jpeg"
+                s_url = sandbox_url(resolved, self.workspace)
                 return [
-                    {"type": "text", "text": f"Image file: {file_path}"},
+                    {"type": "text", "text": f"Image file: {file_path}\n![{file_path}]({s_url})"},
                     {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
                 ]
+
+            # Video/audio files: return text with sandbox URL
+            media_type = classify_media(ext)
+            if media_type in ("video", "audio"):
+                size = resolved.stat().st_size
+                if size == 0:
+                    return f"Error: {media_type} file is empty: {file_path}"
+                if size > MAX_MEDIA_SIZE:
+                    return f"Error: {media_type} file too large ({size} bytes, max {MAX_MEDIA_SIZE}): {file_path}"
+                s_url = sandbox_url(resolved, self.workspace)
+                name = os.path.basename(file_path)
+                label = media_type.capitalize()
+                return f"{label} file: {file_path} ({size} bytes)\n[{label}: {name}]({s_url})"
 
             with open(resolved, "r", encoding="utf-8", errors="replace") as fh:
                 lines = fh.readlines()
