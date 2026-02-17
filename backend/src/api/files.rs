@@ -1,23 +1,26 @@
 use axum::{
+    Json, Router,
     body::Body,
     extract::{Multipart, Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::Response,
     routing::{get, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Write as _};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use zip::write::SimpleFileOptions;
 
-use crate::auth::middleware::{AppState, AuthUser};
+use crate::auth::middleware::{AppState, QueryAuthUser};
 use crate::config::Config;
 use crate::db;
 use crate::error::AppError;
+
+const MAX_BATCH_DOWNLOAD_PATHS: usize = 100;
+const MAX_BATCH_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -26,6 +29,12 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/download-batch", post(download_batch))
         .route("/upload", post(upload_files))
         .route("/view", get(view_file))
+}
+
+#[derive(Debug)]
+enum BatchZipError {
+    TooLarge(String),
+    Other(String),
 }
 
 #[derive(Deserialize)]
@@ -52,7 +61,10 @@ struct ListFilesResponse {
 
 /// Resolve a user-provided path safely within the workspace root.
 /// Returns None if the resolved path escapes the workspace.
-pub(crate) fn resolve_safe_path(workspace_root: &std::path::Path, requested: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_safe_path(
+    workspace_root: &std::path::Path,
+    requested: &str,
+) -> Option<PathBuf> {
     // Reject paths that try obvious traversal
     let cleaned = requested.trim_start_matches('/');
     let candidate = workspace_root.join(cleaned);
@@ -85,8 +97,7 @@ async fn read_dir_recursive(dir: &std::path::Path) -> Result<Vec<FileEntry>, App
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0))
-            .flatten()
+            .and_then(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0))
             .map(|dt| dt.to_rfc3339());
 
         let children = if is_dir {
@@ -115,7 +126,7 @@ async fn read_dir_recursive(dir: &std::path::Path) -> Result<Vec<FileEntry>, App
 
 async fn list_files(
     State(state): State<Arc<AppState>>,
-    auth: AuthUser,
+    auth: QueryAuthUser,
     Path(conversation_id): Path<String>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<ListFilesResponse>, AppError> {
@@ -134,9 +145,12 @@ async fn list_files(
 
     let requested = query.path.unwrap_or_default();
     let dir_path = if requested.is_empty() || requested == "/" {
-        workspace_root.canonicalize().map_err(|e| AppError::Internal(e.to_string()))?
+        workspace_root
+            .canonicalize()
+            .map_err(|e| AppError::Internal(e.to_string()))?
     } else {
-        resolve_safe_path(&workspace_root, &requested).ok_or_else(|| AppError::Forbidden("Path traversal denied".into()))?
+        resolve_safe_path(&workspace_root, &requested)
+            .ok_or_else(|| AppError::Forbidden("Path traversal denied".into()))?
     };
 
     if !dir_path.is_dir() {
@@ -153,14 +167,20 @@ async fn list_files(
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        while let Some(entry) = read_dir.next_entry().await.map_err(|e| AppError::Internal(e.to_string()))? {
-            let metadata = entry.metadata().await.map_err(|e| AppError::Internal(e.to_string()))?;
+        while let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?
+        {
+            let metadata = entry
+                .metadata()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
             let modified = metadata
                 .modified()
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0))
-                .flatten()
+                .and_then(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0))
                 .map(|dt| dt.to_rfc3339());
 
             entries.push(FileEntry {
@@ -173,11 +193,19 @@ async fn list_files(
         }
 
         // Sort: directories first, then alphabetical
-        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
         entries
     };
 
-    let display_path = if requested.is_empty() { "/".into() } else { format!("/{}", requested.trim_start_matches('/')) };
+    let display_path = if requested.is_empty() {
+        "/".into()
+    } else {
+        format!("/{}", requested.trim_start_matches('/'))
+    };
 
     Ok(Json(ListFilesResponse {
         path: display_path,
@@ -187,7 +215,7 @@ async fn list_files(
 
 async fn download_file(
     State(state): State<Arc<AppState>>,
-    auth: AuthUser,
+    auth: QueryAuthUser,
     Path(conversation_id): Path<String>,
     Query(query): Query<FileQuery>,
 ) -> Result<Response, AppError> {
@@ -195,7 +223,9 @@ async fn download_file(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    let requested = query.path.ok_or_else(|| AppError::BadRequest("Path required".into()))?;
+    let requested = query
+        .path
+        .ok_or_else(|| AppError::BadRequest("Path required".into()))?;
     let workspace_root = PathBuf::from(format!("data/conversations/{}", conversation_id));
     let file_path = resolve_safe_path(&workspace_root, &requested)
         .ok_or_else(|| AppError::Forbidden("Path traversal denied".into()))?;
@@ -259,14 +289,14 @@ async fn download_dir_zip(
     let stream = resp.bytes_stream();
     let body = Body::from_stream(stream);
 
-    Ok(Response::builder()
+    Response::builder()
         .header(header::CONTENT_TYPE, "application/zip")
         .header(
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{}.zip\"", dir_name),
         )
         .body(body)
-        .map_err(|e| AppError::Internal(e.to_string()))?)
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -276,12 +306,18 @@ struct BatchDownloadRequest {
 
 async fn download_batch(
     State(state): State<Arc<AppState>>,
-    auth: AuthUser,
+    auth: QueryAuthUser,
     Path(conversation_id): Path<String>,
     Json(req): Json<BatchDownloadRequest>,
 ) -> Result<Response, AppError> {
     if req.paths.is_empty() {
         return Err(AppError::BadRequest("No paths provided".into()));
+    }
+    if req.paths.len() > MAX_BATCH_DOWNLOAD_PATHS {
+        return Err(AppError::BadRequest(format!(
+            "Too many paths requested (max {})",
+            MAX_BATCH_DOWNLOAD_PATHS
+        )));
     }
 
     db::conversations::get_conversation(&state.db, &conversation_id, &auth.user_id)
@@ -300,31 +336,55 @@ async fn download_batch(
     }
 
     // Build zip in a blocking task to avoid blocking the async executor
-    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, BatchZipError> {
         let buf = Cursor::new(Vec::new());
         let mut zip = zip::ZipWriter::new(buf);
-        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let mut total_uncompressed = 0u64;
 
         for (resolved, name_prefix) in &resolved_paths {
             if resolved.is_file() {
-                let data = std::fs::read(resolved)
-                    .map_err(|e| e.to_string())?;
+                let file_size = std::fs::metadata(resolved)
+                    .map_err(|e| BatchZipError::Other(e.to_string()))?
+                    .len();
+                total_uncompressed = total_uncompressed.saturating_add(file_size);
+                if total_uncompressed > MAX_BATCH_DOWNLOAD_BYTES {
+                    return Err(BatchZipError::TooLarge(format!(
+                        "Requested files exceed max archive size ({} bytes)",
+                        MAX_BATCH_DOWNLOAD_BYTES
+                    )));
+                }
+
+                let data =
+                    std::fs::read(resolved).map_err(|e| BatchZipError::Other(e.to_string()))?;
                 zip.start_file(name_prefix.as_str(), options)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| BatchZipError::Other(e.to_string()))?;
                 zip.write_all(&data)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| BatchZipError::Other(e.to_string()))?;
             } else if resolved.is_dir() {
-                add_dir_to_zip(&mut zip, resolved, name_prefix, options)
-                    .map_err(|e| e.to_string())?;
+                add_dir_to_zip(
+                    &mut zip,
+                    resolved,
+                    name_prefix,
+                    options,
+                    &mut total_uncompressed,
+                    MAX_BATCH_DOWNLOAD_BYTES,
+                )?;
             }
         }
 
-        let cursor = zip.finish().map_err(|e| e.to_string())?;
+        let cursor = zip
+            .finish()
+            .map_err(|e| BatchZipError::Other(e.to_string()))?;
         Ok(cursor.into_inner())
     })
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?
-    .map_err(AppError::Internal)?;
+    .map_err(|e| match e {
+        BatchZipError::TooLarge(msg) => AppError::PayloadTooLarge(msg),
+        BatchZipError::Other(msg) => AppError::Internal(msg),
+    })?;
 
     Response::builder()
         .header(header::CONTENT_TYPE, "application/zip")
@@ -360,7 +420,7 @@ fn is_safe_filename(name: &str) -> bool {
 
 async fn upload_files(
     State(state): State<Arc<AppState>>,
-    auth: AuthUser,
+    auth: QueryAuthUser,
     Path(conversation_id): Path<String>,
     Query(query): Query<FileQuery>,
     mut multipart: Multipart,
@@ -406,10 +466,7 @@ async fn upload_files(
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))?
     {
-        let file_name = field
-            .file_name()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        let file_name = field.file_name().map(|s| s.to_string()).unwrap_or_default();
 
         if !is_safe_filename(&file_name) {
             return Err(AppError::BadRequest(format!(
@@ -418,29 +475,36 @@ async fn upload_files(
             )));
         }
 
-        let data = field
-            .bytes()
-            .await
-            .map_err(|e| AppError::BadRequest(e.to_string()))?;
-
         let dest = target_dir.join(&file_name);
-        tokio::fs::write(&dest, &data)
+        let mut file = tokio::fs::File::create(&dest)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut field = field;
+        let mut file_size = 0u64;
+
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|e| AppError::BadRequest(e.to_string()))?
+        {
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            file_size = file_size.saturating_add(chunk.len() as u64);
+        }
+        file.flush()
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
         let rel_path = if requested.is_empty() || requested == "/" {
             format!("/{}", file_name)
         } else {
-            format!(
-                "/{}/{}",
-                requested.trim_start_matches('/'),
-                file_name
-            )
+            format!("/{}/{}", requested.trim_start_matches('/'), file_name)
         };
 
         uploaded.push(UploadedFileInfo {
             name: file_name,
-            size: data.len() as u64,
+            size: file_size,
             path: rel_path,
         });
     }
@@ -455,7 +519,7 @@ async fn upload_files(
 /// Serve a file inline with correct MIME type and optional Range support.
 async fn view_file(
     State(state): State<Arc<AppState>>,
-    auth: AuthUser,
+    auth: QueryAuthUser,
     Path(conversation_id): Path<String>,
     Query(query): Query<FileQuery>,
     headers: HeaderMap,
@@ -532,16 +596,16 @@ async fn view_file(
         .header(header::CONTENT_TYPE, mime)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, file_size.to_string())
-        .header(
-            header::CACHE_CONTROL,
-            "private, max-age=3600, immutable",
-        )
+        .header(header::CACHE_CONTROL, "private, max-age=3600, immutable")
         .body(body)
         .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 /// Parse a simple "bytes=START-END" or "bytes=START-" range header.
 pub(crate) fn parse_range(range_str: &str, file_size: u64) -> Option<(u64, u64)> {
+    if file_size == 0 {
+        return None;
+    }
     let range_str = range_str.strip_prefix("bytes=")?;
     let parts: Vec<&str> = range_str.splitn(2, '-').collect();
     if parts.len() != 2 {
@@ -564,17 +628,39 @@ fn add_dir_to_zip(
     dir: &std::path::Path,
     prefix: &str,
     options: SimpleFileOptions,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
+    total_uncompressed: &mut u64,
+    max_uncompressed: u64,
+) -> Result<(), BatchZipError> {
+    for entry in std::fs::read_dir(dir).map_err(|e| BatchZipError::Other(e.to_string()))? {
+        let entry = entry.map_err(|e| BatchZipError::Other(e.to_string()))?;
         let path = entry.path();
         let name = format!("{}/{}", prefix, entry.file_name().to_string_lossy());
         if path.is_dir() {
-            add_dir_to_zip(zip, &path, &name, options)?;
+            add_dir_to_zip(
+                zip,
+                &path,
+                &name,
+                options,
+                total_uncompressed,
+                max_uncompressed,
+            )?;
         } else {
-            let data = std::fs::read(&path)?;
-            zip.start_file(&name, options)?;
-            zip.write_all(&data)?;
+            let file_size = std::fs::metadata(&path)
+                .map_err(|e| BatchZipError::Other(e.to_string()))?
+                .len();
+            *total_uncompressed = (*total_uncompressed).saturating_add(file_size);
+            if *total_uncompressed > max_uncompressed {
+                return Err(BatchZipError::TooLarge(format!(
+                    "Requested files exceed max archive size ({} bytes)",
+                    max_uncompressed
+                )));
+            }
+
+            let data = std::fs::read(&path).map_err(|e| BatchZipError::Other(e.to_string()))?;
+            zip.start_file(&name, options)
+                .map_err(|e| BatchZipError::Other(e.to_string()))?;
+            zip.write_all(&data)
+                .map_err(|e| BatchZipError::Other(e.to_string()))?;
         }
     }
     Ok(())
@@ -612,7 +698,7 @@ mod tests {
     fn test_add_dir_to_zip() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("mydir");
-        fs::create_dir_all(&dir.join("nested")).unwrap();
+        fs::create_dir_all(dir.join("nested")).unwrap();
         fs::write(dir.join("a.txt"), "aaa").unwrap();
         fs::write(dir.join("nested/b.txt"), "bbb").unwrap();
 
@@ -620,7 +706,16 @@ mod tests {
         let mut zip = zip::ZipWriter::new(buf);
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        add_dir_to_zip(&mut zip, &dir, "mydir", options).unwrap();
+        let mut total_uncompressed = 0u64;
+        add_dir_to_zip(
+            &mut zip,
+            &dir,
+            "mydir",
+            options,
+            &mut total_uncompressed,
+            u64::MAX,
+        )
+        .unwrap();
         let cursor = zip.finish().unwrap();
 
         let reader = Cursor::new(cursor.into_inner());
@@ -706,5 +801,11 @@ mod tests {
     #[test]
     fn test_parse_range_start_greater_than_end() {
         assert_eq!(parse_range("bytes=50-10", 100), None);
+    }
+
+    #[test]
+    fn test_parse_range_empty_file() {
+        assert_eq!(parse_range("bytes=0-0", 0), None);
+        assert_eq!(parse_range("bytes=0-", 0), None);
     }
 }

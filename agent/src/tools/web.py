@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
-from typing import Type
+from typing import Any, Type
 
 import html2text
 import httpx
 import httpx_sse
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
+
+from .result_schema import make_tool_error, make_tool_success
 
 EXA_MCP_URL = "https://mcp.exa.ai/mcp"
 
@@ -37,12 +39,12 @@ class WebFetchTool(BaseTool):
     )
     args_schema: Type[BaseModel] = WebFetchInput
 
-    def _run(self, url: str, max_length: int = 50000) -> str:
+    def _run(self, url: str, max_length: int = 50000) -> dict[str, Any]:
         raise NotImplementedError(
             "WebFetchTool does not support synchronous execution. Use the async interface."
         )
 
-    async def _arun(self, url: str, max_length: int = 50000) -> str:
+    async def _arun(self, url: str, max_length: int = 50000) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(
                 follow_redirects=True,
@@ -51,13 +53,26 @@ class WebFetchTool(BaseTool):
                 response = await client.get(url)
                 response.raise_for_status()
         except httpx.TimeoutException:
-            return f"Error: request to '{url}' timed out after 30 seconds."
+            return make_tool_error(
+                kind=self.name,
+                error=f"request to '{url}' timed out after 30 seconds",
+            )
         except httpx.ConnectError as exc:
-            return f"Error: could not connect to '{url}': {exc}"
+            return make_tool_error(
+                kind=self.name,
+                error=f"could not connect to '{url}': {exc}",
+            )
         except httpx.HTTPStatusError as exc:
-            return f"Error: HTTP {exc.response.status_code} for '{url}'."
+            return make_tool_error(
+                kind=self.name,
+                error=f"HTTP {exc.response.status_code} for '{url}'",
+                data={"status_code": exc.response.status_code, "url": str(exc.request.url)},
+            )
         except httpx.HTTPError as exc:
-            return f"Error: failed to fetch '{url}': {exc}"
+            return make_tool_error(
+                kind=self.name,
+                error=f"failed to fetch '{url}': {exc}",
+            )
 
         content_type = response.headers.get("content-type", "")
         body = response.text
@@ -67,10 +82,17 @@ class WebFetchTool(BaseTool):
         else:
             text = body
 
+        truncated = False
         if len(text) > max_length:
             text = text[:max_length] + "\n... content truncated"
+            truncated = True
 
-        return text
+        return make_tool_success(
+            kind=self.name,
+            text=text,
+            data={"url": str(response.url), "content_type": content_type},
+            meta={"truncated": truncated, "char_count": len(text)},
+        )
 
 
 class WebSearchInput(BaseModel):
@@ -96,12 +118,12 @@ class WebSearchTool(BaseTool):
     )
     args_schema: Type[BaseModel] = WebSearchInput
 
-    def _run(self, query: str, num_results: int = 5, type: str = "auto") -> str:
+    def _run(self, query: str, num_results: int = 5, type: str = "auto") -> dict[str, Any]:
         raise NotImplementedError(
             "WebSearchTool does not support synchronous execution. Use the async interface."
         )
 
-    async def _arun(self, query: str, num_results: int = 5, type: str = "auto") -> str:
+    async def _arun(self, query: str, num_results: int = 5, type: str = "auto") -> dict[str, Any]:
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -135,12 +157,38 @@ class WebSearchTool(BaseTool):
                             data = json.loads(event.data)
                             content = data.get("result", {}).get("content") or []
                             if content:
-                                return content[0].get("text", "")
+                                text = "\n\n".join(
+                                    block.get("text", "")
+                                    for block in content
+                                    if isinstance(block, dict)
+                                ).strip()
+                                return make_tool_success(
+                                    kind=self.name,
+                                    text=text or "No search results found.",
+                                    data={
+                                        "query": query,
+                                        "num_results": num_results,
+                                        "type": type,
+                                        "results": content,
+                                    },
+                                    meta={"result_count": len(content)},
+                                )
                         except (json.JSONDecodeError, KeyError, IndexError):
                             continue
         except httpx.TimeoutException:
-            return "Error: web search request timed out after 25 seconds."
+            return make_tool_error(
+                kind=self.name,
+                error="web search request timed out after 25 seconds",
+            )
         except httpx.HTTPError as exc:
-            return f"Error: web search request failed: {exc}"
+            return make_tool_error(
+                kind=self.name,
+                error=f"web search request failed: {exc}",
+            )
 
-        return "No search results found. Please try a different query."
+        return make_tool_success(
+            kind=self.name,
+            text="No search results found. Please try a different query.",
+            data={"query": query, "num_results": num_results, "type": type, "results": []},
+            meta={"result_count": 0},
+        )

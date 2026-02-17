@@ -1,13 +1,14 @@
 pub mod conversations;
 pub mod mcp_servers;
 pub mod messages;
+pub mod messages_v2;
 pub mod presets;
 pub mod providers;
 pub mod refresh_tokens;
 pub mod users;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
 
 /// Initialize the SQLite connection pool, enable WAL mode and foreign keys,

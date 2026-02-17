@@ -2,40 +2,49 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { User } from '../types'
 import * as authApi from '../api/auth'
+import * as usersApi from '../api/users'
 import router from '../router'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
-  const accessToken = ref(localStorage.getItem('access_token') || '')
-  const isAuthenticated = computed(() => !!accessToken.value)
+  const sessionChecked = ref(false)
+  const isAuthenticated = computed(() => !!user.value)
+  let ensureSessionPromise: Promise<void> | null = null
 
   async function login(username: string, password: string) {
     const data = await authApi.login(username, password)
-    accessToken.value = data.access_token
-    localStorage.setItem('access_token', data.access_token)
-    localStorage.setItem('refresh_token', data.refresh_token)
     user.value = data.user
+    sessionChecked.value = true
   }
 
   async function register(username: string, email: string, password: string) {
     const data = await authApi.register(username, email, password)
-    accessToken.value = data.access_token
-    localStorage.setItem('access_token', data.access_token)
-    localStorage.setItem('refresh_token', data.refresh_token)
     user.value = data.user
+    sessionChecked.value = true
+  }
+
+  async function ensureSession() {
+    if (sessionChecked.value) return
+    if (ensureSessionPromise) return ensureSessionPromise
+    ensureSessionPromise = (async () => {
+      try {
+        user.value = await usersApi.getProfile()
+      } catch {
+        user.value = null
+      } finally {
+        sessionChecked.value = true
+        ensureSessionPromise = null
+      }
+    })()
+    await ensureSessionPromise
   }
 
   async function logout() {
-    const refreshToken = localStorage.getItem('refresh_token')
-    if (refreshToken) {
-      try { await authApi.logout(refreshToken) } catch { /* ignore */ }
-    }
-    accessToken.value = ''
+    try { await authApi.logout() } catch { /* ignore */ }
     user.value = null
-    localStorage.removeItem('access_token')
-    localStorage.removeItem('refresh_token')
+    sessionChecked.value = true
     router.push('/login')
   }
 
-  return { user, accessToken, isAuthenticated, login, register, logout }
+  return { user, isAuthenticated, sessionChecked, login, register, ensureSession, logout }
 })

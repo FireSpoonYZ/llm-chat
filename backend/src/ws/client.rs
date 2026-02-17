@@ -1,12 +1,12 @@
 use axum::{
     extract::{
+        State, WebSocketUpgrade,
         ws::{Message, WebSocket},
-        Query, State, WebSocketUpgrade,
     },
+    http::{HeaderMap, header},
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -17,9 +17,35 @@ use crate::auth::middleware::AppState;
 use crate::db;
 use crate::docker::manager::DockerManager;
 
-#[derive(Deserialize)]
-pub struct WsQuery {
-    pub token: String,
+fn extract_ws_access_token(headers: &HeaderMap) -> Option<String> {
+    if let Some(auth_header) = headers.get("authorization").and_then(|v| v.to_str().ok())
+        && let Some(token) = auth_header.strip_prefix("Bearer ")
+    {
+        return Some(token.to_owned());
+    }
+    auth::get_cookie(headers, auth::ACCESS_COOKIE_NAME)
+}
+
+fn ws_origin_allowed(headers: &HeaderMap, allowed_origins: &Option<String>) -> bool {
+    let Some(configured) = allowed_origins.as_deref() else {
+        return true;
+    };
+
+    let configured: Vec<&str> = configured
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if configured.is_empty() {
+        return true;
+    }
+
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        // Non-browser WS clients may omit Origin.
+        return true;
+    };
+
+    configured.contains(&origin)
 }
 
 async fn send_to_container_or_start(
@@ -31,9 +57,15 @@ async fn send_to_container_or_start(
     message: &str,
 ) {
     let sent = ws_state.send_to_container(conv_id, message).await;
-    if !sent {
+    if sent {
+        // Refresh activity so the idle timeout doesn't kill the container
+        // between user send and container response.
+        docker_manager.touch_activity(conv_id).await;
+    } else {
         // Queue the message so the container handler can forward it (with all fields) on ready
-        ws_state.set_pending_message(conv_id, message.to_string()).await;
+        ws_state
+            .set_pending_message(conv_id, message.to_string())
+            .await;
 
         let _ = tx.send(
             serde_json::json!({
@@ -72,10 +104,19 @@ async fn send_to_container_or_start(
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
-    Query(query): Query<WsQuery>,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    let claims = match auth::verify_access_token(&query.token, &state.config.jwt_secret) {
+    if !ws_origin_allowed(&headers, &state.config.cors_allowed_origins) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+
+    let token = match extract_ws_access_token(&headers) {
+        Some(token) => token,
+        None => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    let claims = match auth::verify_access_token(&token, &state.config.jwt_secret) {
         Ok(c) => c,
         Err(_) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     };
@@ -83,7 +124,9 @@ pub async fn ws_handler(
     let ws_state = state.ws_state.clone();
     let docker_manager = state.docker_manager.clone();
 
-    ws.on_upgrade(move |socket| handle_client_ws(socket, claims.sub, state, ws_state, docker_manager))
+    ws.on_upgrade(move |socket| {
+        handle_client_ws(socket, claims.sub, state, ws_state, docker_manager)
+    })
 }
 
 async fn handle_client_ws(
@@ -119,7 +162,9 @@ async fn handle_client_ws(
         };
 
         match client_msg {
-            ClientMessage::JoinConversation { conversation_id: conv_id } => {
+            ClientMessage::JoinConversation {
+                conversation_id: conv_id,
+            } => {
                 if conv_id.is_empty() {
                     continue;
                 }
@@ -154,7 +199,10 @@ async fn handle_client_ws(
                     .to_string(),
                 );
             }
-            ClientMessage::UserMessage { content, attachments } => {
+            ClientMessage::UserMessage {
+                content,
+                attachments,
+            } => {
                 let conv_id = match &current_conversation_id {
                     Some(id) => id.clone(),
                     None => {
@@ -174,19 +222,43 @@ async fn handle_client_ws(
                     continue;
                 }
 
-                let msg = match db::messages::create_message(&state.db, &conv_id, "user", &content, None, None, None).await {
+                let msg = match db::messages::create_message(
+                    &state.db, &conv_id, "user", &content, None, None, None,
+                )
+                .await
+                {
                     Ok(m) => m,
                     Err(e) => {
                         tracing::error!("Failed to create message: {e}");
                         continue;
                     }
                 };
+                if let Err(e) = db::messages_v2::upsert_message_text_part(
+                    &state.db, &msg.id, &conv_id, "user", &content,
+                )
+                .await
+                {
+                    tracing::error!(
+                        conversation_id = %conv_id,
+                        message_id = %msg.id,
+                        error = %e,
+                        "Failed to persist user message to messages_v2"
+                    );
+                }
 
-                let conv = db::conversations::get_conversation(&state.db, &conv_id, &user_id).await.ok().flatten();
+                let conv = db::conversations::get_conversation(&state.db, &conv_id, &user_id)
+                    .await
+                    .ok()
+                    .flatten();
                 let deep_thinking = conv.as_ref().map(|c| c.deep_thinking).unwrap_or(false);
+                let thinking_budget = conv.as_ref().and_then(|c| c.thinking_budget);
+                let subagent_thinking_budget =
+                    conv.as_ref().and_then(|c| c.subagent_thinking_budget);
 
                 // Auto-generate conversation title from first message
-                let msg_count = db::messages::count_messages(&state.db, &conv_id).await.unwrap_or(0);
+                let msg_count = db::messages::count_messages(&state.db, &conv_id)
+                    .await
+                    .unwrap_or(0);
                 if msg_count == 1 {
                     let title: String = if content.chars().count() > 50 {
                         format!("{}...", content.chars().take(50).collect::<String>())
@@ -194,11 +266,21 @@ async fn handle_client_ws(
                         content.clone()
                     };
                     if let Some(c) = &conv {
-                        let _ = db::conversations::update_conversation(
-                            &state.db, &conv_id, &user_id, &title,
-                            c.provider.as_deref(), c.model_name.as_deref(),
-                            c.system_prompt_override.as_deref(), c.deep_thinking,
-                            c.image_provider.as_deref(), c.image_model.as_deref(),
+                        let _ = db::conversations::update_conversation_with_subagent(
+                            &state.db,
+                            &conv_id,
+                            &user_id,
+                            &title,
+                            c.provider.as_deref(),
+                            c.model_name.as_deref(),
+                            c.subagent_provider.as_deref(),
+                            c.subagent_model.as_deref(),
+                            c.system_prompt_override.as_deref(),
+                            c.deep_thinking,
+                            c.image_provider.as_deref(),
+                            c.image_model.as_deref(),
+                            c.thinking_budget,
+                            c.subagent_thinking_budget,
                         )
                         .await;
                     }
@@ -216,19 +298,28 @@ async fn handle_client_ws(
                 tracing::debug!("user_message: deep_thinking={}", deep_thinking);
 
                 send_to_container_or_start(
-                    &ws_state, &docker_manager, &tx, &conv_id, &user_id,
+                    &ws_state,
+                    &docker_manager,
+                    &tx,
+                    &conv_id,
+                    &user_id,
                     &serde_json::json!({
                         "type": "user_message",
                         "message_id": msg.id,
                         "content": content,
                         "deep_thinking": deep_thinking,
+                        "thinking_budget": thinking_budget,
+                        "subagent_thinking_budget": subagent_thinking_budget,
                         "attachments": attachments,
                     })
                     .to_string(),
                 )
                 .await;
             }
-            ClientMessage::EditMessage { message_id, content } => {
+            ClientMessage::EditMessage {
+                message_id,
+                content,
+            } => {
                 let conv_id = match &current_conversation_id {
                     Some(id) => id.clone(),
                     None => continue,
@@ -255,14 +346,41 @@ async fn handle_client_ws(
                 };
 
                 // Update content and delete subsequent messages
-                let all_msgs = db::messages::list_messages(&state.db, &conv_id, super::WS_MAX_HISTORY_MESSAGES, 0).await.unwrap_or_default();
-                let keep_turns = all_msgs.iter()
+                let all_msgs = db::messages::list_messages(
+                    &state.db,
+                    &conv_id,
+                    super::WS_MAX_HISTORY_MESSAGES,
+                    0,
+                )
+                .await
+                .unwrap_or_default();
+                let keep_turns = all_msgs
+                    .iter()
                     .take_while(|m| m.id != msg.id)
                     .filter(|m| m.role == "user")
                     .count();
 
-                db::messages::update_message_content(&state.db, &msg.id, &content).await.ok();
-                db::messages::delete_messages_after(&state.db, &conv_id, &msg.id).await.ok();
+                db::messages::update_message_content(&state.db, &msg.id, &content)
+                    .await
+                    .ok();
+                if let Err(e) = db::messages_v2::upsert_message_text_part(
+                    &state.db, &msg.id, &conv_id, "user", &content,
+                )
+                .await
+                {
+                    tracing::error!(
+                        conversation_id = %conv_id,
+                        message_id = %msg.id,
+                        error = %e,
+                        "Failed to update user message parts in messages_v2"
+                    );
+                }
+                db::messages::delete_messages_after(&state.db, &conv_id, &msg.id)
+                    .await
+                    .ok();
+                db::messages_v2::delete_messages_v2_after(&state.db, &conv_id, &msg.id)
+                    .await
+                    .ok();
 
                 let _ = tx.send(
                     serde_json::json!({
@@ -273,26 +391,40 @@ async fn handle_client_ws(
                     .to_string(),
                 );
 
-                let deep_thinking = db::conversations::get_conversation(&state.db, &conv_id, &user_id)
+                let edit_conv = db::conversations::get_conversation(&state.db, &conv_id, &user_id)
                     .await
                     .ok()
-                    .flatten()
-                    .map(|c| c.deep_thinking)
-                    .unwrap_or(false);
+                    .flatten();
+                let deep_thinking = edit_conv.as_ref().map(|c| c.deep_thinking).unwrap_or(false);
+                let thinking_budget = edit_conv.as_ref().and_then(|c| c.thinking_budget);
+                let subagent_thinking_budget =
+                    edit_conv.as_ref().and_then(|c| c.subagent_thinking_budget);
 
                 // Tell the running container to truncate its in-memory history
-                ws_state.send_to_container(&conv_id, &serde_json::json!({
-                    "type": "truncate_history",
-                    "keep_turns": keep_turns,
-                }).to_string()).await;
+                ws_state
+                    .send_to_container(
+                        &conv_id,
+                        &serde_json::json!({
+                            "type": "truncate_history",
+                            "keep_turns": keep_turns,
+                        })
+                        .to_string(),
+                    )
+                    .await;
 
                 send_to_container_or_start(
-                    &ws_state, &docker_manager, &tx, &conv_id, &user_id,
+                    &ws_state,
+                    &docker_manager,
+                    &tx,
+                    &conv_id,
+                    &user_id,
                     &serde_json::json!({
                         "type": "user_message",
                         "message_id": msg.id,
                         "content": content,
                         "deep_thinking": deep_thinking,
+                        "thinking_budget": thinking_budget,
+                        "subagent_thinking_budget": subagent_thinking_budget,
                     })
                     .to_string(),
                 )
@@ -321,11 +453,17 @@ async fn handle_client_ws(
                 };
 
                 // Find the last user message before this assistant message
-                let all_msgs = db::messages::list_messages(&state.db, &conv_id, super::WS_MAX_HISTORY_MESSAGES, 0).await.unwrap_or_default();
+                let all_msgs = db::messages::list_messages(
+                    &state.db,
+                    &conv_id,
+                    super::WS_MAX_HISTORY_MESSAGES,
+                    0,
+                )
+                .await
+                .unwrap_or_default();
                 let msg_idx = all_msgs.iter().position(|m| m.id == msg.id);
-                let last_user_msg = msg_idx.and_then(|idx| {
-                    all_msgs[..idx].iter().rev().find(|m| m.role == "user")
-                });
+                let last_user_msg =
+                    msg_idx.and_then(|idx| all_msgs[..idx].iter().rev().find(|m| m.role == "user"));
 
                 let user_msg = match last_user_msg {
                     Some(m) => m.clone(),
@@ -333,12 +471,18 @@ async fn handle_client_ws(
                 };
 
                 // Delete the assistant message and everything after the user message
-                let keep_turns = all_msgs.iter()
+                let keep_turns = all_msgs
+                    .iter()
                     .take_while(|m| m.id != user_msg.id)
                     .filter(|m| m.role == "user")
                     .count();
 
-                db::messages::delete_messages_after(&state.db, &conv_id, &user_msg.id).await.ok();
+                db::messages::delete_messages_after(&state.db, &conv_id, &user_msg.id)
+                    .await
+                    .ok();
+                db::messages_v2::delete_messages_v2_after(&state.db, &conv_id, &user_msg.id)
+                    .await
+                    .ok();
 
                 let _ = tx.send(
                     serde_json::json!({
@@ -348,26 +492,43 @@ async fn handle_client_ws(
                     .to_string(),
                 );
 
-                let deep_thinking = db::conversations::get_conversation(&state.db, &conv_id, &user_id)
+                let regen_conv = db::conversations::get_conversation(&state.db, &conv_id, &user_id)
                     .await
                     .ok()
-                    .flatten()
+                    .flatten();
+                let deep_thinking = regen_conv
+                    .as_ref()
                     .map(|c| c.deep_thinking)
                     .unwrap_or(false);
+                let thinking_budget = regen_conv.as_ref().and_then(|c| c.thinking_budget);
+                let subagent_thinking_budget =
+                    regen_conv.as_ref().and_then(|c| c.subagent_thinking_budget);
 
                 // Tell the running container to truncate its in-memory history
-                ws_state.send_to_container(&conv_id, &serde_json::json!({
-                    "type": "truncate_history",
-                    "keep_turns": keep_turns,
-                }).to_string()).await;
+                ws_state
+                    .send_to_container(
+                        &conv_id,
+                        &serde_json::json!({
+                            "type": "truncate_history",
+                            "keep_turns": keep_turns,
+                        })
+                        .to_string(),
+                    )
+                    .await;
 
                 send_to_container_or_start(
-                    &ws_state, &docker_manager, &tx, &conv_id, &user_id,
+                    &ws_state,
+                    &docker_manager,
+                    &tx,
+                    &conv_id,
+                    &user_id,
                     &serde_json::json!({
                         "type": "user_message",
                         "message_id": user_msg.id,
                         "content": user_msg.content,
                         "deep_thinking": deep_thinking,
+                        "thinking_budget": thinking_budget,
+                        "subagent_thinking_budget": subagent_thinking_budget,
                     })
                     .to_string(),
                 )
@@ -393,4 +554,81 @@ async fn handle_client_ws(
         ws_state.remove_client(&user_id, conv_id).await;
     }
     send_task.abort();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_ws_access_token, ws_origin_allowed};
+    use axum::http::{HeaderMap, HeaderValue, header};
+
+    #[test]
+    fn ws_token_prefers_bearer_header_over_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer header-token"),
+        );
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("access_token=cookie-token"),
+        );
+
+        let token = extract_ws_access_token(&headers);
+        assert_eq!(token.as_deref(), Some("header-token"));
+    }
+
+    #[test]
+    fn ws_token_falls_back_to_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("foo=bar; access_token=cookie-token"),
+        );
+
+        let token = extract_ws_access_token(&headers);
+        assert_eq!(token.as_deref(), Some("cookie-token"));
+    }
+
+    #[test]
+    fn ws_origin_allowed_accepts_configured_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://app.example.com"),
+        );
+
+        assert!(ws_origin_allowed(
+            &headers,
+            &Some("https://app.example.com,https://other.example.com".to_string())
+        ));
+    }
+
+    #[test]
+    fn ws_origin_allowed_rejects_unlisted_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example.com"),
+        );
+
+        assert!(!ws_origin_allowed(
+            &headers,
+            &Some("https://app.example.com".to_string())
+        ));
+    }
+
+    #[test]
+    fn ws_origin_allowed_when_not_configured() {
+        let headers = HeaderMap::new();
+        assert!(ws_origin_allowed(&headers, &None));
+    }
+
+    #[test]
+    fn ws_origin_allowed_with_configured_list_and_missing_origin_header() {
+        let headers = HeaderMap::new();
+        assert!(ws_origin_allowed(
+            &headers,
+            &Some("https://app.example.com".to_string())
+        ));
+    }
 }

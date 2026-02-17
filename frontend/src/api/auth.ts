@@ -2,22 +2,16 @@ import axios from 'axios'
 import client from './client'
 import type { AuthResponse } from '../types'
 
-let refreshPromise: Promise<string | null> | null = null
+let refreshPromise: Promise<boolean> | null = null
 
-export async function refreshAccessToken(): Promise<string | null> {
+export async function refreshSession(): Promise<boolean> {
   if (refreshPromise) return refreshPromise
   refreshPromise = (async () => {
-    const rt = localStorage.getItem('refresh_token')
-    if (!rt) return null
     try {
-      const { data } = await axios.post('/api/auth/refresh', { refresh_token: rt })
-      localStorage.setItem('access_token', data.access_token)
-      localStorage.setItem('refresh_token', data.refresh_token)
-      return data.access_token as string
+      await axios.post('/api/auth/refresh', {}, { withCredentials: true })
+      return true
     } catch {
-      localStorage.removeItem('access_token')
-      localStorage.removeItem('refresh_token')
-      return null
+      return false
     }
   })()
   try { return await refreshPromise } finally { refreshPromise = null }
@@ -33,6 +27,6 @@ export async function login(username: string, password: string): Promise<AuthRes
   return data
 }
 
-export async function logout(refreshToken: string): Promise<void> {
-  await client.post('/auth/logout', { refresh_token: refreshToken })
+export async function logout(): Promise<void> {
+  await client.post('/auth/logout', {})
 }

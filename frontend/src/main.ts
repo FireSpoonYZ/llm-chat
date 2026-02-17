@@ -4,13 +4,24 @@ import 'element-plus/dist/index.css'
 import './styles/global.css'
 import App from './App.vue'
 import router from './router'
+import { useAuthStore } from './stores/auth'
+import { initI18n } from './i18n'
 
-const app = createApp(App)
-app.use(createPinia())
-app.use(router)
+async function bootstrap() {
+  initI18n()
+  const app = createApp(App)
+  const pinia = createPinia()
+  app.use(pinia)
 
-app.config.errorHandler = (err) => {
-  console.error('Unhandled error:', err)
+  const auth = useAuthStore()
+  await auth.ensureSession()
+  app.use(router)
+
+  app.config.errorHandler = (err) => {
+    console.error('Unhandled error:', err)
+  }
+
+  app.mount('#app')
 }
 
-app.mount('#app')
+bootstrap()

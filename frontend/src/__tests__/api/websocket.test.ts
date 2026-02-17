@@ -48,10 +48,12 @@ describe('WebSocketManager', () => {
     const wsm = new WebSocketManager('ws://localhost/ws')
     const handler = vi.fn()
     wsm.on('ws_connected', handler)
-    wsm.connect('test-token')
+    wsm.connect()
 
     await vi.advanceTimersByTimeAsync(1)
     expect(handler).toHaveBeenCalled()
+    const ws = (wsm as any).ws as MockWebSocket
+    expect(ws.url).toBe('ws://localhost/ws')
   })
 
   it('send returns false when socket not open', () => {
@@ -62,7 +64,7 @@ describe('WebSocketManager', () => {
 
   it('send returns true when socket is open', async () => {
     const wsm = new WebSocketManager('ws://localhost/ws')
-    wsm.connect('test-token')
+    wsm.connect()
     await vi.advanceTimersByTimeAsync(1)
 
     const result = wsm.send({ type: 'ping' })
@@ -73,7 +75,7 @@ describe('WebSocketManager', () => {
     const wsm = new WebSocketManager('ws://localhost/ws')
     const disconnectHandler = vi.fn()
     wsm.on('ws_disconnected', disconnectHandler)
-    wsm.connect('test-token')
+    wsm.connect()
     await vi.advanceTimersByTimeAsync(1)
 
     // Simulate close
@@ -86,7 +88,7 @@ describe('WebSocketManager', () => {
 
   it('reconnects with exponential backoff on close', async () => {
     const wsm = new WebSocketManager('ws://localhost/ws')
-    wsm.connect('test-token')
+    wsm.connect()
     await vi.advanceTimersByTimeAsync(1)
 
     // First close
@@ -109,10 +111,10 @@ describe('WebSocketManager', () => {
     expect(ws3).not.toBe(ws2)
   })
 
-  it('refreshes token during reconnect', async () => {
-    const tokenRefresher = vi.fn().mockResolvedValue('fresh-token')
-    const wsm = new WebSocketManager('ws://localhost/ws', tokenRefresher)
-    wsm.connect('initial-token')
+  it('refreshes session during reconnect', async () => {
+    const sessionRefresher = vi.fn().mockResolvedValue(true)
+    const wsm = new WebSocketManager('ws://localhost/ws', sessionRefresher)
+    wsm.connect()
     await vi.advanceTimersByTimeAsync(1)
 
     // Close to trigger reconnect
@@ -121,15 +123,15 @@ describe('WebSocketManager', () => {
     ws1.onclose?.()
 
     await vi.advanceTimersByTimeAsync(1000)
-    expect(tokenRefresher).toHaveBeenCalled()
+    expect(sessionRefresher).toHaveBeenCalled()
   })
 
-  it('emits auth_failed when token refresh fails', async () => {
-    const tokenRefresher = vi.fn().mockResolvedValue(null)
-    const wsm = new WebSocketManager('ws://localhost/ws', tokenRefresher)
+  it('emits auth_failed when session refresh fails', async () => {
+    const sessionRefresher = vi.fn().mockResolvedValue(false)
+    const wsm = new WebSocketManager('ws://localhost/ws', sessionRefresher)
     const authHandler = vi.fn()
     wsm.on('auth_failed', authHandler)
-    wsm.connect('initial-token')
+    wsm.connect()
     await vi.advanceTimersByTimeAsync(1)
 
     const ws1 = (wsm as any).ws as MockWebSocket
@@ -144,7 +146,7 @@ describe('WebSocketManager', () => {
     const wsm = new WebSocketManager('ws://localhost/ws')
     const deltaHandler = vi.fn()
     wsm.on('assistant_delta', deltaHandler)
-    wsm.connect('test-token')
+    wsm.connect()
     await vi.advanceTimersByTimeAsync(1)
 
     const ws = (wsm as any).ws as MockWebSocket
@@ -157,7 +159,7 @@ describe('WebSocketManager', () => {
     const wsm = new WebSocketManager('ws://localhost/ws')
     const connectHandler = vi.fn()
     wsm.on('ws_connected', connectHandler)
-    wsm.connect('test-token')
+    wsm.connect()
     await vi.advanceTimersByTimeAsync(1)
     expect(connectHandler).toHaveBeenCalledTimes(1)
 
@@ -173,7 +175,7 @@ describe('WebSocketManager', () => {
     const handler = vi.fn()
     wsm.on('test_event', handler)
     wsm.off('test_event', handler)
-    wsm.connect('test-token')
+    wsm.connect()
     await vi.advanceTimersByTimeAsync(1)
 
     const ws = (wsm as any).ws as MockWebSocket

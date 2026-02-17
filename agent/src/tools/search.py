@@ -1,15 +1,31 @@
 from __future__ import annotations
 
-import asyncio
 import os
 import re
+from collections import deque
 from pathlib import Path
-from typing import Optional, Type
+from typing import Any, Iterator, Type
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from ._paths import resolve_workspace_path
+from .result_schema import make_tool_error, make_tool_success
+
+_SKIP_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".idea",
+    ".vscode",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "target",
+}
 
 
 def _expand_braces(pattern: str) -> list[str]:
@@ -52,41 +68,58 @@ class GlobTool(BaseTool):
         """Resolve a path and ensure it is within the workspace."""
         return resolve_workspace_path(path or ".", self.workspace)
 
-    def _run(self, pattern: str, path: str = "") -> str:
-        base = self._resolve_and_validate(path)
+    def _run(self, pattern: str, path: str = "") -> dict[str, Any]:
+        try:
+            base = self._resolve_and_validate(path)
+        except ValueError as exc:
+            return make_tool_error(kind=self.name, error=str(exc))
+
         if not base.exists():
-            return f"Error: path '{path}' does not exist."
+            return make_tool_error(kind=self.name, error=f"path '{path}' does not exist")
         if not base.is_dir():
-            return f"Error: path '{path}' is not a directory."
+            return make_tool_error(kind=self.name, error=f"path '{path}' is not a directory")
 
         ws = Path(self.workspace).resolve()
         results: list[str] = []
         seen: set[str] = set()
+        truncated = False
         try:
             for expanded in _expand_braces(pattern):
                 for match in base.glob(expanded):
                     if len(results) >= 1000:
+                        truncated = True
                         break
-                    if match.is_file():
-                        try:
-                            rel = str(match.relative_to(ws))
-                        except ValueError:
-                            continue
-                        if rel not in seen:
-                            seen.add(rel)
-                            results.append(rel)
-                if len(results) >= 1000:
+                    if not match.is_file():
+                        continue
+                    try:
+                        rel = str(match.relative_to(ws))
+                    except ValueError:
+                        continue
+                    if rel not in seen:
+                        seen.add(rel)
+                        results.append(rel)
+                if truncated:
                     break
         except OSError as exc:
-            return f"Error during glob: {exc}"
+            return make_tool_error(kind=self.name, error=f"glob failed: {exc}")
 
-        if not results:
-            return "No files matched the pattern."
         results.sort()
-        return "\n".join(results)
+        if not results:
+            return make_tool_success(
+                kind=self.name,
+                text="No files matched the pattern.",
+                data={"paths": [], "pattern": pattern, "path": path or "."},
+                meta={"match_count": 0, "truncated": False},
+            )
+        return make_tool_success(
+            kind=self.name,
+            text="\n".join(results),
+            data={"paths": results, "pattern": pattern, "path": path or "."},
+            meta={"match_count": len(results), "truncated": truncated},
+        )
 
-    async def _arun(self, pattern: str, path: str = "") -> str:
-        return await asyncio.to_thread(self._run, pattern, path)
+    async def _arun(self, pattern: str, path: str = "") -> dict[str, Any]:
+        return self._run(pattern, path)
 
 
 class GrepInput(BaseModel):
@@ -111,29 +144,27 @@ class GrepTool(BaseTool):
 
     def _resolve_and_validate(self, path: str) -> Path:
         """Resolve a path and ensure it is within the workspace."""
-        ws = Path(self.workspace).resolve()
-        if path:
-            resolved = (ws / path).resolve()
-        else:
-            resolved = ws
-        if not str(resolved).startswith(str(ws)):
-            raise ValueError(f"Path '{path}' is outside the workspace.")
-        return resolved
+        return resolve_workspace_path(path or ".", self.workspace)
 
-    def _collect_files(self, base: Path, glob_filter: str) -> list[Path]:
-        """Collect files to search, optionally filtered by a glob pattern."""
+    def _iter_files(self, base: Path, glob_filter: str) -> Iterator[Path]:
+        """Yield files to search, optionally filtered by a glob pattern."""
         if base.is_file():
-            return [base]
+            yield base
+            return
+
         if glob_filter:
             seen: set[Path] = set()
-            files: list[Path] = []
             for expanded in _expand_braces(glob_filter):
                 for f in base.glob(expanded):
                     if f.is_file() and f not in seen:
                         seen.add(f)
-                        files.append(f)
-            return sorted(files)
-        return sorted(f for f in base.rglob("*") if f.is_file())
+                        yield f
+            return
+
+        for root, dirs, files in os.walk(base):
+            dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS)
+            for name in sorted(files):
+                yield Path(root) / name
 
     def _is_binary(self, filepath: Path) -> bool:
         """Heuristic check for binary files."""
@@ -144,35 +175,57 @@ class GrepTool(BaseTool):
         except OSError:
             return True
 
+    def _success_result(
+        self,
+        *,
+        text: str,
+        pattern: str,
+        path: str,
+        glob_filter: str,
+        context: int,
+        match_count: int,
+        truncated: bool,
+    ) -> dict[str, Any]:
+        return make_tool_success(
+            kind=self.name,
+            text=text,
+            data={
+                "pattern": pattern,
+                "path": path or ".",
+                "glob_filter": glob_filter,
+                "context": context,
+            },
+            meta={"match_count": match_count, "truncated": truncated},
+        )
+
     def _run(
         self,
         pattern: str,
         path: str = "",
         glob_filter: str = "",
         context: int = 0,
-    ) -> str:
-        base = self._resolve_and_validate(path)
+    ) -> dict[str, Any]:
+        try:
+            base = self._resolve_and_validate(path)
+        except ValueError as exc:
+            return make_tool_error(kind=self.name, error=str(exc))
         if not base.exists():
-            return f"Error: path '{path}' does not exist."
+            return make_tool_error(kind=self.name, error=f"path '{path}' does not exist")
 
         try:
             regex = re.compile(pattern)
         except re.error as exc:
-            return f"Error: invalid regex pattern: {exc}"
+            return make_tool_error(kind=self.name, error=f"invalid regex pattern: {exc}")
 
         ws = Path(self.workspace).resolve()
-        files = self._collect_files(base, glob_filter)
         output_parts: list[str] = []
         total_len = 0
         max_output = 50000
+        match_count = 0
+        truncated = False
 
-        for filepath in files:
+        for filepath in self._iter_files(base, glob_filter):
             if self._is_binary(filepath):
-                continue
-            try:
-                with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
-                    lines = fh.readlines()
-            except OSError:
                 continue
 
             try:
@@ -180,30 +233,144 @@ class GrepTool(BaseTool):
             except ValueError:
                 continue
 
-            for lineno, line in enumerate(lines, start=1):
-                if regex.search(line):
-                    if context > 0:
-                        start = max(0, lineno - 1 - context)
-                        end = min(len(lines), lineno + context)
-                        for ctx_idx in range(start, end):
-                            ctx_lineno = ctx_idx + 1
-                            entry = f"{rel}:{ctx_lineno}:{lines[ctx_idx].rstrip()}"
+            try:
+                if context <= 0:
+                    with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+                        for lineno, line in enumerate(fh, start=1):
+                            if not regex.search(line):
+                                continue
+                            entry = f"{rel}:{lineno}:{line.rstrip()}"
                             output_parts.append(entry)
+                            match_count += 1
                             total_len += len(entry) + 1
-                        output_parts.append("--")
-                        total_len += 3
-                    else:
-                        entry = f"{rel}:{lineno}:{line.rstrip()}"
-                        output_parts.append(entry)
-                        total_len += len(entry) + 1
+                            if total_len >= max_output:
+                                output_parts.append("... output truncated (50000 char limit)")
+                                truncated = True
+                                text = "\n".join(output_parts)
+                                return self._success_result(
+                                    text=text,
+                                    pattern=pattern,
+                                    path=path,
+                                    glob_filter=glob_filter,
+                                    context=context,
+                                    match_count=match_count,
+                                    truncated=truncated,
+                                )
+                    continue
 
-                    if total_len >= max_output:
-                        output_parts.append("... output truncated (50000 char limit)")
-                        return "\n".join(output_parts)
+                prev_lines: deque[tuple[int, str]] = deque(maxlen=context)
+                trailing_remaining = 0
+                last_emitted_lineno = 0
+                with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+                    for lineno, line in enumerate(fh, start=1):
+                        stripped = line.rstrip()
+                        matched = bool(regex.search(line))
+
+                        if matched:
+                            for prev_lineno, prev_text in prev_lines:
+                                if prev_lineno <= last_emitted_lineno:
+                                    continue
+                                entry = f"{rel}:{prev_lineno}:{prev_text}"
+                                output_parts.append(entry)
+                                match_count += 1
+                                total_len += len(entry) + 1
+                                last_emitted_lineno = prev_lineno
+                                if total_len >= max_output:
+                                    output_parts.append("... output truncated (50000 char limit)")
+                                    truncated = True
+                                    text = "\n".join(output_parts)
+                                    return self._success_result(
+                                        text=text,
+                                        pattern=pattern,
+                                        path=path,
+                                        glob_filter=glob_filter,
+                                        context=context,
+                                        match_count=match_count,
+                                        truncated=truncated,
+                                    )
+
+                            if lineno > last_emitted_lineno:
+                                entry = f"{rel}:{lineno}:{stripped}"
+                                output_parts.append(entry)
+                                match_count += 1
+                                total_len += len(entry) + 1
+                                last_emitted_lineno = lineno
+                                if total_len >= max_output:
+                                    output_parts.append("... output truncated (50000 char limit)")
+                                    truncated = True
+                                    text = "\n".join(output_parts)
+                                    return self._success_result(
+                                        text=text,
+                                        pattern=pattern,
+                                        path=path,
+                                        glob_filter=glob_filter,
+                                        context=context,
+                                        match_count=match_count,
+                                        truncated=truncated,
+                                    )
+                            trailing_remaining = context
+                        elif trailing_remaining > 0:
+                            if lineno > last_emitted_lineno:
+                                entry = f"{rel}:{lineno}:{stripped}"
+                                output_parts.append(entry)
+                                match_count += 1
+                                total_len += len(entry) + 1
+                                last_emitted_lineno = lineno
+                                if total_len >= max_output:
+                                    output_parts.append("... output truncated (50000 char limit)")
+                                    truncated = True
+                                    text = "\n".join(output_parts)
+                                    return self._success_result(
+                                        text=text,
+                                        pattern=pattern,
+                                        path=path,
+                                        glob_filter=glob_filter,
+                                        context=context,
+                                        match_count=match_count,
+                                        truncated=truncated,
+                                    )
+                            trailing_remaining -= 1
+                            if trailing_remaining == 0:
+                                output_parts.append("--")
+                                total_len += 3
+                                if total_len >= max_output:
+                                    output_parts.append("... output truncated (50000 char limit)")
+                                    truncated = True
+                                    text = "\n".join(output_parts)
+                                    return self._success_result(
+                                        text=text,
+                                        pattern=pattern,
+                                        path=path,
+                                        glob_filter=glob_filter,
+                                        context=context,
+                                        match_count=match_count,
+                                        truncated=truncated,
+                                    )
+
+                        prev_lines.append((lineno, stripped))
+            except OSError:
+                continue
 
         if not output_parts:
-            return "No matches found."
-        return "\n".join(output_parts)
+            return self._success_result(
+                text="No matches found.",
+                pattern=pattern,
+                path=path,
+                glob_filter=glob_filter,
+                context=context,
+                match_count=0,
+                truncated=False,
+            )
+
+        return self._success_result(
+            text="\n".join(output_parts),
+            pattern=pattern,
+            path=path,
+            glob_filter=glob_filter,
+            context=context,
+            match_count=match_count,
+            truncated=truncated,
+        )
 
     async def _arun(
         self,
@@ -211,5 +378,5 @@ class GrepTool(BaseTool):
         path: str = "",
         glob_filter: str = "",
         context: int = 0,
-    ) -> str:
-        return await asyncio.to_thread(self._run, pattern, path, glob_filter, context)
+    ) -> dict[str, Any]:
+        return self._run(pattern, path, glob_filter, context)

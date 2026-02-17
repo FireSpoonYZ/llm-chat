@@ -14,5 +14,6 @@ COPY migrations/ /app/migrations/
 
 WORKDIR /app
 EXPOSE 3000 3001
+ENV COOKIE_SECURE=false
 
 CMD ["claude-chat-backend"]

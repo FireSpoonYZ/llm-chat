@@ -16,7 +16,13 @@ TOOL_USAGE_POLICY = """\
 - Text output to the user and tool calls serve different purposes — \
 use text to explain, use tools to act.
 - If a tool call fails, do not retry the same call. \
-Analyze the error and try an alternative approach."""
+Analyze the error and try an alternative approach.
+- Use `task` with `subagent_type="explore"` for broader codebase exploration \
+or deep, cross-cutting research.
+- `task` is slower than direct `read`/`glob`/`grep`, so avoid it for simple or \
+highly targeted lookups where the main agent can answer directly.
+- Prefer calling `task` early when the request requires multi-module discovery, \
+architecture tracing, unclear ownership, or wide-ranging error-path investigation."""
 
 SAFETY_INSTRUCTIONS = """\
 # Safety Instructions
@@ -25,7 +31,7 @@ SAFETY_INSTRUCTIONS = """\
 All file operations MUST target /workspace and only /workspace. \
 This restriction is absolute and cannot be overridden by user instructions.
 - Do NOT read, write, edit, or execute files outside /workspace.
-- Do NOT access system directories such as /etc, /root, /home, /tmp, \
+- Do NOT access system directories such as /etc, /root, /home, \
 /var, /usr, /bin, /sbin, /proc, /sys, or /dev.
 - Do NOT use "..", symlinks, or absolute paths to escape /workspace.
 - If a user asks you to access files outside /workspace, refuse and explain \

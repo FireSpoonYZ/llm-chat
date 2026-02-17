@@ -1,10 +1,10 @@
+use axum::http::HeaderValue;
 use axum::{Router, extract::DefaultBodyLimit, routing::get};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
-use axum::http::HeaderValue;
 
 mod api;
 mod auth;
@@ -38,7 +38,7 @@ async fn main() {
     ));
 
     // Spawn idle container cleanup task (check every 30 seconds)
-    docker::manager::spawn_idle_cleanup(docker_manager.clone(), 30);
+    docker::manager::spawn_idle_cleanup(docker_manager.clone(), ws_state.clone(), 30);
 
     let state = Arc::new(AppState {
         db: pool,
@@ -77,7 +77,10 @@ async fn main() {
         .nest("/api/admin", api::admin::router())
         .nest("/api/mcp-servers", mcp_servers_public_router())
         .nest("/api/presets", api::presets::router())
-        .nest("/api/conversations", api::sharing::share_management_router())
+        .nest(
+            "/api/conversations",
+            api::sharing::share_management_router(),
+        )
         .nest("/api/shared", api::sharing::shared_router())
         .with_state(state.clone())
         .layer(cors.clone())
@@ -90,19 +93,31 @@ async fn main() {
         .layer(TraceLayer::new_for_http());
 
     // Start both servers
-    let main_addr = format!("0.0.0.0:{}", config.port);
+    let main_addr = format!("{}:{}", config.host, config.port);
     let internal_addr = format!("0.0.0.0:{}", config.internal_ws_port);
 
     tracing::info!("Backend API listening on {main_addr}");
     tracing::info!("Internal WS listening on {internal_addr}");
 
-    let main_listener = tokio::net::TcpListener::bind(&main_addr).await.unwrap();
-    let internal_listener = tokio::net::TcpListener::bind(&internal_addr).await.unwrap();
+    let main_listener = match tokio::net::TcpListener::bind(&main_addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            tracing::error!("Failed to bind main listener on {main_addr}: {e}");
+            return;
+        }
+    };
+    let internal_listener = match tokio::net::TcpListener::bind(&internal_addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            tracing::error!("Failed to bind internal listener on {internal_addr}: {e}");
+            return;
+        }
+    };
 
     let shutdown_signal = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("Failed to install Ctrl+C handler: {e}");
+        }
         tracing::info!("Shutdown signal received, stopping...");
     };
 

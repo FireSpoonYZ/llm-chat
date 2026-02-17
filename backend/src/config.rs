@@ -27,6 +27,9 @@ fn default_container_token_ttl() -> u64 {
 fn default_refresh_token_ttl_days() -> i64 {
     30
 }
+fn default_cookie_secure() -> bool {
+    false
+}
 
 #[derive(Clone, Deserialize)]
 pub struct Config {
@@ -40,7 +43,10 @@ pub struct Config {
     pub port: u16,
     #[serde(default = "default_container_image")]
     pub container_image: String,
-    #[serde(rename = "container_idle_timeout", default = "default_container_idle_timeout")]
+    #[serde(
+        rename = "container_idle_timeout",
+        default = "default_container_idle_timeout"
+    )]
     pub container_idle_timeout_secs: u64,
     #[serde(default = "default_internal_ws_port")]
     pub internal_ws_port: u16,
@@ -58,6 +64,9 @@ pub struct Config {
     /// Refresh token TTL in days (default: 30)
     #[serde(default = "default_refresh_token_ttl_days")]
     pub refresh_token_ttl_days: i64,
+    /// Whether auth cookies should include `Secure`.
+    #[serde(default = "default_cookie_secure")]
+    pub cookie_secure: bool,
 }
 
 impl Config {

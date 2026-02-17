@@ -1,10 +1,10 @@
 use axum::{
+    Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::Response,
     routing::{get, post},
-    Json, Router,
 };
 use rand::Rng;
 use serde::Serialize;
@@ -23,8 +23,7 @@ use super::files::{parse_range, resolve_safe_path};
 // ── Authenticated endpoints (share management) ──
 
 pub fn share_management_router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/{id}/share", post(create_share).delete(revoke_share))
+    Router::new().route("/{id}/share", post(create_share).delete(revoke_share))
 }
 
 // ── Public endpoints (no auth) ──
@@ -60,8 +59,7 @@ async fn create_share(
     }
 
     let token = generate_share_token();
-    let result = db::conversations::set_share_token(&state.db, &id, &auth.user_id, &token)
-        .await?;
+    let result = db::conversations::set_share_token(&state.db, &id, &auth.user_id, &token).await?;
 
     // If set_share_token returned None, another request may have set it concurrently.
     // Re-read the conversation to get the winning token.

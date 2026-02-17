@@ -17,6 +17,7 @@ from src.tools.image_gen import (
     _compute_google_image_size,
     _parse_size,
 )
+from .result_helpers import _rerror, _rsuccess, _rtext
 
 
 FAKE_IMAGE_DATA = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
@@ -60,8 +61,9 @@ class TestImageGenerationTool:
         tool = ImageGenerationTool(
             workspace=workspace, provider="openai", api_key="sk-test", model="",
         )
-        with pytest.raises(ValueError, match="No model specified"):
-            await tool._arun(prompt="a cat")
+        result = await tool._arun(prompt="a cat")
+        assert _rsuccess(result) is False
+        assert "No model specified" in _rtext(result)
 
     # --- OpenAI tests ---
 
@@ -77,7 +79,8 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="a cute cat")
 
-        assert "sandbox://" in result
+        assert _rsuccess(result) is True
+        assert "sandbox://" in _rtext(result)
         gen_dir = os.path.join(workspace, "generated_images")
         assert os.path.isdir(gen_dir)
         assert len(os.listdir(gen_dir)) == 1
@@ -126,7 +129,8 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="two cats", n=2)
 
-        assert result.count("sandbox://") == 2
+        assert _rsuccess(result) is True
+        assert _rtext(result).count("sandbox://") == 2
         assert len(os.listdir(os.path.join(workspace, "generated_images"))) == 2
         assert mock_client.chat.completions.create.call_count == 2
 
@@ -140,8 +144,9 @@ class TestImageGenerationTool:
             mock_client.chat.completions.create = AsyncMock(side_effect=Exception("API rate limit"))
             mock_cls.return_value = mock_client
 
-            with pytest.raises(Exception, match="API rate limit"):
-                await tool._arun(prompt="test")
+            result = await tool._arun(prompt="test")
+            assert _rsuccess(result) is False
+            assert "API rate limit" in _rtext(result) or "API rate limit" in _rerror(result)
 
     @pytest.mark.asyncio
     async def test_openai_no_image_in_response(self, workspace):
@@ -159,7 +164,8 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="test")
 
-        assert "No images were generated" in result
+        assert _rsuccess(result) is False
+        assert "No images were generated" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_openai_jpeg_format(self, workspace):
@@ -176,8 +182,9 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="test")
 
-        assert "sandbox://" in result
-        assert ".jpg" in result
+        assert _rsuccess(result) is True
+        assert "sandbox://" in _rtext(result)
+        assert ".jpg" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_openai_prompt_includes_size_hint(self, workspace):
@@ -291,8 +298,9 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="a dog")
 
-        assert "sandbox://" in result
-        assert ".png" in result
+        assert _rsuccess(result) is True
+        assert "sandbox://" in _rtext(result)
+        assert ".png" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_google_passes_model_and_config(self, workspace):
@@ -354,7 +362,8 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="dogs", n=3)
 
-        assert result.count("sandbox://") == 3
+        assert _rsuccess(result) is True
+        assert _rtext(result).count("sandbox://") == 3
         assert mock_client.aio.models.generate_content.call_count == 3
 
     @pytest.mark.asyncio
@@ -448,7 +457,8 @@ class TestImageGenerationTool:
             mock_types.ImageConfig.assert_called_once_with(
                 aspect_ratio="16:9", image_size="2K",
             )
-            assert "sandbox://" in result
+            assert _rsuccess(result) is True
+            assert "sandbox://" in _rtext(result)
 
     def test_parse_size(self):
         assert _parse_size("1024x1536") == (1024, 1536)
@@ -469,16 +479,18 @@ class TestImageGenerationTool:
         tool = ImageGenerationTool(
             workspace=workspace, provider="mistral", api_key="test-key", model="m",
         )
-        with pytest.raises(ValueError, match="does not support image generation"):
-            await tool._arun(prompt="test")
+        result = await tool._arun(prompt="test")
+        assert _rsuccess(result) is False
+        assert "does not support image generation" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_unsupported_provider_anthropic(self, workspace):
         tool = ImageGenerationTool(
             workspace=workspace, provider="anthropic", api_key="test-key", model="m",
         )
-        with pytest.raises(ValueError, match="does not support image generation"):
-            await tool._arun(prompt="test")
+        result = await tool._arun(prompt="test")
+        assert _rsuccess(result) is False
+        assert "does not support image generation" in _rtext(result)
 
     def test_tool_metadata(self):
         tool = ImageGenerationTool(
@@ -529,8 +541,9 @@ class TestImageGenerationTool:
         tool = ImageGenerationTool(
             workspace=workspace, provider="openai", api_key="sk-test", model="gpt-4o",
         )
-        with pytest.raises(ValueError, match="not found"):
-            await tool._arun(prompt="make it blue", reference_image="nonexistent.png")
+        result = await tool._arun(prompt="make it blue", reference_image="nonexistent.png")
+        assert _rsuccess(result) is False
+        assert "not found" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_reference_image_unsupported_format(self, workspace):
@@ -540,8 +553,9 @@ class TestImageGenerationTool:
         tool = ImageGenerationTool(
             workspace=workspace, provider="openai", api_key="sk-test", model="gpt-4o",
         )
-        with pytest.raises(ValueError, match="Unsupported image format"):
-            await tool._arun(prompt="edit this", reference_image="photo.bmp")
+        result = await tool._arun(prompt="edit this", reference_image="photo.bmp")
+        assert _rsuccess(result) is False
+        assert "Unsupported image format" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_reference_image_resolves_relative_path(self, workspace):
@@ -562,7 +576,8 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="edit", reference_image="imgs/ref.png")
 
-        assert "sandbox://" in result
+        assert _rsuccess(result) is True
+        assert "sandbox://" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_openai_with_reference_image(self, workspace):
@@ -628,8 +643,9 @@ class TestImageGenerationTool:
         tool = ImageGenerationTool(
             workspace=workspace, provider="openai", api_key="sk-test", model="gpt-4o",
         )
-        with pytest.raises(ValueError, match="Access denied"):
-            await tool._arun(prompt="edit", reference_image="../../etc/passwd")
+        result = await tool._arun(prompt="edit", reference_image="../../etc/passwd")
+        assert _rsuccess(result) is False
+        assert "Access denied" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_reference_image_path_traversal_absolute(self, workspace):
@@ -637,8 +653,9 @@ class TestImageGenerationTool:
         tool = ImageGenerationTool(
             workspace=workspace, provider="openai", api_key="sk-test", model="gpt-4o",
         )
-        with pytest.raises(ValueError, match="Access denied"):
-            await tool._arun(prompt="edit", reference_image="/etc/passwd")
+        result = await tool._arun(prompt="edit", reference_image="/etc/passwd")
+        assert _rsuccess(result) is False
+        assert "Access denied" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_reference_image_absolute_path_within_workspace(self, workspace):
@@ -657,7 +674,8 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="edit", reference_image=img_path)
 
-        assert "sandbox://" in result
+        assert _rsuccess(result) is True
+        assert "sandbox://" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_reference_image_dot_slash_relative(self, workspace):
@@ -676,7 +694,8 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="edit", reference_image="./input.png")
 
-        assert "sandbox://" in result
+        assert _rsuccess(result) is True
+        assert "sandbox://" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_reference_image_with_multiple_n(self, workspace):
@@ -695,7 +714,8 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="variations", reference_image="ref.png", n=2)
 
-        assert result.count("sandbox://") == 2
+        assert _rsuccess(result) is True
+        assert _rtext(result).count("sandbox://") == 2
         assert mock_client.chat.completions.create.call_count == 2
         # Both calls should use multimodal content
         for call in mock_client.chat.completions.create.call_args_list:
@@ -735,7 +755,8 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="test")
 
-        assert "No images were generated" in result
+        assert _rsuccess(result) is False
+        assert "No images were generated" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_google_null_parts_returns_no_images(self, workspace):
@@ -756,7 +777,8 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="test")
 
-        assert "No images were generated" in result
+        assert _rsuccess(result) is False
+        assert "No images were generated" in _rtext(result)
 
     @pytest.mark.asyncio
     async def test_google_empty_candidates_returns_no_images(self, workspace):
@@ -776,4 +798,5 @@ class TestImageGenerationTool:
 
             result = await tool._arun(prompt="test")
 
-        assert "No images were generated" in result
+        assert _rsuccess(result) is False
+        assert "No images were generated" in _rtext(result)

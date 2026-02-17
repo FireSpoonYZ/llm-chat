@@ -13,8 +13,7 @@ export class WebSocketManager {
   private reconnectDelay = 1000
   private maxReconnectDelay = 30000
   private shouldReconnect = true
-  private token: string | null = null
-  private tokenRefresher: (() => Promise<string | null>) | null
+  private sessionRefresher: (() => Promise<boolean>) | null
 
   // Heartbeat
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
@@ -24,33 +23,26 @@ export class WebSocketManager {
   private boundOnVisibilityChange = this.onVisibilityChange.bind(this)
   private boundOnOnline = this.onOnline.bind(this)
 
-  constructor(url: string, tokenRefresher?: () => Promise<string | null>) {
+  constructor(url: string, sessionRefresher?: () => Promise<boolean>) {
     this.url = url
-    this.tokenRefresher = tokenRefresher ?? null
+    this.sessionRefresher = sessionRefresher ?? null
   }
 
-  connect(token: string) {
+  connect() {
     this.shouldReconnect = true
-    this.token = token
     this.addLifecycleListeners()
-    this.doConnect(token)
+    this.doConnect()
   }
 
-  private async getToken(): Promise<string | null> {
-    if (this.tokenRefresher) {
-      const fresh = await this.tokenRefresher()
-      if (fresh) {
-        this.token = fresh
-        return fresh
-      }
-      return null
+  private async ensureSession(): Promise<boolean> {
+    if (this.sessionRefresher) {
+      return this.sessionRefresher()
     }
-    return this.token
+    return true
   }
 
-  private doConnect(token: string) {
-    const wsUrl = `${this.url}?token=${token}`
-    this.ws = new WebSocket(wsUrl)
+  private doConnect() {
+    this.ws = new WebSocket(this.url)
 
     this.ws.onopen = () => {
       this.reconnectDelay = 1000
@@ -75,9 +67,9 @@ export class WebSocketManager {
       if (this.shouldReconnect) {
         this.reconnectTimer = setTimeout(async () => {
           this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay)
-          const t = await this.getToken()
-          if (t) {
-            this.doConnect(t)
+          const hasSession = await this.ensureSession()
+          if (hasSession) {
+            this.doConnect()
           } else {
             this.emit({ type: 'auth_failed' })
           }
@@ -92,7 +84,6 @@ export class WebSocketManager {
 
   disconnect() {
     this.shouldReconnect = false
-    this.token = null
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.stopHeartbeat()
     this.removeLifecycleListeners()
@@ -171,9 +162,9 @@ export class WebSocketManager {
       // Dead connection — reconnect immediately
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
       this.reconnectDelay = 1000
-      const t = await this.getToken()
-      if (t) {
-        this.doConnect(t)
+      const hasSession = await this.ensureSession()
+      if (hasSession) {
+        this.doConnect()
       } else {
         this.emit({ type: 'auth_failed' })
       }
@@ -189,9 +180,9 @@ export class WebSocketManager {
       // Network is back — reconnect immediately (skip backoff)
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
       this.reconnectDelay = 1000
-      const t = await this.getToken()
-      if (t) {
-        this.doConnect(t)
+      const hasSession = await this.ensureSession()
+      if (hasSession) {
+        this.doConnect()
       } else {
         this.emit({ type: 'auth_failed' })
       }

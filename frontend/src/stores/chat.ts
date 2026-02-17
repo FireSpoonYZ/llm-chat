@@ -1,10 +1,11 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import type { Conversation, Message, ContentBlock, WsMessage } from '../types'
+import type { Conversation, Message, ContentBlock, WsMessage, ToolResult } from '../types'
 import * as convApi from '../api/conversations'
-import { refreshAccessToken } from '../api/auth'
+import { refreshSession } from '../api/auth'
 import { WebSocketManager } from '../api/websocket'
+import { t } from '../i18n'
 
 function generateUUID(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -16,7 +17,62 @@ function generateUUID(): string {
   )
 }
 
+function normalizeToolResult(raw: unknown): ToolResult {
+  if (typeof raw === 'object' && raw !== null) {
+    const obj = raw as Record<string, unknown>
+
+    // New envelope format
+    if (typeof obj.kind === 'string' && typeof obj.text === 'string' && typeof obj.success === 'boolean') {
+      return {
+        kind: obj.kind,
+        text: obj.text,
+        success: obj.success,
+        error: typeof obj.error === 'string' ? obj.error : null,
+        data: typeof obj.data === 'object' && obj.data !== null ? obj.data as Record<string, unknown> : {},
+        meta: typeof obj.meta === 'object' && obj.meta !== null ? obj.meta as Record<string, unknown> : {},
+      }
+    }
+
+    // Legacy bash structured format
+    if (obj.kind === 'bash' && typeof obj.text === 'string') {
+      const exitCode = typeof obj.exit_code === 'number' ? obj.exit_code : null
+      const timedOut = Boolean(obj.timed_out)
+      const errorFlag = Boolean(obj.error)
+      const success = !timedOut && !errorFlag && (exitCode === 0 || exitCode === null)
+      return {
+        kind: 'bash',
+        text: obj.text,
+        success,
+        error: success ? null : (timedOut ? 'command timed out' : 'command execution failed'),
+        data: {
+          stdout: typeof obj.stdout === 'string' ? obj.stdout : '',
+          stderr: typeof obj.stderr === 'string' ? obj.stderr : '',
+          exit_code: exitCode,
+        },
+        meta: {
+          timed_out: timedOut,
+          truncated: Boolean(obj.truncated),
+          duration_ms: typeof obj.duration_ms === 'number' ? obj.duration_ms : undefined,
+        },
+      }
+    }
+
+    if (typeof obj.text === 'string') {
+      return { kind: 'text', text: obj.text, success: true, error: null, data: {}, meta: {} }
+    }
+  }
+  return { kind: 'text', text: String(raw ?? ''), success: true, error: null, data: {}, meta: {} }
+}
+
 export const useChatStore = defineStore('chat', () => {
+  type ToolCallBlock = ContentBlock & { type: 'tool_call' }
+  type BufferedTaskTraceDelta = {
+    eventType: string
+    payload: Record<string, unknown>
+  }
+
+  const MAX_PENDING_TASK_TRACE_EVENTS = 256
+
   const conversations = ref<Conversation[]>([])
   const currentConversationId = ref<string | null>(null)
   const messages = ref<Message[]>([])
@@ -36,11 +92,104 @@ export const useChatStore = defineStore('chat', () => {
   )
 
   let ws: WebSocketManager | null = null
+  let lastSelectRequestId = 0
+  const pendingTaskTraceByToolCallId = new Map<string, BufferedTaskTraceDelta[]>()
 
-  function connectWs(token: string) {
+  function ensureTaskTrace(taskBlock: ToolCallBlock): Record<string, unknown>[] {
+    const taskResult = normalizeToolResult(taskBlock.result)
+    taskResult.kind = 'task'
+    const data = {
+      ...(taskResult.data ?? {}),
+    } as Record<string, unknown>
+    const trace = Array.isArray(data.trace)
+      ? data.trace.filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null)
+      : []
+    data.trace = trace
+    taskResult.data = data
+    taskBlock.result = taskResult
+    return trace
+  }
+
+  function applyTaskTraceDelta(taskBlock: ToolCallBlock, eventType: string, payload: Record<string, unknown>) {
+    const trace = ensureTaskTrace(taskBlock)
+
+    if (eventType === 'assistant_delta') {
+      const delta = typeof payload.delta === 'string' ? payload.delta : ''
+      if (!delta) return
+      const last = trace[trace.length - 1]
+      if (last?.type === 'text') {
+        last.content = String(last.content ?? '') + delta
+      } else {
+        trace.push({ type: 'text', content: delta })
+      }
+      return
+    }
+
+    if (eventType === 'thinking_delta') {
+      const delta = typeof payload.delta === 'string' ? payload.delta : ''
+      if (!delta) return
+      const last = trace[trace.length - 1]
+      if (last?.type === 'thinking') {
+        last.content = String(last.content ?? '') + delta
+      } else {
+        trace.push({ type: 'thinking', content: delta })
+      }
+      return
+    }
+
+    if (eventType === 'tool_call') {
+      trace.push({
+        type: 'tool_call',
+        id: payload.tool_call_id,
+        name: payload.tool_name,
+        input: payload.tool_input,
+        result: null,
+        isError: false,
+      })
+      return
+    }
+
+    if (eventType === 'tool_result') {
+      const nestedToolCallId = typeof payload.tool_call_id === 'string' ? payload.tool_call_id : ''
+      for (const item of trace) {
+        if (item.type === 'tool_call' && item.id === nestedToolCallId) {
+          item.result = payload.result
+          item.isError = Boolean(payload.is_error)
+          return
+        }
+      }
+      return
+    }
+
+    if (eventType === 'error') {
+      const message = typeof payload.message === 'string' ? payload.message : t('store.unknownError')
+      trace.push({ type: 'text', content: `Error: ${message}` })
+    }
+  }
+
+  function bufferTaskTraceDelta(toolCallId: string, eventType: string, payload: Record<string, unknown>) {
+    const buffered = pendingTaskTraceByToolCallId.get(toolCallId) ?? []
+    buffered.push({ eventType, payload })
+    if (buffered.length > MAX_PENDING_TASK_TRACE_EVENTS) {
+      buffered.splice(0, buffered.length - MAX_PENDING_TASK_TRACE_EVENTS)
+    }
+    pendingTaskTraceByToolCallId.set(toolCallId, buffered)
+  }
+
+  function replayBufferedTaskTrace(taskBlock: ToolCallBlock) {
+    const buffered = pendingTaskTraceByToolCallId.get(taskBlock.id)
+    if (!buffered || buffered.length === 0) return
+    pendingTaskTraceByToolCallId.delete(taskBlock.id)
+    for (const item of buffered) {
+      applyTaskTraceDelta(taskBlock, item.eventType, item.payload)
+    }
+  }
+
+  function connectWs() {
     if (ws) ws.disconnect()
+    pendingTaskTraceByToolCallId.clear()
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    ws = new WebSocketManager(`${protocol}//${location.host}/api/ws`, refreshAccessToken)
+    ws = new WebSocketManager(`${protocol}//${location.host}/api/ws`, refreshSession)
 
     ws.on('ws_connected', () => {
       wsConnected.value = true
@@ -82,7 +231,7 @@ export const useChatStore = defineStore('chat', () => {
 
     ws.on('tool_call', (msg: WsMessage) => {
       if (isWaiting.value) isWaiting.value = false
-      streamingBlocks.value.push({
+      const block: ToolCallBlock = {
         type: 'tool_call',
         id: msg.tool_call_id as string,
         name: msg.tool_name as string,
@@ -90,7 +239,11 @@ export const useChatStore = defineStore('chat', () => {
         result: undefined,
         isError: false,
         isLoading: true,
-      })
+      }
+      streamingBlocks.value.push(block)
+      if (block.name === 'task') {
+        replayBufferedTaskTrace(block)
+      }
     })
 
     ws.on('tool_result', (msg: WsMessage) => {
@@ -99,17 +252,40 @@ export const useChatStore = defineStore('chat', () => {
           b.type === 'tool_call' && b.id === (msg.tool_call_id as string)
       )
       if (tc) {
-        tc.result = msg.result as string
+        tc.result = normalizeToolResult(msg.result)
         tc.isError = (msg.is_error as boolean) || false
         tc.isLoading = false
         if (tc.isError) {
+          const resultText = typeof tc.result === 'string'
+            ? tc.result
+            : tc.result?.text || ''
           ElMessage.error({
-            message: `${tc.name} failed: ${tc.result}`,
+            message: t('store.toolFailed', { tool: tc.name, message: resultText }),
             duration: 5000,
             showClose: true,
           })
         }
       }
+    })
+
+    ws.on('task_trace_delta', (msg: WsMessage) => {
+      const taskToolCallId = typeof msg.tool_call_id === 'string' ? msg.tool_call_id : ''
+      if (!taskToolCallId) return
+
+      const eventType = typeof msg.event_type === 'string' ? msg.event_type : ''
+      const payload = typeof msg.payload === 'object' && msg.payload !== null
+        ? msg.payload as Record<string, unknown>
+        : {}
+
+      const taskBlock = streamingBlocks.value.find(
+        (b): b is ToolCallBlock =>
+          b.type === 'tool_call' && b.id === taskToolCallId && b.name === 'task'
+      )
+      if (!taskBlock) {
+        bufferTaskTraceDelta(taskToolCallId, eventType, payload)
+        return
+      }
+      applyTaskTraceDelta(taskBlock, eventType, payload)
     })
 
     ws.on('complete', (msg: WsMessage) => {
@@ -140,19 +316,23 @@ export const useChatStore = defineStore('chat', () => {
         created_at: new Date().toISOString(),
       })
       streamingBlocks.value = []
+      pendingTaskTraceByToolCallId.clear()
       isStreaming.value = false
       isWaiting.value = false
     })
 
     ws.on('error', (msg: WsMessage) => {
       console.error('WS error:', msg.message)
+      const errorMessage = typeof msg.message === 'string' && msg.message
+        ? msg.message
+        : t('store.unknownError')
       const hasContent = streamingBlocks.value.length > 0
       if (hasContent) {
         const hasBlocks = streamingBlocks.value.some(b => b.type === 'tool_call' || b.type === 'thinking')
         messages.value.push({
           id: generateUUID(),
           role: 'assistant',
-          content: streamingContent.value || `[Error: ${msg.message || 'Unknown error'}]`,
+          content: streamingContent.value || t('store.errorMessage', { message: errorMessage }),
           tool_calls: hasBlocks
             ? JSON.stringify(streamingBlocks.value) : null,
           tool_call_id: null,
@@ -161,12 +341,34 @@ export const useChatStore = defineStore('chat', () => {
         })
       }
       streamingBlocks.value = []
+      pendingTaskTraceByToolCallId.clear()
       isStreaming.value = false
       isWaiting.value = false
     })
 
     ws.on('container_status', (msg: WsMessage) => {
       console.log('Container status:', msg.status, msg.message)
+      if (msg.status === 'disconnected' && (isStreaming.value || isWaiting.value)) {
+        const hasContent = streamingBlocks.value.length > 0
+        if (hasContent) {
+          const hasBlocks = streamingBlocks.value.some(
+            b => b.type === 'tool_call' || b.type === 'thinking'
+          )
+          messages.value.push({
+            id: generateUUID(),
+            role: 'assistant',
+            content: streamingContent.value || t('store.containerDisconnected'),
+            tool_calls: hasBlocks ? JSON.stringify(streamingBlocks.value) : null,
+            tool_call_id: null, token_count: null,
+            created_at: new Date().toISOString(),
+          })
+        }
+        streamingBlocks.value = []
+        pendingTaskTraceByToolCallId.clear()
+        isStreaming.value = false
+        isWaiting.value = false
+        ElMessage.warning({ message: t('store.containerDisconnectedWarning'), duration: 5000, showClose: true })
+      }
     })
 
     ws.on('messages_truncated', (msg: WsMessage) => {
@@ -176,7 +378,7 @@ export const useChatStore = defineStore('chat', () => {
       )
     })
 
-    ws.connect(token)
+    ws.connect()
   }
 
   function disconnectWs() {
@@ -189,18 +391,44 @@ export const useChatStore = defineStore('chat', () => {
     conversations.value = await convApi.listConversations()
   }
 
-  async function createConversation(title?: string, systemPromptOverride?: string, provider?: string, modelName?: string, imageProvider?: string, imageModel?: string) {
-    const conv = await convApi.createConversation(title, systemPromptOverride, provider, modelName, imageProvider, imageModel)
+  async function createConversation(
+    title?: string,
+    systemPromptOverride?: string,
+    provider?: string,
+    modelName?: string,
+    imageProvider?: string,
+    imageModel?: string,
+    subagentProvider?: string,
+    subagentModel?: string,
+    thinkingBudget?: number | null,
+    subagentThinkingBudget?: number | null,
+  ) {
+    const conv = await convApi.createConversation(
+      title,
+      systemPromptOverride,
+      provider,
+      modelName,
+      imageProvider,
+      imageModel,
+      subagentProvider,
+      subagentModel,
+      thinkingBudget,
+      subagentThinkingBudget,
+    )
     conversations.value.unshift(conv)
     return conv
   }
 
   async function selectConversation(id: string) {
+    const requestId = ++lastSelectRequestId
     currentConversationId.value = id
+    ws?.send({ type: 'join_conversation', conversation_id: id })
     const resp = await convApi.listMessages(id)
+    if (requestId !== lastSelectRequestId || currentConversationId.value !== id) {
+      return
+    }
     messages.value = resp.messages
     totalMessages.value = resp.total
-    ws?.send({ type: 'join_conversation', conversation_id: id })
   }
 
   async function deleteConversation(id: string) {
@@ -257,6 +485,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function clearStream() {
     streamingBlocks.value = []
+    pendingTaskTraceByToolCallId.clear()
     isStreaming.value = false
   }
 
@@ -309,6 +538,11 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  function cancelGeneration() {
+    if (!isStreaming.value && !isWaiting.value) return
+    ws?.send({ type: 'cancel' })
+  }
+
   function handleMessagesTruncated(afterMessageId: string, updatedContent?: string) {
     const idx = messages.value.findIndex(m => m.id === afterMessageId)
     if (idx < 0) return
@@ -329,6 +563,6 @@ export const useChatStore = defineStore('chat', () => {
     conversations, currentConversationId, messages, streamingContent, streamingBlocks, isStreaming, isWaiting, totalMessages, wsConnected, sendFailed,
     connectWs, disconnectWs, loadConversations, createConversation, selectConversation, deleteConversation,
     updateConversation, sendMessage, addMessage, appendStreamDelta, clearStream,
-    editMessage, regenerateMessage, handleMessagesTruncated,
+    editMessage, regenerateMessage, handleMessagesTruncated, cancelGeneration,
   }
 })

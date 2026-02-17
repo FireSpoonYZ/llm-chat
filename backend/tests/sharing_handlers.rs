@@ -1,10 +1,13 @@
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
-    Router,
 };
 use claude_chat_backend::{
-    api, auth::middleware::AppState, config::Config, db,
+    api,
+    auth::middleware::AppState,
+    config::Config,
+    db,
     docker::{manager::DockerManager, registry::ContainerRegistry},
     ws::WsState,
 };
@@ -29,6 +32,7 @@ fn test_config() -> Config {
         access_token_ttl_secs: 7200,
         container_token_ttl_secs: 3600,
         refresh_token_ttl_days: 30,
+        cookie_secure: false,
     }
 }
 
@@ -50,7 +54,10 @@ fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .nest("/api/auth", api::auth::router())
         .nest("/api/conversations", api::conversations::router())
-        .nest("/api/conversations", api::sharing::share_management_router())
+        .nest(
+            "/api/conversations",
+            api::sharing::share_management_router(),
+        )
         .nest("/api/shared", api::sharing::shared_router())
         .with_state(state)
 }

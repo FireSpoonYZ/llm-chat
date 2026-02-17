@@ -1,6 +1,6 @@
 <template>
   <div class="tool-call-display">
-    <div class="tool-header" @click="expanded = !expanded">
+    <div class="tool-header" @click="toggleExpanded">
       <el-icon class="tool-icon">
         <component :is="toolIcon" />
       </el-icon>
@@ -16,13 +16,27 @@
     <el-collapse-transition>
       <div v-show="expanded" class="tool-body">
         <div v-if="toolInput" class="tool-section">
-          <div class="section-label">Input</div>
+          <div class="section-label">{{ t('tool.input') }}</div>
           <pre class="tool-content">{{ formattedInput }}</pre>
         </div>
         <div v-if="toolResult" class="tool-section">
           <div class="section-label">
-            {{ isError ? 'Error' : 'Result' }}
+            {{ isError ? t('tool.error') : t('tool.result') }}
           </div>
+          <div v-if="bashMeta" class="bash-meta">{{ bashMeta }}</div>
+          <details
+            v-if="taskTrace.length > 0"
+            class="task-trace"
+            @toggle="handleTaskTraceToggle"
+          >
+            <summary>{{ t('tool.subagentTrace') }}</summary>
+            <div v-if="taskTraceExpanded" class="task-trace-list">
+              <div v-for="(block, i) in taskTrace" :key="i" class="task-trace-item">
+                <div class="task-trace-head">{{ traceBlockTitle(block, i) }}</div>
+                <pre class="tool-content">{{ traceBlockContent(block) }}</pre>
+              </div>
+            </div>
+          </details>
           <div v-if="mediaRefs.length > 0" class="tool-media">
             <template v-for="(media, i) in mediaRefs" :key="i">
               <img v-if="media.type === 'image'" :src="media.url" :alt="media.name" class="tool-media-img" loading="lazy" />
@@ -53,12 +67,14 @@ import {
   Picture,
 } from '@element-plus/icons-vue'
 import { fileViewUrl, sharedFileViewUrl } from '../utils/fileUrl'
+import type { ToolResult, ToolMediaRef } from '../types'
+import { t } from '../i18n'
 
 const props = defineProps<{
   toolName: string
   toolCallId: string
   toolInput?: Record<string, unknown>
-  toolResult?: string
+  toolResult?: ToolResult | string
   isError?: boolean
   isLoading?: boolean
   conversationId?: string
@@ -66,6 +82,7 @@ const props = defineProps<{
 }>()
 
 const expanded = ref(false)
+const taskTraceExpanded = ref(false)
 
 const MAX_RESULT_LENGTH = 5000
 
@@ -96,20 +113,55 @@ const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']
 const VIDEO_EXTS = ['.mp4', '.webm', '.mov']
 const AUDIO_EXTS = ['.mp3', '.wav', '.ogg', '.m4a']
 
-interface MediaRef {
-  type: 'image' | 'video' | 'audio'
-  url: string
-  name: string
-}
+type MediaRef = ToolMediaRef
 
 const SANDBOX_RE = /sandbox:\/\/\/([^\s)]+)/g
 
+function normalizeToolResult(raw: ToolResult | string | undefined): ToolResult {
+  if (typeof raw === 'string') {
+    return { kind: 'text', text: raw, success: true, error: null, data: {}, meta: {} }
+  }
+  if (raw && typeof raw.kind === 'string' && typeof raw.text === 'string' && typeof raw.success === 'boolean') {
+    return raw
+  }
+  // Legacy structured fallback
+  if (raw && typeof raw.text === 'string') {
+    return { kind: raw.kind || 'text', text: raw.text, success: true, error: null, data: {}, meta: {} }
+  }
+  return { kind: 'text', text: '', success: true, error: null, data: {}, meta: {} }
+}
+
+const normalizedResult = computed(() => normalizeToolResult(props.toolResult))
+
 const mediaRefs = computed<MediaRef[]>(() => {
-  if (!props.toolResult || (!props.conversationId && !props.shareToken)) return []
+  if (!props.conversationId && !props.shareToken) return []
+
+  const dataMedia = normalizedResult.value.data?.media
+  if (Array.isArray(dataMedia) && dataMedia.length > 0) {
+    return dataMedia
+      .filter((m): m is MediaRef =>
+        typeof m === 'object' && m !== null &&
+        (m.type === 'image' || m.type === 'video' || m.type === 'audio') &&
+        typeof m.url === 'string' &&
+        typeof m.name === 'string'
+      )
+      .map((m) => {
+        if (m.url.startsWith('sandbox:///')) {
+          const path = m.url.replace('sandbox:///', '/')
+          const url = props.shareToken
+            ? sharedFileViewUrl(props.shareToken, path)
+            : fileViewUrl(props.conversationId!, path)
+          return { ...m, url }
+        }
+        return m
+      })
+  }
+
+  if (!normalizedResult.value.text) return []
   const refs: MediaRef[] = []
   let match: RegExpExecArray | null
   const re = new RegExp(SANDBOX_RE.source, 'g')
-  while ((match = re.exec(props.toolResult)) !== null) {
+  while ((match = re.exec(normalizedResult.value.text)) !== null) {
     const path = match[1]
     const ext = path.substring(path.lastIndexOf('.')).toLowerCase()
     const name = path.substring(path.lastIndexOf('/') + 1)
@@ -134,9 +186,9 @@ const statusType = computed(() => {
 })
 
 const statusLabel = computed(() => {
-  if (props.isLoading) return 'Running...'
-  if (props.isError) return 'Error'
-  return 'Done'
+  if (props.isLoading) return t('tool.running')
+  if (props.isError) return t('tool.error')
+  return t('tool.done')
 })
 
 const formattedInput = computed(() => {
@@ -145,11 +197,14 @@ const formattedInput = computed(() => {
 })
 
 const truncatedResult = computed(() => {
-  if (!props.toolResult) return ''
-  if (props.toolResult.length > MAX_RESULT_LENGTH) {
-    return props.toolResult.slice(0, MAX_RESULT_LENGTH) + '\n... [truncated]'
+  const text = normalizedResult.value.text || ''
+  if (props.toolName === 'task') {
+    return text
   }
-  return props.toolResult
+  if (text.length > MAX_RESULT_LENGTH) {
+    return text.slice(0, MAX_RESULT_LENGTH) + `\n${t('tool.truncated')}`
+  }
+  return text
 })
 
 const SANDBOX_MARKDOWN_RE = /!?\[[^\]]*\]\(sandbox:\/\/\/[^)]+\)\n?/g
@@ -159,6 +214,73 @@ const cleanedResult = computed(() => {
   if (mediaRefs.value.length === 0) return text
   return text.replace(SANDBOX_MARKDOWN_RE, '').trim()
 })
+
+const bashMeta = computed(() => {
+  if (props.toolName !== 'bash') return ''
+  const bits: string[] = []
+
+  const exitCodeRaw = normalizedResult.value.data?.exit_code
+  const durationRaw = normalizedResult.value.meta?.duration_ms
+  const timedOutRaw = normalizedResult.value.meta?.timed_out
+  const truncatedRaw = normalizedResult.value.meta?.truncated
+
+  if (typeof exitCodeRaw === 'number') {
+    bits.push(`exit_code=${exitCodeRaw}`)
+  }
+  if (typeof durationRaw === 'number') {
+    bits.push(`duration=${durationRaw}ms`)
+  }
+  if (Boolean(timedOutRaw)) {
+    bits.push('timed_out=true')
+  }
+  if (Boolean(truncatedRaw)) {
+    bits.push('truncated=true')
+  }
+  return bits.join('  ')
+})
+
+const taskTrace = computed<Record<string, unknown>[]>(() => {
+  if (props.toolName !== 'task') return []
+  const trace = normalizedResult.value.data?.trace
+  if (!Array.isArray(trace)) return []
+  return trace.filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null)
+})
+
+function handleTaskTraceToggle(event: Event): void {
+  const details = event.target as HTMLDetailsElement | null
+  taskTraceExpanded.value = Boolean(details?.open)
+}
+
+function toggleExpanded(): void {
+  expanded.value = !expanded.value
+  if (!expanded.value) {
+    taskTraceExpanded.value = false
+  }
+}
+
+function traceBlockTitle(block: Record<string, unknown>, idx: number): string {
+  const type = String(block.type || 'block')
+  if (type === 'tool_call') {
+    const name = String(block.name || 'tool')
+    return `#${idx + 1} tool_call: ${name}`
+  }
+  return `#${idx + 1} ${type}`
+}
+
+function traceBlockContent(block: Record<string, unknown>): string {
+  const type = String(block.type || '')
+  if (type === 'text' || type === 'thinking') {
+    return String(block.content || '')
+  }
+  if (type === 'tool_call') {
+    return JSON.stringify({
+      input: block.input,
+      result: block.result,
+      isError: block.isError,
+    }, null, 2)
+  }
+  return JSON.stringify(block, null, 2)
+}
 </script>
 
 <style scoped>
@@ -245,6 +367,13 @@ const cleanedResult = computed(() => {
   color: #DC2626;
 }
 
+.bash-meta {
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
 .tool-media {
   margin: 8px 0;
   display: flex;
@@ -263,5 +392,26 @@ const cleanedResult = computed(() => {
 }
 .tool-media-audio {
   width: 100%;
+}
+
+.task-trace {
+  margin: 8px 0;
+}
+.task-trace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.task-trace-item {
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+}
+.task-trace-head {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  font-family: monospace;
 }
 </style>

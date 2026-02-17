@@ -1,12 +1,16 @@
 use axum::{
-    extract::State,
-    routing::post,
     Json, Router,
+    extract::State,
+    http::{HeaderMap, HeaderValue, header},
+    response::{IntoResponse, Response},
+    routing::post,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer, key_extractor::SmartIpKeyExtractor};
+use tower_governor::{
+    GovernorLayer, governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor,
+};
 use validator::Validate;
 
 use crate::auth;
@@ -61,16 +65,142 @@ pub struct MessageResponse {
     pub message: String,
 }
 
+#[derive(sqlx::FromRow)]
+struct ConsumedRefreshToken {
+    user_id: String,
+    expires_at: String,
+}
+
+fn append_set_cookie(headers: &mut HeaderMap, cookie: String) -> Result<(), AppError> {
+    let value = HeaderValue::from_str(&cookie).map_err(|e| AppError::Internal(e.to_string()))?;
+    headers.append(header::SET_COOKIE, value);
+    Ok(())
+}
+
+fn refresh_ttl_secs(refresh_token_ttl_days: i64) -> i64 {
+    refresh_token_ttl_days.saturating_mul(24 * 60 * 60)
+}
+
+fn build_cookie(
+    name: &str,
+    value: &str,
+    max_age_secs: i64,
+    secure: bool,
+    http_only: bool,
+) -> String {
+    let mut cookie = format!("{name}={value}; Path=/; Max-Age={max_age_secs}; SameSite=Lax");
+    if http_only {
+        cookie.push_str("; HttpOnly");
+    }
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+fn set_auth_cookies(
+    headers: &mut HeaderMap,
+    access_token: &str,
+    refresh_token: &str,
+    state: &AppState,
+) -> Result<(), AppError> {
+    append_set_cookie(
+        headers,
+        build_cookie(
+            auth::ACCESS_COOKIE_NAME,
+            access_token,
+            state.config.access_token_ttl_secs as i64,
+            state.config.cookie_secure,
+            true,
+        ),
+    )?;
+    append_set_cookie(
+        headers,
+        build_cookie(
+            auth::REFRESH_COOKIE_NAME,
+            refresh_token,
+            refresh_ttl_secs(state.config.refresh_token_ttl_days),
+            state.config.cookie_secure,
+            true,
+        ),
+    )?;
+    Ok(())
+}
+
+fn clear_auth_cookies(headers: &mut HeaderMap, state: &AppState) -> Result<(), AppError> {
+    append_set_cookie(
+        headers,
+        build_cookie(
+            auth::ACCESS_COOKIE_NAME,
+            "",
+            0,
+            state.config.cookie_secure,
+            true,
+        ),
+    )?;
+    append_set_cookie(
+        headers,
+        build_cookie(
+            auth::REFRESH_COOKIE_NAME,
+            "",
+            0,
+            state.config.cookie_secure,
+            true,
+        ),
+    )?;
+    Ok(())
+}
+
+fn auth_response(
+    user: &db::users::User,
+    access_token: String,
+    refresh_token: String,
+) -> AuthResponse {
+    AuthResponse {
+        access_token,
+        refresh_token,
+        user: UserResponse {
+            id: user.id.clone(),
+            username: user.username.clone(),
+            email: user.email.clone(),
+            is_admin: user.is_admin,
+        },
+    }
+}
+
+fn map_user_create_error(err: sqlx::Error) -> AppError {
+    if let sqlx::Error::Database(db_err) = &err
+        && db_err.is_unique_violation()
+    {
+        let msg = db_err.message();
+        if msg.contains("users.username") {
+            return AppError::Conflict("Username already taken".into());
+        }
+        if msg.contains("users.email") {
+            return AppError::Conflict("Email already registered".into());
+        }
+        return AppError::Conflict("User already exists".into());
+    }
+    AppError::from(err)
+}
+
 async fn register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
-) -> Result<Json<AuthResponse>, AppError> {
-    req.validate().map_err(|e| AppError::BadRequest(e.to_string()))?;
+) -> Result<Response, AppError> {
+    req.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
-    if db::users::get_user_by_username(&state.db, &req.username).await?.is_some() {
+    if db::users::get_user_by_username(&state.db, &req.username)
+        .await?
+        .is_some()
+    {
         return Err(AppError::Conflict("Username already taken".into()));
     }
-    if db::users::get_user_by_email(&state.db, &req.email).await?.is_some() {
+    if db::users::get_user_by_email(&state.db, &req.email)
+        .await?
+        .is_some()
+    {
         return Err(AppError::Conflict("Email already registered".into()));
     }
 
@@ -78,27 +208,45 @@ async fn register(
     let password_hash = tokio::task::spawn_blocking(move || password::hash_password(&pw))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
-        .map_err(|e| AppError::from(e))?;
+        .map_err(AppError::from)?;
 
-    let user = db::users::create_user(&state.db, &req.username, &req.email, &password_hash).await?;
+    let user = db::users::create_user(&state.db, &req.username, &req.email, &password_hash)
+        .await
+        .map_err(map_user_create_error)?;
 
-    let access_token = auth::create_access_token(&user.id, &user.username, user.is_admin, &state.config.jwt_secret, state.config.access_token_ttl_secs)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let access_token = auth::create_access_token(
+        &user.id,
+        &user.username,
+        user.is_admin,
+        &state.config.jwt_secret,
+        state.config.access_token_ttl_secs,
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let (refresh_token, token_hash) = generate_refresh_token();
-    let expires_at = chrono::Utc::now() + chrono::Duration::days(state.config.refresh_token_ttl_days);
-    db::refresh_tokens::create_refresh_token(&state.db, &user.id, &token_hash, &expires_at.to_rfc3339()).await?;
+    let expires_at =
+        chrono::Utc::now() + chrono::Duration::days(state.config.refresh_token_ttl_days);
+    db::refresh_tokens::create_refresh_token(
+        &state.db,
+        &user.id,
+        &token_hash,
+        &expires_at.to_rfc3339(),
+    )
+    .await?;
 
-    Ok(Json(AuthResponse {
-        access_token,
-        refresh_token,
-        user: UserResponse {
-            id: user.id,
-            username: user.username,
-            email: user.email,
-            is_admin: user.is_admin,
-        },
-    }))
+    let mut response = Json(auth_response(
+        &user,
+        access_token.clone(),
+        refresh_token.clone(),
+    ))
+    .into_response();
+    set_auth_cookies(
+        response.headers_mut(),
+        &access_token,
+        &refresh_token,
+        &state,
+    )?;
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -110,8 +258,9 @@ pub struct LoginRequest {
 async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<AuthResponse>, AppError> {
-    let user = db::users::get_user_by_username(&state.db, &req.username).await?
+) -> Result<Response, AppError> {
+    let user = db::users::get_user_by_username(&state.db, &req.username)
+        .await?
         .ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
 
     let pw = req.password.clone();
@@ -119,85 +268,161 @@ async fn login(
     let valid = tokio::task::spawn_blocking(move || password::verify_password(&pw, &hash))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
-        .map_err(|e| AppError::from(e))?;
+        .map_err(AppError::from)?;
 
     if !valid {
         return Err(AppError::Unauthorized("Invalid credentials".into()));
     }
 
-    let access_token = auth::create_access_token(&user.id, &user.username, user.is_admin, &state.config.jwt_secret, state.config.access_token_ttl_secs)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let access_token = auth::create_access_token(
+        &user.id,
+        &user.username,
+        user.is_admin,
+        &state.config.jwt_secret,
+        state.config.access_token_ttl_secs,
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let (refresh_token, token_hash) = generate_refresh_token();
-    let expires_at = chrono::Utc::now() + chrono::Duration::days(state.config.refresh_token_ttl_days);
-    db::refresh_tokens::create_refresh_token(&state.db, &user.id, &token_hash, &expires_at.to_rfc3339()).await?;
+    let expires_at =
+        chrono::Utc::now() + chrono::Duration::days(state.config.refresh_token_ttl_days);
+    db::refresh_tokens::create_refresh_token(
+        &state.db,
+        &user.id,
+        &token_hash,
+        &expires_at.to_rfc3339(),
+    )
+    .await?;
 
-    Ok(Json(AuthResponse {
-        access_token,
-        refresh_token,
-        user: UserResponse {
-            id: user.id,
-            username: user.username,
-            email: user.email,
-            is_admin: user.is_admin,
-        },
-    }))
+    let mut response = Json(auth_response(
+        &user,
+        access_token.clone(),
+        refresh_token.clone(),
+    ))
+    .into_response();
+    set_auth_cookies(
+        response.headers_mut(),
+        &access_token,
+        &refresh_token,
+        &state,
+    )?;
+    Ok(response)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct RefreshRequest {
-    pub refresh_token: String,
+    pub refresh_token: Option<String>,
+}
+
+fn extract_refresh_token(headers: &HeaderMap, req: &RefreshRequest) -> Option<String> {
+    req.refresh_token
+        .clone()
+        .or_else(|| auth::get_cookie(headers, auth::REFRESH_COOKIE_NAME))
 }
 
 async fn refresh(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<RefreshRequest>,
-) -> Result<Json<AuthResponse>, AppError> {
-    let token_hash = hash_token(&req.refresh_token);
+) -> Result<Response, AppError> {
+    let refresh_token = extract_refresh_token(&headers, &req)
+        .ok_or_else(|| AppError::Unauthorized("Missing refresh token".into()))?;
+    let token_hash = hash_token(&refresh_token);
+    let now = chrono::Utc::now();
+    let mut tx = state.db.begin().await?;
 
-    let stored = db::refresh_tokens::get_refresh_token_by_hash(&state.db, &token_hash).await?
-        .ok_or_else(|| AppError::Unauthorized("Invalid refresh token".into()))?;
+    // Consume token in the same transaction to prevent refresh-token replay.
+    let consumed = sqlx::query_as::<_, ConsumedRefreshToken>(
+        "DELETE FROM refresh_tokens
+         WHERE token_hash = ?
+         RETURNING user_id, expires_at",
+    )
+    .bind(&token_hash)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::Unauthorized("Invalid refresh token".into()))?;
 
-    let expires_at = chrono::DateTime::parse_from_rfc3339(&stored.expires_at)
+    let expires_at = chrono::DateTime::parse_from_rfc3339(&consumed.expires_at)
         .map_err(|_| AppError::Internal("Invalid token expiry".into()))?;
 
-    if expires_at < chrono::Utc::now() {
-        db::refresh_tokens::delete_refresh_token(&state.db, &stored.id).await?;
+    if expires_at < now {
+        tx.commit().await?;
         return Err(AppError::Unauthorized("Refresh token expired".into()));
     }
 
-    // Delete old token (rotation)
-    db::refresh_tokens::delete_refresh_token(&state.db, &stored.id).await?;
+    let user = sqlx::query_as::<_, db::users::User>(
+        "SELECT id, username, email, password_hash, is_admin, created_at, updated_at
+         FROM users
+         WHERE id = ?",
+    )
+    .bind(&consumed.user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::Unauthorized("User not found".into()))?;
 
-    let user = db::users::get_user_by_id(&state.db, &stored.user_id).await?
-        .ok_or_else(|| AppError::Unauthorized("User not found".into()))?;
-
-    let access_token = auth::create_access_token(&user.id, &user.username, user.is_admin, &state.config.jwt_secret, state.config.access_token_ttl_secs)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let access_token = auth::create_access_token(
+        &user.id,
+        &user.username,
+        user.is_admin,
+        &state.config.jwt_secret,
+        state.config.access_token_ttl_secs,
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let (new_refresh_token, new_token_hash) = generate_refresh_token();
-    let new_expires_at = chrono::Utc::now() + chrono::Duration::days(30);
-    db::refresh_tokens::create_refresh_token(&state.db, &user.id, &new_token_hash, &new_expires_at.to_rfc3339()).await?;
+    let new_expires_at = now + chrono::Duration::days(state.config.refresh_token_ttl_days);
+    sqlx::query(
+        "INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(&user.id)
+    .bind(&new_token_hash)
+    .bind(new_expires_at.to_rfc3339())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
 
-    Ok(Json(AuthResponse {
-        access_token,
-        refresh_token: new_refresh_token,
-        user: UserResponse {
-            id: user.id,
-            username: user.username,
-            email: user.email,
-            is_admin: user.is_admin,
-        },
-    }))
+    let mut response = Json(auth_response(
+        &user,
+        access_token.clone(),
+        new_refresh_token.clone(),
+    ))
+    .into_response();
+    set_auth_cookies(
+        response.headers_mut(),
+        &access_token,
+        &new_refresh_token,
+        &state,
+    )?;
+    Ok(response)
+}
+
+#[derive(Deserialize, Default)]
+pub struct LogoutRequest {
+    pub refresh_token: Option<String>,
 }
 
 async fn logout(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<RefreshRequest>,
-) -> Result<Json<MessageResponse>, AppError> {
-    let token_hash = hash_token(&req.refresh_token);
-    db::refresh_tokens::delete_refresh_token_by_hash(&state.db, &token_hash).await?;
-    Ok(Json(MessageResponse { message: "Logged out".into() }))
+    headers: HeaderMap,
+    Json(req): Json<LogoutRequest>,
+) -> Result<Response, AppError> {
+    let refresh_token = req
+        .refresh_token
+        .or_else(|| auth::get_cookie(&headers, auth::REFRESH_COOKIE_NAME));
+
+    if let Some(token) = refresh_token {
+        let token_hash = hash_token(&token);
+        db::refresh_tokens::delete_refresh_token_by_hash(&state.db, &token_hash).await?;
+    }
+
+    let mut response = Json(MessageResponse {
+        message: "Logged out".into(),
+    })
+    .into_response();
+    clear_auth_cookies(response.headers_mut(), &state)?;
+    Ok(response)
 }
 
 fn generate_refresh_token() -> (String, String) {

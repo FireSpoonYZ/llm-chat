@@ -16,13 +16,74 @@ pub struct AppState {
     pub docker_manager: Arc<DockerManager>,
 }
 
-/// Extractor that authenticates a request via the `Authorization: Bearer <token>`
-/// header and provides the caller's identity.
+/// Extractor that authenticates a request via either:
+/// 1) `Authorization: Bearer <token>`
+/// 2) `access_token` HttpOnly cookie.
+///
+/// and provides the caller's identity.
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub user_id: String,
-    pub username: String,
     pub is_admin: bool,
+}
+
+/// Route-scoped extractor that also accepts `?token=...` for media/file URLs.
+#[derive(Debug, Clone)]
+pub struct QueryAuthUser(pub AuthUser);
+
+impl std::ops::Deref for QueryAuthUser {
+    type Target = AuthUser;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+fn token_from_header_or_cookie(parts: &Parts) -> Result<Option<String>, AppError> {
+    if let Some(auth_header) = parts
+        .headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+    {
+        let token = auth_header
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| AppError::Unauthorized("Invalid authorization scheme".into()))?
+            .to_owned();
+        Ok(Some(token))
+    } else {
+        Ok(super::get_cookie(&parts.headers, super::ACCESS_COOKIE_NAME))
+    }
+}
+
+fn token_from_query(parts: &Parts) -> Option<String> {
+    parts.uri.query().and_then(|query| {
+        form_urlencoded::parse(query.as_bytes())
+            .find(|(k, _)| k == "token")
+            .map(|(_, v)| v.into_owned())
+    })
+}
+
+fn authenticate(
+    parts: &Parts,
+    state: &Arc<AppState>,
+    allow_query_token: bool,
+) -> Result<AuthUser, AppError> {
+    let token = if let Some(token) = token_from_header_or_cookie(parts)? {
+        token
+    } else if allow_query_token {
+        token_from_query(parts)
+            .ok_or_else(|| AppError::Unauthorized("Missing authorization".into()))?
+    } else {
+        return Err(AppError::Unauthorized("Missing authorization".into()));
+    };
+
+    let claims = super::verify_access_token(&token, &state.config.jwt_secret)
+        .map_err(|_| AppError::Unauthorized("Invalid or expired token".into()))?;
+
+    Ok(AuthUser {
+        user_id: claims.sub,
+        is_admin: claims.is_admin,
+    })
 }
 
 impl FromRequestParts<Arc<AppState>> for AuthUser {
@@ -32,35 +93,18 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        // 1. Try Authorization header
-        // 2. Fallback to ?token= query param (for <img>/<video>/<audio> src requests)
-        let token = if let Some(auth_header) = parts
-            .headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-        {
-            auth_header
-                .strip_prefix("Bearer ")
-                .ok_or_else(|| AppError::Unauthorized("Invalid authorization scheme".into()))?
-                .to_owned()
-        } else if let Some(query) = parts.uri.query() {
-            form_urlencoded::parse(query.as_bytes())
-                .find(|(k, _)| k == "token")
-                .map(|(_, v)| v.into_owned())
-                .ok_or_else(|| AppError::Unauthorized("Missing authorization".into()))?
-        } else {
-            return Err(AppError::Unauthorized("Missing authorization".into()));
-        };
+        authenticate(parts, state, false)
+    }
+}
 
-        let claims =
-            super::verify_access_token(&token, &state.config.jwt_secret)
-                .map_err(|_| AppError::Unauthorized("Invalid or expired token".into()))?;
+impl FromRequestParts<Arc<AppState>> for QueryAuthUser {
+    type Rejection = AppError;
 
-        Ok(AuthUser {
-            user_id: claims.sub,
-            username: claims.username,
-            is_admin: claims.is_admin,
-        })
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(QueryAuthUser(authenticate(parts, state, true)?))
     }
 }
 
@@ -68,7 +112,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
 ///
 /// If the user is authenticated but not an admin, a `403 Forbidden` is returned.
 #[derive(Debug, Clone)]
-pub struct AdminOnly(pub AuthUser);
+pub struct AdminOnly;
 
 impl FromRequestParts<Arc<AppState>> for AdminOnly {
     type Rejection = AppError;
@@ -81,6 +125,6 @@ impl FromRequestParts<Arc<AppState>> for AdminOnly {
         if !user.is_admin {
             return Err(AppError::Forbidden("Admin privileges required".into()));
         }
-        Ok(AdminOnly(user))
+        Ok(AdminOnly)
     }
 }

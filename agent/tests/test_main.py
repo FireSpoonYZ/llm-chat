@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.agent import StreamEvent
 from src.main import AgentSession
 from src.prompts.tools import TOOL_DESCRIPTIONS
 
@@ -233,3 +234,46 @@ class TestAgentSession:
             assert kwargs["image_model"] == ""
             assert kwargs["image_api_key"] == ""
             assert kwargs["image_endpoint_url"] is None
+
+    async def test_task_tool_works_when_init_omits_subagent_fields(self):
+        session = AgentSession("ws://test", "tok")
+        session.ws = AsyncMock()
+
+        class _FakeParentAgent:
+            def __init__(self, _config, tools=()):
+                self.tools = list(tools)
+
+        class _FakeExploreAgent:
+            def __init__(self, _config, tools=()):
+                self.tools = list(tools)
+
+            async def handle_message(
+                self,
+                _prompt,
+                deep_thinking: bool = False,
+                thinking_budget: int | None = None,
+            ):
+                yield StreamEvent("assistant_delta", {"delta": "subagent done"})
+                yield StreamEvent("complete", {"content": "subagent done"})
+
+        with patch("src.main.ChatAgent", _FakeParentAgent), patch(
+            "src.subagents.ChatAgent", _FakeExploreAgent
+        ):
+            await session._handle_init({
+                "conversation_id": "conv-1",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "key",
+                # intentionally omit subagent_provider/subagent_model
+                "tools_enabled": True,
+            })
+
+            task_tool = next(t for t in session.agent.tools if t.name == "task")
+            result = await task_tool._arun(
+                subagent_type="explore",
+                description="investigate repo",
+                prompt="check architecture docs",
+            )
+            assert result["success"] is True
+            assert result["data"]["subagent_type"] == "explore"
+            assert "subagent done" in result["text"]

@@ -1,8 +1,8 @@
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     routing::get,
-    Json, Router,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -14,7 +14,10 @@ use crate::error::AppError;
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_presets).post(create_preset))
-        .route("/{id}", axum::routing::put(update_preset).delete(delete_preset))
+        .route(
+            "/{id}",
+            axum::routing::put(update_preset).delete(delete_preset),
+        )
 }
 
 async fn list_presets(

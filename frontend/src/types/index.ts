@@ -6,8 +6,8 @@ export interface User {
 }
 
 export interface AuthResponse {
-  access_token: string
-  refresh_token: string
+  access_token?: string
+  refresh_token?: string
   user: User
 }
 
@@ -16,8 +16,12 @@ export interface Conversation {
   title: string
   provider: string | null
   model_name: string | null
+  subagent_provider?: string | null
+  subagent_model?: string | null
   system_prompt_override: string | null
   deep_thinking: boolean
+  thinking_budget: number | null
+  subagent_thinking_budget?: number | null
   created_at: string
   updated_at: string
   image_provider: string | null
@@ -36,10 +40,19 @@ export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
+  parts?: MessagePart[]
   tool_calls: string | null
   tool_call_id: string | null
   token_count: number | null
   created_at: string
+}
+
+export interface MessagePart {
+  type: 'text' | 'reasoning' | 'tool_call' | 'tool_result' | string
+  text: string | null
+  json_payload: unknown | null
+  tool_call_id: string | null
+  seq: number | null
 }
 
 export interface MessagesResponse {
@@ -80,16 +93,35 @@ export interface ToolCallInfo {
   id: string
   name: string
   input?: Record<string, unknown>
-  result?: string
+  result?: ToolResult
   isError?: boolean
   isLoading?: boolean
+}
+
+export interface ToolMediaRef {
+  type: 'image' | 'video' | 'audio'
+  name: string
+  url: string
+  mime?: string
+  size?: number
+}
+
+export interface ToolResult {
+  kind: string
+  text: string
+  success: boolean
+  error?: string | null
+  data?: Record<string, unknown> & {
+    media?: ToolMediaRef[]
+  }
+  meta?: Record<string, unknown>
 }
 
 export type ContentBlock =
   | { type: 'text'; content: string }
   | { type: 'thinking'; content: string }
   | { type: 'tool_call'; id: string; name: string; input?: Record<string, unknown>;
-      result?: string; isError?: boolean; isLoading?: boolean }
+      result?: ToolResult | string; isError?: boolean; isLoading?: boolean }
 
 // WebSocket message — index-signature for backward compat with existing handlers
 export interface WsMessage {
@@ -106,7 +138,13 @@ export type WsMessageEvent =
   | { type: 'assistant_delta'; delta: string }
   | { type: 'thinking_delta'; delta: string }
   | { type: 'tool_call'; tool_call_id: string; tool_name: string; tool_input?: Record<string, unknown> }
-  | { type: 'tool_result'; tool_call_id: string; result: string; is_error: boolean }
+  | { type: 'tool_result'; tool_call_id: string; result: ToolResult | string; is_error: boolean }
+  | {
+      type: 'task_trace_delta'
+      tool_call_id: string
+      event_type: 'assistant_delta' | 'thinking_delta' | 'tool_call' | 'tool_result' | 'complete' | 'error' | string
+      payload: Record<string, unknown>
+    }
   | { type: 'complete'; message_id: string; content: string; tool_calls?: unknown[] }
   | { type: 'error'; message: string }
   | { type: 'container_status'; status: string; message?: string }

@@ -16,10 +16,13 @@ from src.agent import (
     StreamEvent,
     _accumulate_tool_call,
     _build_multimodal_content,
+    build_message_history_from_parts,
     build_message_history,
+    sanitize_delta,
 )
 from src.prompts.presets import BUILTIN_PRESETS
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from src.tools.task import TaskTool
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 
 class TestAgentConfig:
@@ -118,6 +121,191 @@ class TestBuildMessageHistory:
         msgs = build_message_history([{"role": "tool", "content": "result"}])
         assert len(msgs) == 0
 
+    def test_build_message_history_from_parts_text(self):
+        msgs = build_message_history_from_parts([
+            {
+                "role": "user",
+                "parts": [{"type": "text", "text": "hi from parts"}],
+            },
+            {
+                "role": "assistant",
+                "parts": [{"type": "text", "text": "hello from parts"}],
+            },
+        ])
+        assert len(msgs) == 2
+        assert isinstance(msgs[0], HumanMessage)
+        assert msgs[0].content == "hi from parts"
+        assert isinstance(msgs[1], AIMessage)
+        assert msgs[1].content == "hello from parts"
+
+    def test_build_message_history_from_parts_tool_roundtrip(self):
+        msgs = build_message_history_from_parts([
+            {
+                "role": "assistant",
+                "parts": [
+                    {"type": "text", "text": "Running command"},
+                    {
+                        "type": "tool_call",
+                        "tool_call_id": "tc-1",
+                        "json_payload": {
+                            "type": "tool_call",
+                            "id": "tc-1",
+                            "name": "bash",
+                            "input": {"command": "ls"},
+                        },
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_call_id": "tc-1",
+                        "text": "file1\nfile2",
+                    },
+                ],
+            },
+        ])
+        assert len(msgs) == 2
+        assert isinstance(msgs[0], AIMessage)
+        assert msgs[0].content == "Running command"
+        assert len(msgs[0].tool_calls) == 1
+        assert msgs[0].tool_calls[0]["id"] == "tc-1"
+        assert msgs[0].tool_calls[0]["name"] == "bash"
+        assert isinstance(msgs[1], ToolMessage)
+        assert msgs[1].tool_call_id == "tc-1"
+        assert msgs[1].content == "file1\nfile2"
+
+    def test_build_message_history_from_parts_tool_result_json_payload_fallback(self):
+        msgs = build_message_history_from_parts([
+            {
+                "role": "assistant",
+                "parts": [
+                    {
+                        "type": "tool_call",
+                        "tool_call_id": "tc-2",
+                        "json_payload": {
+                            "type": "tool_call",
+                            "id": "tc-2",
+                            "name": "bash",
+                            "input": {"command": "pwd"},
+                        },
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_call_id": "tc-2",
+                        "text": "",
+                        "json_payload": {"kind": "bash", "text": "/workspace"},
+                    },
+                ],
+            },
+        ])
+        assert len(msgs) == 2
+        assert isinstance(msgs[0], AIMessage)
+        assert len(msgs[0].tool_calls) == 1
+        assert isinstance(msgs[1], ToolMessage)
+        assert msgs[1].tool_call_id == "tc-2"
+        assert msgs[1].content == "/workspace"
+
+    def test_build_message_history_from_parts_multi_iteration_order_preserved(self):
+        msgs = build_message_history_from_parts([
+            {
+                "role": "assistant",
+                "parts": [
+                    {"seq": 0, "type": "text", "text": "Step 1"},
+                    {
+                        "seq": 1,
+                        "type": "tool_call",
+                        "tool_call_id": "tc-1",
+                        "json_payload": {
+                            "type": "tool_call",
+                            "id": "tc-1",
+                            "name": "bash",
+                            "input": {"command": "ls"},
+                        },
+                    },
+                    {
+                        "seq": 2,
+                        "type": "tool_result",
+                        "tool_call_id": "tc-1",
+                        "text": "file-a\nfile-b",
+                    },
+                    {"seq": 3, "type": "text", "text": "Step 2"},
+                    {
+                        "seq": 4,
+                        "type": "tool_call",
+                        "tool_call_id": "tc-2",
+                        "json_payload": {
+                            "type": "tool_call",
+                            "id": "tc-2",
+                            "name": "bash",
+                            "input": {"command": "pwd"},
+                        },
+                    },
+                    {
+                        "seq": 5,
+                        "type": "tool_result",
+                        "tool_call_id": "tc-2",
+                        "text": "/workspace",
+                    },
+                    {"seq": 6, "type": "text", "text": "Done"},
+                ],
+            },
+        ])
+
+        # AI(tool tc-1) + Tool(tc-1) + AI(tool tc-2) + Tool(tc-2) + AI(final)
+        assert len(msgs) == 5
+        assert isinstance(msgs[0], AIMessage)
+        assert msgs[0].content == "Step 1"
+        assert len(msgs[0].tool_calls) == 1
+        assert msgs[0].tool_calls[0]["id"] == "tc-1"
+
+        assert isinstance(msgs[1], ToolMessage)
+        assert msgs[1].tool_call_id == "tc-1"
+        assert msgs[1].content == "file-a\nfile-b"
+
+        assert isinstance(msgs[2], AIMessage)
+        assert msgs[2].content == "Step 2"
+        assert len(msgs[2].tool_calls) == 1
+        assert msgs[2].tool_calls[0]["id"] == "tc-2"
+
+        assert isinstance(msgs[3], ToolMessage)
+        assert msgs[3].tool_call_id == "tc-2"
+        assert msgs[3].content == "/workspace"
+
+        assert isinstance(msgs[4], AIMessage)
+        assert msgs[4].content == "Done"
+        assert msgs[4].tool_calls == []
+
+    def test_build_message_history_from_parts_uses_seq_order(self):
+        msgs = build_message_history_from_parts([
+            {
+                "role": "assistant",
+                "parts": [
+                    {"seq": 3, "type": "text", "text": "Done"},
+                    {
+                        "seq": 1,
+                        "type": "tool_call",
+                        "tool_call_id": "tc-1",
+                        "json_payload": {
+                            "type": "tool_call",
+                            "id": "tc-1",
+                            "name": "bash",
+                            "input": {"command": "ls"},
+                        },
+                    },
+                    {"seq": 0, "type": "text", "text": "Step 1"},
+                    {"seq": 2, "type": "tool_result", "tool_call_id": "tc-1", "text": "ok"},
+                ],
+            },
+        ])
+
+        assert len(msgs) == 3
+        assert isinstance(msgs[0], AIMessage)
+        assert msgs[0].content == "Step 1"
+        assert len(msgs[0].tool_calls) == 1
+        assert msgs[0].tool_calls[0]["id"] == "tc-1"
+        assert isinstance(msgs[1], ToolMessage)
+        assert msgs[1].content == "ok"
+        assert isinstance(msgs[2], AIMessage)
+        assert msgs[2].content == "Done"
+
     def test_mixed_history(self):
         history = [
             {"role": "user", "content": "hi"},
@@ -129,6 +317,347 @@ class TestBuildMessageHistory:
         assert isinstance(msgs[0], HumanMessage)
         assert isinstance(msgs[1], AIMessage)
         assert isinstance(msgs[2], HumanMessage)
+
+    def test_assistant_no_tool_calls_unchanged(self):
+        """Assistant message without tool_calls should produce a single AIMessage."""
+        history = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello there"},
+        ]
+        msgs = build_message_history(history)
+        assert len(msgs) == 2
+        assert isinstance(msgs[1], AIMessage)
+        assert msgs[1].content == "hello there"
+        assert msgs[1].tool_calls == []
+
+    def test_single_tool_call_reconstruction(self):
+        """Assistant with one tool_call should produce AIMessage + ToolMessage + AIMessage."""
+        history = [
+            {"role": "user", "content": "list files"},
+            {
+                "role": "assistant",
+                "content": "Let me check.",
+                "tool_calls": [
+                    {"type": "text", "content": "Let me check."},
+                    {
+                        "type": "tool_call",
+                        "id": "tc1",
+                        "name": "bash",
+                        "input": {"command": "ls"},
+                        "result": "file1.txt\nfile2.txt",
+                        "isError": False,
+                    },
+                    {"type": "text", "content": "Here are the files."},
+                ],
+            },
+        ]
+        msgs = build_message_history(history)
+        assert isinstance(msgs[0], HumanMessage)
+        # AIMessage with tool_calls
+        assert isinstance(msgs[1], AIMessage)
+        assert msgs[1].content == "Let me check."
+        assert len(msgs[1].tool_calls) == 1
+        assert msgs[1].tool_calls[0]["name"] == "bash"
+        assert msgs[1].tool_calls[0]["id"] == "tc1"
+        # ToolMessage
+        assert isinstance(msgs[2], ToolMessage)
+        assert msgs[2].content == "file1.txt\nfile2.txt"
+        assert msgs[2].tool_call_id == "tc1"
+        # Final AIMessage
+        assert isinstance(msgs[3], AIMessage)
+        assert msgs[3].content == "Here are the files."
+
+    def test_structured_tool_result_reconstruction_uses_text(self):
+        """Structured result objects should be converted to ToolMessage text."""
+        history = [
+            {"role": "user", "content": "run command"},
+            {
+                "role": "assistant",
+                "content": "Done",
+                "tool_calls": [
+                    {
+                        "type": "tool_call",
+                        "id": "tc1",
+                        "name": "bash",
+                        "input": {"command": "echo hi"},
+                        "result": {"kind": "bash", "text": "hi\n", "exit_code": 0},
+                        "isError": False,
+                    },
+                    {"type": "text", "content": "Done"},
+                ],
+            },
+        ]
+        msgs = build_message_history(history)
+        assert isinstance(msgs[1], AIMessage)
+        assert len(msgs[1].tool_calls) == 1
+        assert isinstance(msgs[2], ToolMessage)
+        assert msgs[2].content == "hi\n"
+        assert msgs[2].tool_call_id == "tc1"
+        assert isinstance(msgs[3], AIMessage)
+        assert msgs[3].content == "Done"
+
+    def test_multiple_tool_calls_same_iteration(self):
+        """Multiple tool_calls before any text should all be in one AIMessage."""
+        history = [
+            {"role": "user", "content": "do stuff"},
+            {
+                "role": "assistant",
+                "content": "Done",
+                "tool_calls": [
+                    {
+                        "type": "tool_call",
+                        "id": "tc1",
+                        "name": "bash",
+                        "input": {"command": "ls"},
+                        "result": "files",
+                        "isError": False,
+                    },
+                    {
+                        "type": "tool_call",
+                        "id": "tc2",
+                        "name": "bash",
+                        "input": {"command": "pwd"},
+                        "result": "/home",
+                        "isError": False,
+                    },
+                    {"type": "text", "content": "Done"},
+                ],
+            },
+        ]
+        msgs = build_message_history(history)
+        # AIMessage(tool_calls=[tc1, tc2]) + ToolMessage(tc1) + ToolMessage(tc2) + AIMessage("Done")
+        assert isinstance(msgs[1], AIMessage)
+        assert len(msgs[1].tool_calls) == 2
+        assert isinstance(msgs[2], ToolMessage)
+        assert msgs[2].tool_call_id == "tc1"
+        assert isinstance(msgs[3], ToolMessage)
+        assert msgs[3].tool_call_id == "tc2"
+        assert isinstance(msgs[4], AIMessage)
+        assert msgs[4].content == "Done"
+
+    def test_multi_iteration_tool_calls(self):
+        """Multiple rounds of tool calls (text → tool → text → tool → text)."""
+        history = [
+            {"role": "user", "content": "complex task"},
+            {
+                "role": "assistant",
+                "content": "final",
+                "tool_calls": [
+                    {"type": "text", "content": "Step 1"},
+                    {
+                        "type": "tool_call",
+                        "id": "tc1",
+                        "name": "bash",
+                        "input": {"command": "step1"},
+                        "result": "result1",
+                        "isError": False,
+                    },
+                    {"type": "text", "content": "Step 2"},
+                    {
+                        "type": "tool_call",
+                        "id": "tc2",
+                        "name": "bash",
+                        "input": {"command": "step2"},
+                        "result": "result2",
+                        "isError": False,
+                    },
+                    {"type": "text", "content": "final"},
+                ],
+            },
+        ]
+        msgs = build_message_history(history)
+        # HumanMessage
+        # AIMessage("Step 1", tool_calls=[tc1])
+        # ToolMessage(tc1)
+        # AIMessage("Step 2", tool_calls=[tc2])
+        # ToolMessage(tc2)
+        # AIMessage("final")
+        assert len(msgs) == 6
+        assert isinstance(msgs[1], AIMessage)
+        assert msgs[1].content == "Step 1"
+        assert len(msgs[1].tool_calls) == 1
+        assert isinstance(msgs[2], ToolMessage)
+        assert isinstance(msgs[3], AIMessage)
+        assert msgs[3].content == "Step 2"
+        assert len(msgs[3].tool_calls) == 1
+        assert isinstance(msgs[4], ToolMessage)
+        assert isinstance(msgs[5], AIMessage)
+        assert msgs[5].content == "final"
+        assert msgs[5].tool_calls == []
+
+    def test_thinking_blocks_skipped(self):
+        """Thinking blocks in tool_calls should be ignored."""
+        history = [
+            {"role": "user", "content": "think and act"},
+            {
+                "role": "assistant",
+                "content": "done",
+                "tool_calls": [
+                    {"type": "thinking", "content": "Let me think about this..."},
+                    {"type": "text", "content": "I'll run a command."},
+                    {
+                        "type": "tool_call",
+                        "id": "tc1",
+                        "name": "bash",
+                        "input": {"command": "echo hi"},
+                        "result": "hi",
+                        "isError": False,
+                    },
+                    {"type": "text", "content": "done"},
+                ],
+            },
+        ]
+        msgs = build_message_history(history)
+        # No thinking messages should appear
+        for m in msgs:
+            if isinstance(m, AIMessage):
+                assert "think" not in m.content.lower() or m.content == "done"
+
+        # Should still have: Human + AI(tool_calls) + Tool + AI
+        assert isinstance(msgs[1], AIMessage)
+        assert msgs[1].content == "I'll run a command."
+        assert len(msgs[1].tool_calls) == 1
+        assert isinstance(msgs[2], ToolMessage)
+        assert isinstance(msgs[3], AIMessage)
+        assert msgs[3].content == "done"
+
+    def test_no_text_before_tool_call(self):
+        """Tool call with no preceding text should produce AIMessage with empty content."""
+        history = [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": "result",
+                "tool_calls": [
+                    {
+                        "type": "tool_call",
+                        "id": "tc1",
+                        "name": "bash",
+                        "input": {"command": "ls"},
+                        "result": "files",
+                        "isError": False,
+                    },
+                    {"type": "text", "content": "result"},
+                ],
+            },
+        ]
+        msgs = build_message_history(history)
+        assert isinstance(msgs[1], AIMessage)
+        assert msgs[1].content == ""
+        assert len(msgs[1].tool_calls) == 1
+        assert isinstance(msgs[2], ToolMessage)
+        assert isinstance(msgs[3], AIMessage)
+        assert msgs[3].content == "result"
+
+    def test_tool_call_with_error(self):
+        """Tool call with isError=True should still produce a ToolMessage."""
+        history = [
+            {"role": "user", "content": "run bad"},
+            {
+                "role": "assistant",
+                "content": "failed",
+                "tool_calls": [
+                    {
+                        "type": "tool_call",
+                        "id": "tc1",
+                        "name": "bash",
+                        "input": {"command": "bad_cmd"},
+                        "result": "Tool error: command not found",
+                        "isError": True,
+                    },
+                    {"type": "text", "content": "failed"},
+                ],
+            },
+        ]
+        msgs = build_message_history(history)
+        assert isinstance(msgs[1], AIMessage)
+        assert len(msgs[1].tool_calls) == 1
+        assert isinstance(msgs[2], ToolMessage)
+        assert msgs[2].content == "Tool error: command not found"
+        assert isinstance(msgs[3], AIMessage)
+        assert msgs[3].content == "failed"
+
+    def test_empty_tool_calls_list(self):
+        """Empty tool_calls list should behave like no tool_calls."""
+        history = [
+            {"role": "assistant", "content": "just text", "tool_calls": []},
+        ]
+        msgs = build_message_history(history)
+        assert len(msgs) == 1
+        assert isinstance(msgs[0], AIMessage)
+        assert msgs[0].content == "just text"
+        assert msgs[0].tool_calls == []
+
+    def test_only_tool_calls_no_final_text(self):
+        """Tool calls with no trailing text block should still work."""
+        history = [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"type": "text", "content": "Running..."},
+                    {
+                        "type": "tool_call",
+                        "id": "tc1",
+                        "name": "bash",
+                        "input": {"command": "ls"},
+                        "result": "files",
+                        "isError": False,
+                    },
+                ],
+            },
+        ]
+        msgs = build_message_history(history)
+        # AI("Running...", tool_calls=[tc1]) + ToolMessage
+        assert isinstance(msgs[1], AIMessage)
+        assert msgs[1].content == "Running..."
+        assert len(msgs[1].tool_calls) == 1
+        assert isinstance(msgs[2], ToolMessage)
+        # No trailing AIMessage since there's no final text
+        assert len(msgs) == 3
+
+    def test_only_thinking_blocks_falls_back_to_content(self):
+        """If tool_calls only has thinking blocks, fall back to content field."""
+        history = [
+            {
+                "role": "assistant",
+                "content": "Here is my answer.",
+                "tool_calls": [
+                    {"type": "thinking", "content": "Let me think deeply..."},
+                ],
+            },
+        ]
+        msgs = build_message_history(history)
+        assert len(msgs) == 1
+        assert isinstance(msgs[0], AIMessage)
+        assert msgs[0].content == "Here is my answer."
+
+    def test_tool_call_missing_id_does_not_crash(self):
+        """A tool_call block without 'id' should not raise KeyError."""
+        history = [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": "done",
+                "tool_calls": [
+                    {
+                        "type": "tool_call",
+                        "name": "bash",
+                        "input": {"command": "ls"},
+                        "result": "files",
+                        "isError": False,
+                    },
+                    {"type": "text", "content": "done"},
+                ],
+            },
+        ]
+        msgs = build_message_history(history)
+        assert isinstance(msgs[1], AIMessage)
+        assert len(msgs[1].tool_calls) == 1
+        assert msgs[1].tool_calls[0]["id"] == ""
+        assert isinstance(msgs[2], ToolMessage)
+        assert msgs[2].tool_call_id == ""
 
 
 class TestBuildMultimodalContent:
@@ -417,7 +946,9 @@ class TestChatAgent:
         agent = ChatAgent(self._make_config())
         result, is_error = await agent._execute_tool("nonexistent", {})
         assert is_error is True
-        assert "Unknown tool" in result
+        assert result["kind"] == "nonexistent"
+        assert result["success"] is False
+        assert "Unknown tool" in result["text"]
 
     @patch("src.agent.create_chat_model")
     async def test_execute_tool_success(self, mock_create):
@@ -429,7 +960,9 @@ class TestChatAgent:
         agent = ChatAgent(self._make_config(), tools=[mock_tool])
         result, is_error = await agent._execute_tool("test_tool", {"arg": "val"})
         assert is_error is False
-        assert result == "tool output"
+        assert result["kind"] == "test_tool"
+        assert result["success"] is True
+        assert result["text"] == "tool output"
         mock_tool.ainvoke.assert_called_once_with({"arg": "val"})
 
     @patch("src.agent.create_chat_model")
@@ -442,7 +975,9 @@ class TestChatAgent:
         agent = ChatAgent(self._make_config(), tools=[mock_tool])
         result, is_error = await agent._execute_tool("bad_tool", {})
         assert is_error is True
-        assert "tool broke" in result
+        assert result["kind"] == "bad_tool"
+        assert result["success"] is False
+        assert "tool broke" in result["text"]
 
     @patch("src.agent.create_chat_model")
     async def test_truncate_history_keeps_system_and_turns(self, mock_create):
@@ -502,7 +1037,7 @@ class TestChatAgent:
 
     @patch("src.agent.create_chat_model")
     async def test_execute_tool_multimodal_result(self, mock_create):
-        """When a tool returns a list (multimodal), _execute_tool should pass it through."""
+        """When a tool returns a list, _execute_tool should normalize it with llm_content."""
         mock_create.return_value = MagicMock()
         multimodal_result = [
             {"type": "text", "text": "Image file: photo.png"},
@@ -515,8 +1050,201 @@ class TestChatAgent:
         agent = ChatAgent(self._make_config(), tools=[mock_tool])
         result, is_error = await agent._execute_tool("read", {"file_path": "photo.png"})
         assert is_error is False
-        assert isinstance(result, list)
-        assert result == multimodal_result
+        assert result["kind"] == "read"
+        assert result["success"] is True
+        assert isinstance(result["llm_content"], list)
+        assert result["llm_content"] == multimodal_result
+
+    @patch("src.agent.create_chat_model")
+    async def test_task_tool_streams_subagent_trace_events(self, mock_create):
+        from langchain_core.messages import AIMessageChunk, ToolCallChunk
+
+        call_count = 0
+
+        async def fake_astream(messages):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        ToolCallChunk(
+                            name="task",
+                            args='{"subagent_type":"explore","description":"scan","prompt":"inspect"}',
+                            id="tc-task-1",
+                            index=0,
+                        ),
+                    ],
+                )
+            else:
+                yield AIMessageChunk(content="Task done.", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        class _Runner:
+            async def run_task(self, **kwargs):
+                sink = kwargs.get("event_sink")
+                if sink is not None:
+                    await sink(StreamEvent("assistant_delta", {"delta": "Investigating"}))
+                    await sink(StreamEvent("tool_call", {
+                        "tool_call_id": "sub-tc-1",
+                        "tool_name": "read",
+                        "tool_input": {"file_path": "README.md"},
+                    }))
+                    await sink(StreamEvent("tool_result", {
+                        "tool_call_id": "sub-tc-1",
+                        "result": {"kind": "read", "text": "ok", "success": True, "error": None, "data": {}, "meta": {}},
+                        "is_error": False,
+                    }))
+                    await sink(StreamEvent("complete", {"content": "Subagent summary"}))
+                return {
+                    "kind": "task",
+                    "text": "Subagent summary",
+                    "success": True,
+                    "error": None,
+                    "data": {"trace": [{"type": "text", "content": "Investigating"}]},
+                    "meta": {},
+                }
+
+        task_tool = TaskTool(runner=_Runner())
+        agent = ChatAgent(self._make_config(), tools=[task_tool])
+
+        events = []
+        async for event in agent.handle_message("run task"):
+            events.append(event)
+
+        trace_events = [e for e in events if e.type == "task_trace_delta"]
+        assert [e.data["event_type"] for e in trace_events] == [
+            "assistant_delta",
+            "tool_call",
+            "tool_result",
+            "complete",
+        ]
+        assert trace_events[1].data["payload"]["tool_name"] == "read"
+
+        tool_result_event = next(e for e in events if e.type == "tool_result")
+        assert tool_result_event.data["result"]["kind"] == "task"
+        assert tool_result_event.data["is_error"] is False
+
+    @patch("src.agent.create_chat_model")
+    async def test_task_tool_cancel_clears_event_sink(self, mock_create):
+        from langchain_core.messages import AIMessageChunk, ToolCallChunk
+
+        async def fake_astream(_messages):
+            yield AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    ToolCallChunk(
+                        name="task",
+                        args='{"subagent_type":"explore","description":"scan","prompt":"inspect"}',
+                        id="tc-task-cancel",
+                        index=0,
+                    ),
+                ],
+            )
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        class _Runner:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.cancelled = asyncio.Event()
+
+            async def run_task(self, **kwargs):
+                sink = kwargs.get("event_sink")
+                self.started.set()
+                if sink is not None:
+                    await sink(StreamEvent("assistant_delta", {"delta": "working"}))
+                try:
+                    while True:
+                        await asyncio.sleep(0.05)
+                except asyncio.CancelledError:
+                    self.cancelled.set()
+                    raise
+
+        runner = _Runner()
+        task_tool = TaskTool(runner=runner)
+        agent = ChatAgent(self._make_config(), tools=[task_tool])
+
+        events: list[StreamEvent] = []
+
+        async def _collect() -> None:
+            async for event in agent.handle_message("run task"):
+                events.append(event)
+
+        collect_task = asyncio.create_task(_collect())
+        await asyncio.wait_for(runner.started.wait(), timeout=1)
+        agent.cancel()
+        await asyncio.wait_for(collect_task, timeout=1)
+
+        assert runner.cancelled.is_set()
+        assert task_tool._event_sink is None
+        assert any(e.type == "task_trace_delta" for e in events)
+        error_event = next(e for e in events if e.type == "error")
+        assert error_event.data["code"] == "cancelled"
+
+    @patch("src.agent.create_chat_model")
+    async def test_task_tool_streams_large_trace_burst(self, mock_create):
+        from langchain_core.messages import AIMessageChunk, ToolCallChunk
+
+        call_count = 0
+
+        async def fake_astream(_messages):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        ToolCallChunk(
+                            name="task",
+                            args='{"subagent_type":"explore","description":"scan","prompt":"inspect"}',
+                            id="tc-task-burst",
+                            index=0,
+                        ),
+                    ],
+                )
+            else:
+                yield AIMessageChunk(content="Task done.", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        burst_size = 300
+
+        class _Runner:
+            async def run_task(self, **kwargs):
+                sink = kwargs.get("event_sink")
+                if sink is not None:
+                    for _ in range(burst_size):
+                        await sink(StreamEvent("assistant_delta", {"delta": "x"}))
+                return {
+                    "kind": "task",
+                    "text": "Subagent summary",
+                    "success": True,
+                    "error": None,
+                    "data": {},
+                    "meta": {},
+                }
+
+        task_tool = TaskTool(runner=_Runner())
+        agent = ChatAgent(self._make_config(), tools=[task_tool])
+
+        events = []
+        async for event in agent.handle_message("run task"):
+            events.append(event)
+
+        trace_events = [e for e in events if e.type == "task_trace_delta"]
+        assert len(trace_events) == burst_size
+        assert all(e.data["event_type"] == "assistant_delta" for e in trace_events)
 
     @patch("src.agent.create_chat_model")
     async def test_tool_result_event_display_string(self, mock_create):
@@ -560,14 +1288,16 @@ class TestChatAgent:
         assert len(tool_result_events) == 1
         tr = tool_result_events[0]
         # Frontend display result should be the text portion only, no base64
-        assert "base64" not in tr.data["result"]
-        assert "img.png" in tr.data["result"]
+        assert tr.data["result"]["kind"] == "read"
+        assert "base64" not in tr.data["result"]["text"]
+        assert "img.png" in tr.data["result"]["text"]
 
         # The complete event's content blocks should also not contain base64
         complete_event = next(e for e in events if e.type == "complete")
         blocks = complete_event.data["tool_calls"]
         tool_block = next(b for b in blocks if b.get("type") == "tool_call")
-        assert "base64" not in tool_block["result"]
+        assert tool_block["result"]["kind"] == "read"
+        assert "base64" not in tool_block["result"]["text"]
 
     @patch("src.agent.create_chat_model")
     async def test_tool_message_contains_full_multimodal(self, mock_create):
@@ -642,7 +1372,17 @@ class TestChatAgent:
 
         bash_tool = MagicMock()
         bash_tool.name = "bash"
-        bash_tool.ainvoke = AsyncMock(return_value="file1.txt\nimg.png")
+        bash_tool.ainvoke = AsyncMock(return_value={
+            "kind": "bash",
+            "text": "file1.txt\nimg.png",
+            "stdout": "file1.txt\nimg.png",
+            "stderr": "",
+            "exit_code": 0,
+            "timed_out": False,
+            "truncated": False,
+            "duration_ms": 5,
+            "error": False,
+        })
 
         read_tool = MagicMock()
         read_tool.name = "read"
@@ -658,16 +1398,17 @@ class TestChatAgent:
 
         tool_results = [e for e in events if e.type == "tool_result"]
         assert len(tool_results) == 2
-        # First tool (bash) returns plain string
-        assert isinstance(tool_results[0].data["result"], str)
-        assert "file1.txt" in tool_results[0].data["result"]
+        # First tool (bash) returns structured bash result
+        assert tool_results[0].data["result"]["kind"] == "bash"
+        assert "file1.txt" in tool_results[0].data["result"]["text"]
         # Second tool (read) returns display text only
-        assert "base64" not in tool_results[1].data["result"]
-        assert "img.png" in tool_results[1].data["result"]
+        assert tool_results[1].data["result"]["kind"] == "read"
+        assert "base64" not in tool_results[1].data["result"]["text"]
+        assert "img.png" in tool_results[1].data["result"]["text"]
 
     @patch("src.agent.create_chat_model")
     async def test_display_result_joins_multiple_text_blocks(self, mock_create):
-        """If multimodal result has multiple text blocks, display should join them."""
+        """If multimodal result has multiple text blocks, normalization should join them."""
         mock_create.return_value = MagicMock()
         multi_text_result = [
             {"type": "text", "text": "Part one."},
@@ -681,5 +1422,347 @@ class TestChatAgent:
         agent = ChatAgent(self._make_config(), tools=[mock_tool])
         result, is_error = await agent._execute_tool("read", {"file_path": "x.png"})
         assert is_error is False
-        assert isinstance(result, list)
-        assert len(result) == 3
+        assert result["kind"] == "read"
+        assert result["success"] is True
+        assert result["text"] == "Part one. Part two."
+        assert isinstance(result["llm_content"], list)
+        assert len(result["llm_content"]) == 3
+
+
+    @patch("src.agent.create_chat_model")
+    async def test_thinking_blocks_preserved_in_messages_during_tool_loop(self, mock_create):
+        """Thinking blocks should be preserved in AIMessage content during tool-call iterations."""
+        from langchain_core.messages import AIMessageChunk, ToolCallChunk
+
+        call_count = 0
+
+        async def fake_astream(messages):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Iteration 1: thinking + text + tool call
+                yield AIMessageChunk(
+                    content=[{"type": "thinking", "thinking": "Let me search for this"}],
+                    tool_call_chunks=[],
+                )
+                yield AIMessageChunk(
+                    content=[{"type": "text", "text": "I'll search that."}],
+                    tool_call_chunks=[],
+                )
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        ToolCallChunk(name="web_search", args='{"query": "test"}', id="tc-1", index=0),
+                    ],
+                )
+            else:
+                # Iteration 2: final text
+                yield AIMessageChunk(content="Here are the results.", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        mock_tool = MagicMock()
+        mock_tool.name = "web_search"
+        mock_tool.ainvoke = AsyncMock(return_value="search results here")
+
+        agent = ChatAgent(self._make_config(), tools=[mock_tool])
+        events = []
+        async for event in agent.handle_message("search for test", deep_thinking=True):
+            events.append(event)
+
+        # Find the AIMessage with tool_calls (iteration 1)
+        ai_with_tools = [
+            m for m in agent.messages
+            if isinstance(m, AIMessage) and m.tool_calls
+        ]
+        assert len(ai_with_tools) == 1
+        msg = ai_with_tools[0]
+        # Content should be a list (not a plain string) preserving thinking blocks
+        assert isinstance(msg.content, list)
+        # Should contain thinking block(s)
+        thinking_blocks = [
+            b for b in msg.content
+            if isinstance(b, dict) and b.get("type") == "thinking"
+        ]
+        assert len(thinking_blocks) >= 1
+        # Should also contain text block(s)
+        text_blocks = [
+            b for b in msg.content
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        assert len(text_blocks) >= 1
+
+    @patch("src.agent.create_chat_model")
+    async def test_thinking_blocks_in_final_message_no_tool_calls(self, mock_create):
+        """Thinking blocks should be preserved in the final AIMessage when no tool calls occur."""
+        from langchain_core.messages import AIMessageChunk
+
+        async def fake_astream(messages):
+            yield AIMessageChunk(
+                content=[{"type": "thinking", "thinking": "Deep thought here"}],
+                tool_call_chunks=[],
+            )
+            yield AIMessageChunk(
+                content=[{"type": "text", "text": "My answer."}],
+                tool_call_chunks=[],
+            )
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        agent = ChatAgent(self._make_config())
+        events = []
+        async for event in agent.handle_message("think about this", deep_thinking=True):
+            events.append(event)
+
+        # The final AIMessage should have list content with thinking blocks
+        final_ai = agent.messages[-1]
+        assert isinstance(final_ai, AIMessage)
+        assert isinstance(final_ai.content, list)
+        thinking_blocks = [
+            b for b in final_ai.content
+            if isinstance(b, dict) and b.get("type") == "thinking"
+        ]
+        assert len(thinking_blocks) >= 1
+        text_blocks = [
+            b for b in final_ai.content
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        assert len(text_blocks) >= 1
+
+    @patch("src.agent.create_chat_model")
+    async def test_openai_strips_rs_ids_from_saved_content_blocks(self, mock_create):
+        """OpenAI history should not keep rs_* ids that become invalid item refs."""
+        from langchain_core.messages import AIMessageChunk
+
+        async def fake_astream(messages):
+            yield AIMessageChunk(
+                content=[
+                    {
+                        "type": "reasoning",
+                        "id": "rs_parent",
+                        "summary": [{"type": "summary_text", "text": "plan", "id": "rs_child"}],
+                    },
+                ],
+                tool_call_chunks=[],
+            )
+            yield AIMessageChunk(
+                content=[{"type": "text", "text": "Final answer"}],
+                tool_call_chunks=[],
+            )
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_create.return_value = mock_llm
+
+        agent = ChatAgent(self._make_config(provider="openai"))
+        async for _ in agent.handle_message("hi"):
+            pass
+
+        final_ai = agent.messages[-1]
+        assert isinstance(final_ai, AIMessage)
+        assert isinstance(final_ai.content, list)
+        dumped = json.dumps(final_ai.content, ensure_ascii=False)
+        assert "Final answer" in dumped
+        assert "rs_parent" not in dumped
+        assert "rs_child" not in dumped
+
+    @patch("src.agent.create_chat_model")
+    async def test_non_openai_preserves_content_ids(self, mock_create):
+        """Only OpenAI should sanitize response/item ids from content blocks."""
+        from langchain_core.messages import AIMessageChunk
+
+        async def fake_astream(messages):
+            yield AIMessageChunk(
+                content=[{"type": "thinking", "thinking": "hmm", "id": "rs_keep"}],
+                tool_call_chunks=[],
+            )
+            yield AIMessageChunk(
+                content=[{"type": "text", "text": "ok"}],
+                tool_call_chunks=[],
+            )
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_create.return_value = mock_llm
+
+        agent = ChatAgent(
+            self._make_config(provider="anthropic", model="claude-sonnet-4-20250514")
+        )
+        async for _ in agent.handle_message("hi"):
+            pass
+
+        final_ai = agent.messages[-1]
+        assert isinstance(final_ai, AIMessage)
+        assert isinstance(final_ai.content, list)
+        dumped = json.dumps(final_ai.content, ensure_ascii=False)
+        assert "rs_keep" in dumped
+
+
+class TestSanitizeDelta:
+    def test_normal_chinese_unchanged(self):
+        assert sanitize_delta("你好世界") == "你好世界"
+
+    def test_normal_ascii_unchanged(self):
+        assert sanitize_delta("hello world") == "hello world"
+
+    def test_empty_string(self):
+        assert sanitize_delta("") == ""
+
+    def test_single_replacement_stripped(self):
+        assert sanitize_delta("你好\ufffd世界") == "你好世界"
+
+    def test_multiple_replacements_stripped(self):
+        assert sanitize_delta("\ufffd你\ufffd好\ufffd") == "你好"
+
+    def test_only_replacement_chars(self):
+        assert sanitize_delta("\ufffd\ufffd\ufffd") == ""
+
+    def test_logs_warning(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="claude-chat-agent"):
+            sanitize_delta("abc\ufffdef")
+        assert "Stripped 1 U+FFFD" in caplog.text
+
+
+class TestStreamingSanitization:
+    """Integration test: U+FFFD in LLM chunks must not reach assistant_delta or complete events."""
+
+    @patch("src.agent.create_chat_model")
+    async def test_ufffd_stripped_from_stream(self, mock_create):
+        from langchain_core.messages import AIMessageChunk
+
+        async def fake_astream(messages):
+            yield AIMessageChunk(content="你好\ufffd世界", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_create.return_value = mock_llm
+
+        config = AgentConfig({"conversation_id": "test", "api_key": "k"})
+        agent = ChatAgent(config)
+        events = []
+        async for event in agent.handle_message("hi"):
+            events.append(event)
+
+        deltas = [e for e in events if e.type == "assistant_delta"]
+        assert len(deltas) == 1
+        assert "\ufffd" not in deltas[0].data["delta"]
+        assert deltas[0].data["delta"] == "你好世界"
+
+        complete = next(e for e in events if e.type == "complete")
+        assert "\ufffd" not in complete.data["content"]
+        assert complete.data["content"] == "你好世界"
+
+    @patch("src.agent.create_chat_model")
+    async def test_ufffd_in_thinking_block_stripped(self, mock_create):
+        """U+FFFD in thinking content blocks should be stripped."""
+        from langchain_core.messages import AIMessageChunk
+
+        async def fake_astream(messages):
+            yield AIMessageChunk(
+                content=[{"type": "thinking", "thinking": "思考\ufffd中"}],
+                tool_call_chunks=[],
+            )
+            yield AIMessageChunk(content="结果", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_create.return_value = mock_llm
+
+        config = AgentConfig({"conversation_id": "test", "api_key": "k"})
+        agent = ChatAgent(config)
+        events = []
+        async for event in agent.handle_message("think"):
+            events.append(event)
+
+        thinking_deltas = [e for e in events if e.type == "thinking_delta"]
+        assert len(thinking_deltas) == 1
+        assert "\ufffd" not in thinking_deltas[0].data["delta"]
+        assert thinking_deltas[0].data["delta"] == "思考中"
+
+    @patch("src.agent.create_chat_model")
+    async def test_ufffd_in_text_block_list_stripped(self, mock_create):
+        """U+FFFD in list-style text content blocks should be stripped."""
+        from langchain_core.messages import AIMessageChunk
+
+        async def fake_astream(messages):
+            yield AIMessageChunk(
+                content=[{"type": "text", "text": "你\ufffd好"}],
+                tool_call_chunks=[],
+            )
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_create.return_value = mock_llm
+
+        config = AgentConfig({"conversation_id": "test", "api_key": "k"})
+        agent = ChatAgent(config)
+        events = []
+        async for event in agent.handle_message("hi"):
+            events.append(event)
+
+        deltas = [e for e in events if e.type == "assistant_delta"]
+        assert len(deltas) == 1
+        assert deltas[0].data["delta"] == "你好"
+
+    @patch("src.agent.create_chat_model")
+    async def test_pure_ufffd_chunk_produces_no_delta(self, mock_create):
+        """A chunk containing only U+FFFD should not emit an assistant_delta event."""
+        from langchain_core.messages import AIMessageChunk
+
+        async def fake_astream(messages):
+            yield AIMessageChunk(content="\ufffd", tool_call_chunks=[])
+            yield AIMessageChunk(content="ok", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_create.return_value = mock_llm
+
+        config = AgentConfig({"conversation_id": "test", "api_key": "k"})
+        agent = ChatAgent(config)
+        events = []
+        async for event in agent.handle_message("hi"):
+            events.append(event)
+
+        deltas = [e for e in events if e.type == "assistant_delta"]
+        # Only the "ok" chunk should produce a delta, not the pure U+FFFD one
+        assert len(deltas) == 1
+        assert deltas[0].data["delta"] == "ok"
+
+        complete = next(e for e in events if e.type == "complete")
+        assert complete.data["content"] == "ok"
+
+    @patch("src.agent.create_chat_model")
+    async def test_multiple_chunks_with_ufffd(self, mock_create):
+        """U+FFFD across multiple chunks should all be stripped, content accumulated correctly."""
+        from langchain_core.messages import AIMessageChunk
+
+        async def fake_astream(messages):
+            yield AIMessageChunk(content="你\ufffd", tool_call_chunks=[])
+            yield AIMessageChunk(content="\ufffd好", tool_call_chunks=[])
+            yield AIMessageChunk(content="世界", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_create.return_value = mock_llm
+
+        config = AgentConfig({"conversation_id": "test", "api_key": "k"})
+        agent = ChatAgent(config)
+        events = []
+        async for event in agent.handle_message("hi"):
+            events.append(event)
+
+        deltas = [e for e in events if e.type == "assistant_delta"]
+        combined = "".join(e.data["delta"] for e in deltas)
+        assert "\ufffd" not in combined
+        assert combined == "你好世界"
+
+        complete = next(e for e in events if e.type == "complete")
+        assert complete.data["content"] == "你好世界"

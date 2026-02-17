@@ -10,9 +10,10 @@ import httpx
 import pytest
 from langchain_core.messages import AIMessageChunk, ToolCallChunk
 
-from src.agent import ChatAgent, StreamEvent, MAX_ITERATIONS
+from src.agent import ChatAgent, StreamEvent
 from src.tools.web import WebFetchTool, WebSearchTool
 from src.tools.search import GrepTool
+from .result_helpers import _rtext
 
 
 # ---------------------------------------------------------------------------
@@ -56,8 +57,8 @@ class TestWebFetchToolAsync:
         tool = WebFetchTool()
         result = await tool._arun("https://example.com")
         # html2text converts to markdown — should preserve heading
-        assert "Hello" in result
-        assert "World" in result
+        assert "Hello" in _rtext(result)
+        assert "World" in _rtext(result)
 
     @pytest.mark.asyncio
     @patch("src.tools.web.httpx.AsyncClient")
@@ -75,7 +76,7 @@ class TestWebFetchToolAsync:
 
         tool = WebFetchTool()
         result = await tool._arun("https://example.com/file.txt")
-        assert result == "Plain text content here"
+        assert _rtext(result) == "Plain text content here"
 
     @pytest.mark.asyncio
     @patch("src.tools.web.httpx.AsyncClient")
@@ -94,8 +95,8 @@ class TestWebFetchToolAsync:
 
         tool = WebFetchTool()
         result = await tool._arun("https://example.com/big", max_length=100)
-        assert len(result) < 200
-        assert "content truncated" in result
+        assert len(_rtext(result)) < 200
+        assert "content truncated" in _rtext(result)
 
     @pytest.mark.asyncio
     @patch("src.tools.web.httpx.AsyncClient")
@@ -110,7 +111,7 @@ class TestWebFetchToolAsync:
 
         tool = WebFetchTool()
         result = await tool._arun("https://slow.example.com")
-        assert "timed out" in result.lower()
+        assert "timed out" in _rtext(result).lower()
 
     @pytest.mark.asyncio
     @patch("src.tools.web.httpx.AsyncClient")
@@ -125,7 +126,7 @@ class TestWebFetchToolAsync:
 
         tool = WebFetchTool()
         result = await tool._arun("https://down.example.com")
-        assert "could not connect" in result.lower()
+        assert "could not connect" in _rtext(result).lower()
 
     @pytest.mark.asyncio
     @patch("src.tools.web.httpx.AsyncClient")
@@ -144,7 +145,7 @@ class TestWebFetchToolAsync:
 
         tool = WebFetchTool()
         result = await tool._arun("https://example.com/missing")
-        assert "404" in result
+        assert "404" in _rtext(result)
 
     @pytest.mark.asyncio
     @patch("src.tools.web.httpx.AsyncClient")
@@ -159,7 +160,7 @@ class TestWebFetchToolAsync:
 
         tool = WebFetchTool()
         result = await tool._arun("https://example.com/error")
-        assert "Error" in result
+        assert "error" in _rtext(result).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +284,7 @@ class TestMaxIterations:
     @patch("src.agent.create_chat_model")
     async def test_max_iterations_exceeded(self, mock_create):
         """Agent should stop after MAX_ITERATIONS and emit an error."""
-        from src.agent import MAX_ITERATIONS
+        import src.agent as agent_module
 
         async def infinite_tool_calls(messages):
             yield AIMessageChunk(
@@ -307,10 +308,15 @@ class TestMaxIterations:
         mock_tool.name = "bash"
         mock_tool.ainvoke = AsyncMock(return_value="hi")
 
-        agent = ChatAgent(_make_config(), tools=[mock_tool])
-        events = []
-        async for event in agent.handle_message("loop forever"):
-            events.append(event)
+        previous_max_iterations = agent_module.MAX_ITERATIONS
+        agent_module.MAX_ITERATIONS = 2
+        try:
+            agent = ChatAgent(_make_config(), tools=[mock_tool])
+            events = []
+            async for event in agent.handle_message("loop forever"):
+                events.append(event)
+        finally:
+            agent_module.MAX_ITERATIONS = previous_max_iterations
 
         error_events = [e for e in events if e.type == "error"]
         assert len(error_events) == 1
@@ -328,8 +334,8 @@ class TestGrepRegex:
             f.write("def foo_bar():\n    pass\ndef baz_qux():\n    pass\n")
         tool = GrepTool(workspace=workspace)
         result = tool._run(r"def (\w+)\(\)")
-        assert "foo_bar" in result
-        assert "baz_qux" in result
+        assert "foo_bar" in _rtext(result)
+        assert "baz_qux" in _rtext(result)
 
     def test_grep_with_character_class(self, workspace):
         import os
@@ -337,9 +343,9 @@ class TestGrepRegex:
             f.write("abc123\nxyz789\nhello\n")
         tool = GrepTool(workspace=workspace)
         result = tool._run(r"[a-z]+\d+")
-        assert "abc123" in result
-        assert "xyz789" in result
-        assert "hello" not in result
+        assert "abc123" in _rtext(result)
+        assert "xyz789" in _rtext(result)
+        assert "hello" not in _rtext(result)
 
     def test_grep_with_lookahead(self, workspace):
         import os
@@ -347,8 +353,8 @@ class TestGrepRegex:
             f.write("foobar\nfoobaz\nfoo\n")
         tool = GrepTool(workspace=workspace)
         result = tool._run(r"foo(?=bar)")
-        assert "foobar" in result
-        assert "foobaz" not in result
+        assert "foobar" in _rtext(result)
+        assert "foobaz" not in _rtext(result)
 
 
 # ---------------------------------------------------------------------------
@@ -380,3 +386,186 @@ class TestPathTraversalSharedPrefix:
 
         with pytest.raises(ValueError, match="outside the workspace"):
             resolve_workspace_path(fake_path, workspace)
+
+
+# ---------------------------------------------------------------------------
+# _get_thinking_llm with custom thinking_budget
+# ---------------------------------------------------------------------------
+
+class TestGetThinkingLlmBudget:
+    @patch("src.agent.create_chat_model")
+    def test_default_budget_anthropic(self, mock_create):
+        """_get_thinking_llm(None) should use default budget (128000) for Anthropic."""
+        mock_llm = MagicMock()
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        config = _make_config(provider="anthropic")
+        agent = ChatAgent(config)
+        agent._get_thinking_llm(None)
+
+        mock_llm.bind.assert_called_once_with(
+            max_tokens=128000,
+            thinking={"type": "enabled", "budget_tokens": 128000 - 1},
+        )
+
+    @patch("src.agent.create_chat_model")
+    def test_custom_budget_anthropic(self, mock_create):
+        """_get_thinking_llm(200000) should use custom budget for Anthropic."""
+        mock_llm = MagicMock()
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        config = _make_config(provider="anthropic")
+        agent = ChatAgent(config)
+        agent._get_thinking_llm(200000)
+
+        mock_llm.bind.assert_called_once_with(
+            max_tokens=200000,
+            thinking={"type": "enabled", "budget_tokens": 200000 - 1},
+        )
+
+    @patch("src.agent.create_chat_model")
+    def test_custom_budget_google(self, mock_create):
+        """_get_thinking_llm(100000) should use custom budget for Google."""
+        mock_llm = MagicMock()
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        config = _make_config(provider="google")
+        agent = ChatAgent(config)
+        agent._get_thinking_llm(100000)
+
+        mock_llm.bind.assert_called_once_with(
+            max_output_tokens=100000,
+            thinking_budget=100000 - 1,
+        )
+
+    @patch("src.agent.create_chat_model")
+    def test_default_budget_google(self, mock_create):
+        """_get_thinking_llm(None) should use default budget (128000) for Google."""
+        mock_llm = MagicMock()
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        config = _make_config(provider="google")
+        agent = ChatAgent(config)
+        agent._get_thinking_llm(None)
+
+        mock_llm.bind.assert_called_once_with(
+            max_output_tokens=128000,
+            thinking_budget=128000 - 1,
+        )
+
+    @patch("src.agent.create_chat_model")
+    def test_openai_uses_budget(self, mock_create):
+        """OpenAI should set max_completion_tokens from budget."""
+        mock_llm = MagicMock()
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        config = _make_config(provider="openai")
+        agent = ChatAgent(config)
+        agent._get_thinking_llm(200000)
+
+        mock_llm.bind.assert_called_once_with(
+            max_completion_tokens=200000,
+            reasoning={"effort": "high", "summary": "auto"},
+        )
+
+    @patch("src.agent.create_chat_model")
+    def test_mistral_uses_budget_as_max_tokens(self, mock_create):
+        """Mistral (no thinking) should set max_tokens from budget."""
+        mock_llm = MagicMock()
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        config = _make_config(provider="mistral")
+        agent = ChatAgent(config)
+        agent._get_thinking_llm(50000)
+
+        mock_llm.bind.assert_called_once_with(max_tokens=50000)
+
+
+class TestGetBudgetedLlmBudget:
+    @patch("src.agent.create_chat_model")
+    def test_default_budget_openai(self, mock_create):
+        """_get_budgeted_llm(None) should use default budget for OpenAI."""
+        mock_llm = MagicMock()
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        config = _make_config(provider="openai")
+        agent = ChatAgent(config)
+        agent._get_budgeted_llm(None)
+
+        mock_llm.bind.assert_called_once_with(max_completion_tokens=128000)
+
+    @patch("src.agent.create_chat_model")
+    def test_budgeted_llm_clamps_below_min(self, mock_create):
+        """_get_budgeted_llm should clamp too-small values to a safe minimum."""
+        mock_llm = MagicMock()
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        config = _make_config(provider="openai")
+        agent = ChatAgent(config)
+        agent._get_budgeted_llm(1)
+
+        mock_llm.bind.assert_called_once_with(max_completion_tokens=1024)
+
+    @patch("src.agent.create_chat_model")
+    def test_budgeted_llm_clamps_above_max(self, mock_create):
+        """_get_budgeted_llm should clamp too-large values to a safe maximum."""
+        mock_llm = MagicMock()
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        config = _make_config(provider="openai")
+        agent = ChatAgent(config)
+        agent._get_budgeted_llm(2_000_000)
+
+        mock_llm.bind.assert_called_once_with(max_completion_tokens=1_000_000)
+
+    @patch("src.agent.create_chat_model")
+    def test_thinking_llm_clamps_below_min_before_provider_specific_budget(self, mock_create):
+        """_get_thinking_llm should clamp then derive provider-specific thinking budget."""
+        mock_llm = MagicMock()
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        config = _make_config(provider="anthropic")
+        agent = ChatAgent(config)
+        agent._get_thinking_llm(1)
+
+        mock_llm.bind.assert_called_once_with(
+            max_tokens=1024,
+            thinking={"type": "enabled", "budget_tokens": 1023},
+        )
+
+    @patch("src.agent.create_chat_model")
+    def test_thinking_llm_google_clamps_above_max_before_provider_specific_budget(self, mock_create):
+        """Google thinking params should derive from the clamped max budget."""
+        mock_llm = MagicMock()
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        config = _make_config(provider="google")
+        agent = ChatAgent(config)
+        agent._get_thinking_llm(2_000_000)
+
+        mock_llm.bind.assert_called_once_with(
+            max_output_tokens=1_000_000,
+            thinking_budget=999999,
+        )

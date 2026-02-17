@@ -1,28 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
-// localStorage mock
-const storage: Record<string, string> = {}
-const localStorageMock = {
-  getItem: vi.fn((key: string) => storage[key] ?? null),
-  setItem: vi.fn((key: string, value: string) => { storage[key] = value }),
-  removeItem: vi.fn((key: string) => { delete storage[key] }),
-  clear: vi.fn(() => { Object.keys(storage).forEach(k => delete storage[k]) }),
-  get length() { return Object.keys(storage).length },
-  key: vi.fn((i: number) => Object.keys(storage)[i] ?? null),
-}
-vi.stubGlobal('localStorage', localStorageMock)
-
-// Capture interceptors registered by client.ts
-let requestFulfilled: (config: any) => any
 let responseFulfilled: (response: any) => any
 let responseRejected: (error: any) => any
 let mockClientInstance: any
 
 vi.mock('axios', () => {
-  mockClientInstance = vi.fn() // callable for retries
+  mockClientInstance = vi.fn()
   mockClientInstance.interceptors = {
     request: {
-      use: vi.fn((fulfilled: any) => { requestFulfilled = fulfilled }),
+      use: vi.fn(),
     },
     response: {
       use: vi.fn((fulfilled: any, rejected: any) => {
@@ -39,31 +25,24 @@ vi.mock('axios', () => {
 })
 
 vi.mock('../../api/auth', () => ({
-  refreshAccessToken: vi.fn(),
+  refreshSession: vi.fn(),
 }))
 
-import { refreshAccessToken } from '../../api/auth'
+import { refreshSession } from '../../api/auth'
 
-// Force client.ts to execute and register interceptors
 await import('../../api/client')
 
 describe('axios client interceptors', () => {
   beforeEach(() => {
-    vi.clearAllMocks()
-    localStorageMock.clear()
+    mockClientInstance.mockReset()
+    vi.mocked(refreshSession).mockReset()
   })
 
-  it('attaches Bearer token from localStorage', () => {
-    storage['access_token'] = 'my-token'
-    const config = { headers: {} as Record<string, string> }
-    const result = requestFulfilled(config)
-    expect(result.headers.Authorization).toBe('Bearer my-token')
-  })
-
-  it('does not attach token when none exists', () => {
-    const config = { headers: {} as Record<string, string> }
-    const result = requestFulfilled(config)
-    expect(result.headers.Authorization).toBeUndefined()
+  it('creates client with cookie credentials enabled', async () => {
+    const { default: axios } = await import('axios')
+    expect(vi.mocked(axios.create)).toHaveBeenCalledWith(
+      expect.objectContaining({ withCredentials: true }),
+    )
   })
 
   it('passes through successful responses', () => {
@@ -71,11 +50,12 @@ describe('axios client interceptors', () => {
     expect(responseFulfilled(response)).toBe(response)
   })
 
-  it('refreshes token on 401 and retries', async () => {
-    vi.mocked(refreshAccessToken).mockResolvedValue('new-token')
+  it('refreshes session on 401 and retries', async () => {
+    vi.mocked(refreshSession).mockResolvedValue(true)
     mockClientInstance.mockResolvedValue({ data: 'retried' })
 
     const originalRequest = {
+      url: '/users/me',
       headers: {} as Record<string, string>,
       _retry: false,
     }
@@ -86,36 +66,14 @@ describe('axios client interceptors', () => {
 
     await responseRejected(error)
 
-    expect(refreshAccessToken).toHaveBeenCalled()
-    expect(originalRequest.headers.Authorization).toBe('Bearer new-token')
+    expect(refreshSession).toHaveBeenCalled()
     expect(originalRequest._retry).toBe(true)
     expect(mockClientInstance).toHaveBeenCalledWith(originalRequest)
   })
 
-  it('does not retry on second 401 (_retry flag)', async () => {
+  it('does not retry /auth/refresh requests', async () => {
     const originalRequest = {
-      headers: {} as Record<string, string>,
-      _retry: true,
-    }
-    const error = {
-      config: originalRequest,
-      response: { status: 401 },
-    }
-
-    await expect(responseRejected(error)).rejects.toBe(error)
-    expect(refreshAccessToken).not.toHaveBeenCalled()
-  })
-
-  it('redirects to /login when refresh fails', async () => {
-    vi.mocked(refreshAccessToken).mockResolvedValue(null)
-    const hrefSetter = vi.fn()
-    Object.defineProperty(window, 'location', {
-      value: { get href() { return '' }, set href(v: string) { hrefSetter(v) } },
-      writable: true,
-      configurable: true,
-    })
-
-    const originalRequest = {
+      url: '/auth/refresh',
       headers: {} as Record<string, string>,
       _retry: false,
     }
@@ -125,6 +83,73 @@ describe('axios client interceptors', () => {
     }
 
     await expect(responseRejected(error)).rejects.toBe(error)
-    expect(hrefSetter).toHaveBeenCalledWith('/login')
+    expect(refreshSession).not.toHaveBeenCalled()
+  })
+
+  it('does not retry when _retry is already true', async () => {
+    const originalRequest = {
+      url: '/users/me',
+      headers: {} as Record<string, string>,
+      _retry: true,
+    }
+    const error = {
+      config: originalRequest,
+      response: { status: 401 },
+    }
+
+    await expect(responseRejected(error)).rejects.toBe(error)
+    expect(refreshSession).not.toHaveBeenCalled()
+  })
+
+  it('redirects to /login when session refresh fails', async () => {
+    vi.mocked(refreshSession).mockResolvedValue(false)
+    const replaceSpy = vi.fn()
+    Object.defineProperty(window, 'location', {
+      value: {
+        pathname: '/settings',
+        replace: replaceSpy,
+      },
+      writable: true,
+      configurable: true,
+    })
+
+    const originalRequest = {
+      url: '/users/me',
+      headers: {} as Record<string, string>,
+      _retry: false,
+    }
+    const error = {
+      config: originalRequest,
+      response: { status: 401 },
+    }
+
+    await expect(responseRejected(error)).rejects.toBe(error)
+    expect(replaceSpy).toHaveBeenCalledWith('/login')
+  })
+
+  it('does not redirect again when already on login page', async () => {
+    vi.mocked(refreshSession).mockResolvedValue(false)
+    const replaceSpy = vi.fn()
+    Object.defineProperty(window, 'location', {
+      value: {
+        pathname: '/login',
+        replace: replaceSpy,
+      },
+      writable: true,
+      configurable: true,
+    })
+
+    const originalRequest = {
+      url: '/users/me',
+      headers: {} as Record<string, string>,
+      _retry: false,
+    }
+    const error = {
+      config: originalRequest,
+      response: { status: 401 },
+    }
+
+    await expect(responseRejected(error)).rejects.toBe(error)
+    expect(replaceSpy).not.toHaveBeenCalled()
   })
 })

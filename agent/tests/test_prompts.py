@@ -31,16 +31,13 @@ class TestToolDescriptions:
         for name, desc in TOOL_DESCRIPTIONS.items():
             assert len(desc) > 100, f"{name} description too short: {len(desc)} chars"
 
-    def test_bash_description_contains_usage_rules(self):
+    def test_bash_description_contains_timeout_info(self):
         desc = TOOL_DESCRIPTIONS["bash"]
-        assert "DO NOT" in desc
+        assert "timeout" in desc.lower()
 
-    def test_bash_description_contains_cross_tool_routing(self):
+    def test_bash_description_contains_workspace_info(self):
         desc = TOOL_DESCRIPTIONS["bash"]
-        assert "read" in desc
-        assert "edit" in desc
-        assert "glob" in desc
-        assert "grep" in desc
+        assert "/workspace" in desc
 
     def test_read_description_contains_line_number_format(self):
         desc = TOOL_DESCRIPTIONS["read"]
@@ -68,6 +65,13 @@ class TestToolDescriptions:
         result = format_tool_descriptions(["unknown_tool"])
         assert "unknown_tool" in result
 
+    def test_task_description_matches_delegate_boundaries(self):
+        desc = TOOL_DESCRIPTIONS["task"].lower()
+        assert "subagent_type" in desc
+        assert "`explore`" in desc
+        assert "deep or wide investigation" in desc
+        assert "do not use for simple targeted lookups" in desc
+
 
 class TestBehaviorFragments:
     def test_tool_usage_policy_exists(self):
@@ -78,6 +82,14 @@ class TestBehaviorFragments:
         assert "edit" in TOOL_USAGE_POLICY
         assert "glob" in TOOL_USAGE_POLICY
         assert "grep" in TOOL_USAGE_POLICY
+
+    def test_tool_usage_policy_task_delegate_conditions(self):
+        policy = TOOL_USAGE_POLICY.lower()
+        assert "subagent_type=\"explore\"" in policy
+        assert "broader codebase exploration" in policy
+        assert "slower than direct" in policy
+        assert "prefer calling `task` early" in policy
+        assert "before delegating to `task`" not in policy
 
     def test_safety_instructions_exist(self):
         assert len(SAFETY_INSTRUCTIONS) > 100
@@ -183,3 +195,7 @@ class TestAssembleSystemPrompt:
         assert "Tool Usage Policy" not in result
         assert "Safety Instructions" not in result
         assert "Task Execution Guidelines" not in result
+
+    def test_assembler_includes_date_context(self):
+        result = assemble_system_prompt([])
+        assert "Today's date is" in result

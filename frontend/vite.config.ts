@@ -14,6 +14,20 @@ export default defineConfig({
       resolvers: [ElementPlusResolver()],
     }),
   ],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return
+          if (id.includes('element-plus') || id.includes('@element-plus')) return 'ui-element-plus'
+          if (id.includes('markdown-it') || id.includes('highlight.js') || id.includes('dompurify')) {
+            return 'rendering-markdown'
+          }
+          return 'vendor'
+        },
+      },
+    },
+  },
   server: {
     host: '0.0.0.0',
     port: 8080,

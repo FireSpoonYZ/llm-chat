@@ -1,7 +1,7 @@
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use rand::RngCore;
 
 #[derive(Debug, thiserror::Error)]
@@ -31,8 +31,8 @@ pub fn encrypt(plaintext: &str, key_hex: &str) -> Result<String, CryptoError> {
         return Err(CryptoError::InvalidKeyLength(key_bytes.len()));
     }
 
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-        .map_err(|e| CryptoError::Cipher(e.to_string()))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| CryptoError::Cipher(e.to_string()))?;
 
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -68,8 +68,8 @@ pub fn decrypt(encrypted: &str, key_hex: &str) -> Result<String, CryptoError> {
     let (nonce_bytes, ciphertext) = combined.split_at(12);
     let nonce = Nonce::from_slice(nonce_bytes);
 
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-        .map_err(|e| CryptoError::Cipher(e.to_string()))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| CryptoError::Cipher(e.to_string()))?;
 
     let plaintext_bytes = cipher
         .decrypt(nonce, ciphertext)

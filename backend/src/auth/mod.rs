@@ -1,9 +1,13 @@
 pub mod middleware;
 pub mod password;
 
+use axum::http::{HeaderMap, header};
 use chrono::Utc;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
+
+pub const ACCESS_COOKIE_NAME: &str = "access_token";
+pub const REFRESH_COOKIE_NAME: &str = "refresh_token";
 
 /// Claims embedded in a user-facing JWT access token.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -101,6 +105,18 @@ pub fn verify_container_token(
         &Validation::default(),
     )?;
     Ok(token_data.claims)
+}
+
+pub fn get_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
+    for part in cookie_header.split(';') {
+        let trimmed = part.trim();
+        let (k, v) = trimmed.split_once('=')?;
+        if k == name {
+            return Some(v.to_string());
+        }
+    }
+    None
 }
 
 #[cfg(test)]

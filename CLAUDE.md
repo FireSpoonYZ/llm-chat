@@ -27,7 +27,6 @@ cd agent && uv run pytest tests/ -v          # all tests
 cd agent && uv run pytest tests/test_foo.py -v  # single file
 cd agent && uv run pytest tests/test_foo.py::test_bar -v  # single test
 ```
-Note: `uv` is at `~/.local/bin/uv`
 
 ### Frontend (Vue 3/TypeScript)
 ```

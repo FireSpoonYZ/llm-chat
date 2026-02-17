@@ -6,14 +6,29 @@ export async function listConversations(): Promise<Conversation[]> {
   return data
 }
 
-export async function createConversation(title?: string, systemPromptOverride?: string, provider?: string, modelName?: string, imageProvider?: string, imageModel?: string): Promise<Conversation> {
+export async function createConversation(
+  title?: string,
+  systemPromptOverride?: string,
+  provider?: string,
+  modelName?: string,
+  imageProvider?: string,
+  imageModel?: string,
+  subagentProvider?: string,
+  subagentModel?: string,
+  thinkingBudget?: number | null,
+  subagentThinkingBudget?: number | null,
+): Promise<Conversation> {
   const { data } = await client.post<Conversation>('/conversations', {
     title,
     system_prompt_override: systemPromptOverride || undefined,
     provider: provider || undefined,
     model_name: modelName || undefined,
+    subagent_provider: subagentProvider || undefined,
+    subagent_model: subagentModel || undefined,
     image_provider: imageProvider || undefined,
     image_model: imageModel || undefined,
+    thinking_budget: thinkingBudget ?? undefined,
+    subagent_thinking_budget: subagentThinkingBudget ?? undefined,
   })
   return data
 }

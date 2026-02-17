@@ -21,7 +21,9 @@ from tenacity import (
 from .agent import AgentConfig, ChatAgent, _build_multimodal_content
 from .mcp.manager import McpManager
 from .prompts.assembler import assemble_system_prompt
-from .tools import create_all_tools
+from .subagents import SubagentRunner
+from .tools import create_all_tools, create_task_tool
+from .tools.capabilities import annotate_mcp_tools
 
 logger = logging.getLogger("claude-chat-agent")
 
@@ -105,9 +107,19 @@ class AgentSession:
         # Set up MCP servers and add their tools
         if config.mcp_servers:
             mcp_tools = await self.mcp_manager.setup_from_config(config.mcp_servers)
+            annotate_mcp_tools(mcp_tools, mcp_servers=config.mcp_servers)
             tools.extend(mcp_tools)
             logger.info("Added %d MCP tools from %d servers",
                         len(mcp_tools), len(self.mcp_manager.connected_servers))
+
+        # Register task delegation tool after all other tools are available.
+        if tools:
+            subagent_runner = SubagentRunner(
+                parent_config=config,
+                base_tools=tools,
+                mcp_servers=config.mcp_servers or None,
+            )
+            tools.append(create_task_tool(subagent_runner))
 
         # Assemble final system prompt with tool descriptions
         if tools:
@@ -131,6 +143,8 @@ class AgentSession:
             return
 
         deep_thinking = msg.get("deep_thinking", False)
+        thinking_budget = msg.get("thinking_budget")  # None = use default
+        subagent_thinking_budget = msg.get("subagent_thinking_budget")
 
         # Build multimodal content if attachments are present
         attachments = msg.get("attachments", [])
@@ -154,15 +168,31 @@ class AgentSession:
                 pass
 
         self._current_task = asyncio.create_task(
-            self._run_agent(final_content, deep_thinking)
+            self._run_agent(
+                final_content,
+                deep_thinking,
+                thinking_budget,
+                subagent_thinking_budget,
+            )
         )
 
-    async def _run_agent(self, content: str | list, deep_thinking: bool = False) -> None:
+    async def _run_agent(
+        self,
+        content: str | list,
+        deep_thinking: bool = False,
+        thinking_budget: int | None = None,
+        subagent_thinking_budget: int | None = None,
+    ) -> None:
         """Stream agent response back through WebSocket."""
         if self.agent is None:
             raise RuntimeError("Agent not initialized before _run_agent")
+        self.agent.config.deep_thinking = bool(deep_thinking)
+        if thinking_budget is not None:
+            self.agent.config.thinking_budget = thinking_budget
+        if subagent_thinking_budget is not None:
+            self.agent.config.subagent_thinking_budget = subagent_thinking_budget
         try:
-            async for event in self.agent.handle_message(content, deep_thinking):
+            async for event in self.agent.handle_message(content, deep_thinking, thinking_budget):
                 await self.ws.send(event.to_json())
         except websockets.ConnectionClosed:
             logger.warning("WebSocket closed during agent run")

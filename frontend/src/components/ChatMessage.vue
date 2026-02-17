@@ -5,7 +5,7 @@
     </div>
     <div class="message-body">
       <div class="message-header">
-        <span class="message-sender">{{ message.role === 'user' ? 'You' : 'Assistant' }}</span>
+        <span class="message-sender">{{ message.role === 'user' ? t('message.you') : t('message.assistant') }}</span>
         <span class="message-time">{{ formattedTime }}</span>
       </div>
       <template v-if="isEditing">
@@ -17,8 +17,8 @@
           resize="vertical"
         />
         <div class="edit-actions">
-          <el-button class="save-btn" type="primary" size="small" @click="saveEdit">Save</el-button>
-          <el-button class="cancel-btn" size="small" @click="cancelEdit">Cancel</el-button>
+          <el-button class="save-btn" type="primary" size="small" @click="saveEdit">{{ t('message.save') }}</el-button>
+          <el-button class="cancel-btn" size="small" @click="cancelEdit">{{ t('message.cancel') }}</el-button>
         </div>
       </template>
       <template v-else>
@@ -26,7 +26,7 @@
           <div v-if="block.type === 'text'" class="message-content" v-html="renderMarkdown(block.content, props.conversationId, props.shareToken)"></div>
           <div v-else-if="block.type === 'thinking'" class="thinking-block">
             <details>
-              <summary class="thinking-summary">Thinking</summary>
+              <summary class="thinking-summary">{{ t('message.thinking') }}</summary>
               <div class="thinking-content">{{ block.content }}</div>
             </details>
           </div>
@@ -48,7 +48,7 @@
             class="action-btn edit-btn"
             text
             size="small"
-            title="Edit message"
+            :title="t('message.editMessage')"
             :icon="EditPen"
             @click="startEdit"
           />
@@ -57,7 +57,7 @@
             class="action-btn regenerate-btn"
             text
             size="small"
-            title="Regenerate response"
+            :title="t('message.regenerateResponse')"
             :icon="RefreshRight"
             @click="$emit('regenerate', message.id)"
           />
@@ -66,7 +66,7 @@
             class="action-btn copy-btn"
             text
             size="small"
-            title="Copy message"
+            :title="t('message.copyMessage')"
             :icon="CopyDocument"
             @click="copyMessage"
           />
@@ -82,11 +82,44 @@ import { EditPen, RefreshRight, CopyDocument } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
-import hljs from 'highlight.js'
+import hljs from 'highlight.js/lib/core'
+import bash from 'highlight.js/lib/languages/bash'
+import cpp from 'highlight.js/lib/languages/cpp'
+import css from 'highlight.js/lib/languages/css'
+import go from 'highlight.js/lib/languages/go'
+import java from 'highlight.js/lib/languages/java'
+import javascript from 'highlight.js/lib/languages/javascript'
+import json from 'highlight.js/lib/languages/json'
+import python from 'highlight.js/lib/languages/python'
+import rust from 'highlight.js/lib/languages/rust'
+import sql from 'highlight.js/lib/languages/sql'
+import typescript from 'highlight.js/lib/languages/typescript'
+import xml from 'highlight.js/lib/languages/xml'
+import yaml from 'highlight.js/lib/languages/yaml'
 import 'highlight.js/styles/github-dark.css'
-import type { Message, ContentBlock } from '../types'
+import type { Message, MessagePart, ContentBlock, ToolResult } from '../types'
 import ToolCallDisplay from './ToolCallDisplay.vue'
 import { fileViewUrl, sharedFileViewUrl } from '../utils/fileUrl'
+import { currentLocale, t } from '../i18n'
+
+hljs.registerLanguage('bash', bash)
+hljs.registerLanguage('cpp', cpp)
+hljs.registerLanguage('css', css)
+hljs.registerLanguage('go', go)
+hljs.registerLanguage('java', java)
+hljs.registerLanguage('javascript', javascript)
+hljs.registerLanguage('js', javascript)
+hljs.registerLanguage('json', json)
+hljs.registerLanguage('python', python)
+hljs.registerLanguage('py', python)
+hljs.registerLanguage('rust', rust)
+hljs.registerLanguage('sql', sql)
+hljs.registerLanguage('typescript', typescript)
+hljs.registerLanguage('ts', typescript)
+hljs.registerLanguage('html', xml)
+hljs.registerLanguage('xml', xml)
+hljs.registerLanguage('yaml', yaml)
+hljs.registerLanguage('yml', yaml)
 
 // Module-level singleton — shared across all ChatMessage instances
 const md = new MarkdownIt({
@@ -178,7 +211,7 @@ const props = defineProps<{
     id: string
     name: string
     input?: Record<string, unknown>
-    result?: string
+    result?: ToolResult | string
     isError?: boolean
     isLoading?: boolean
   }>
@@ -192,9 +225,156 @@ const emit = defineEmits<{
 const isEditing = ref(false)
 const editContent = ref('')
 
+function parseJsonPayload(raw: unknown): unknown {
+  if (typeof raw !== 'string') return raw
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return raw
+  }
+}
+
+function toStringOrEmpty(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function toObjectOrNull(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null
+    ? value as Record<string, unknown>
+    : null
+}
+
+function inferToolResultError(payloadObj: Record<string, unknown> | null): boolean {
+  if (!payloadObj) return false
+
+  const directFlag = payloadObj.isError ?? payloadObj.is_error
+  if (typeof directFlag === 'boolean') return directFlag
+
+  if (typeof payloadObj.success === 'boolean') return payloadObj.success === false
+
+  const errorField = payloadObj.error
+  if (typeof errorField === 'string') return errorField.length > 0
+  return errorField != null
+}
+
+function extractToolResultText(payloadObj: Record<string, unknown> | null): string {
+  if (!payloadObj) return ''
+  return toStringOrEmpty(payloadObj.text)
+    || toStringOrEmpty(payloadObj.content)
+    || toStringOrEmpty(payloadObj.error)
+}
+
+function toToolResultOrUndefined(payloadObj: Record<string, unknown> | null): ToolResult | undefined {
+  if (!payloadObj) return undefined
+  const kind = toStringOrEmpty(payloadObj.kind)
+  const text = toStringOrEmpty(payloadObj.text)
+  const success = payloadObj.success
+  if (kind && text && typeof success === 'boolean') {
+    return {
+      kind,
+      text,
+      success,
+      error: typeof payloadObj.error === 'string' || payloadObj.error === null
+        ? (payloadObj.error as string | null)
+        : null,
+      data: toObjectOrNull(payloadObj.data) ?? {},
+      meta: toObjectOrNull(payloadObj.meta) ?? {},
+    }
+  }
+  return undefined
+}
+
 const contentBlocks = computed<ContentBlock[]>(() => {
   if (props.streamingBlocks && props.streamingBlocks.length > 0) {
     return props.streamingBlocks
+  }
+  if (Array.isArray(props.message.parts) && props.message.parts.length > 0) {
+    const indexed = props.message.parts.map((part, index) => ({ part, index }))
+    const seqValues = indexed
+      .map(({ part }) => part.seq)
+      .filter((seq): seq is number => typeof seq === 'number')
+    const maxSeq = seqValues.length > 0 ? Math.max(...seqValues) : -1
+    indexed.sort((a, b) => {
+      const sa = typeof a.part.seq === 'number' ? a.part.seq : maxSeq + a.index + 1
+      const sb = typeof b.part.seq === 'number' ? b.part.seq : maxSeq + b.index + 1
+      return sa - sb
+    })
+
+    const blocks: ContentBlock[] = []
+    const orderedParts = indexed.map((item) => item.part)
+    for (const part of orderedParts) {
+      const payload = parseJsonPayload(part.json_payload)
+      if (part.type === 'reasoning') {
+        const payloadObj = toObjectOrNull(payload)
+        const content = toStringOrEmpty(part.text)
+          || toStringOrEmpty(payloadObj?.content)
+          || toStringOrEmpty(payloadObj?.thinking)
+        if (content) {
+          blocks.push({ type: 'thinking', content })
+        }
+        continue
+      }
+
+      if (part.type === 'text') {
+        const payloadObj = toObjectOrNull(payload)
+        const content = toStringOrEmpty(part.text)
+          || toStringOrEmpty(payloadObj?.content)
+          || toStringOrEmpty(payloadObj?.text)
+        if (content) {
+          blocks.push({ type: 'text', content })
+        }
+        continue
+      }
+
+      if (part.type === 'tool_call') {
+        const payloadObj = toObjectOrNull(payload) ?? {}
+        blocks.push({
+          type: 'tool_call',
+          id: (part.tool_call_id || toStringOrEmpty(payloadObj.id)),
+          name: toStringOrEmpty(payloadObj.name),
+          input: payloadObj.input as Record<string, unknown> | undefined,
+          result: undefined,
+          isError: false,
+          isLoading: false,
+        })
+        continue
+      }
+
+      if (part.type === 'tool_result') {
+        const payloadObj = toObjectOrNull(payload)
+        const fallbackText = toStringOrEmpty(part.text) || extractToolResultText(payloadObj)
+        const result: ToolResult | string | undefined = (() => {
+          const toolResult = toToolResultOrUndefined(payloadObj)
+          if (toolResult) return toolResult
+          if (typeof payload === 'string') return payload
+          if (fallbackText) return fallbackText
+          return undefined
+        })()
+        const toolCallId = part.tool_call_id || toStringOrEmpty(payloadObj?.tool_call_id)
+
+        if (toolCallId) {
+          const target = [...blocks]
+            .reverse()
+            .find((b): b is Extract<ContentBlock, { type: 'tool_call' }> =>
+              b.type === 'tool_call' && b.id === toolCallId)
+          if (target) {
+            target.result = result
+            target.isError = inferToolResultError(payloadObj)
+            continue
+          }
+        }
+
+        if (typeof result === 'string' && result) {
+          blocks.push({ type: 'text', content: result })
+        } else if (fallbackText) {
+          blocks.push({ type: 'text', content: fallbackText })
+        }
+      }
+    }
+
+    if (blocks.length > 0) {
+      return blocks
+    }
   }
   if (props.message.tool_calls) {
     try {
@@ -217,7 +397,7 @@ const contentBlocks = computed<ContentBlock[]>(() => {
                   id: (item.id as string) || '',
                   name: (item.name as string) || '',
                   input: item.input as Record<string, unknown> | undefined,
-                  result: item.result as string | undefined,
+                  result: item.result as ToolResult | string | undefined,
                   isError: (item.isError ?? item.is_error) as boolean | undefined,
                   isLoading: false,
                 }
@@ -237,7 +417,7 @@ const contentBlocks = computed<ContentBlock[]>(() => {
             id: (tc.id as string) || '',
             name: (tc.name as string) || '',
             input: tc.input as Record<string, unknown> | undefined,
-            result: tc.result as string | undefined,
+            result: tc.result as ToolResult | string | undefined,
             isError: (tc.isError ?? tc.is_error) as boolean | undefined,
             isLoading: false,
           })
@@ -272,7 +452,7 @@ const contentBlocks = computed<ContentBlock[]>(() => {
 const formattedTime = computed(() => {
   if (!props.message.created_at) return ''
   const d = new Date(props.message.created_at)
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleTimeString(currentLocale.value, { hour: '2-digit', minute: '2-digit' })
 })
 
 function startEdit() {
@@ -297,7 +477,7 @@ async function copyMessage() {
     .join('\n\n')
   try {
     await navigator.clipboard.writeText(text)
-    ElMessage.success({ message: 'Copied', duration: 1500 })
+    ElMessage.success({ message: t('message.copied'), duration: 1500 })
   } catch {
     try {
       const textarea = document.createElement('textarea')
@@ -308,9 +488,9 @@ async function copyMessage() {
       textarea.select()
       document.execCommand('copy')
       document.body.removeChild(textarea)
-      ElMessage.success({ message: 'Copied', duration: 1500 })
+      ElMessage.success({ message: t('message.copied'), duration: 1500 })
     } catch {
-      ElMessage.error('Copy failed')
+      ElMessage.error(t('message.copyFailed'))
     }
   }
 }

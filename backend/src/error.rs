@@ -1,6 +1,6 @@
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -18,6 +18,9 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    #[error("Payload too large: {0}")]
+    PayloadTooLarge(String),
 
     #[error("Not implemented")]
     NotImplemented,
@@ -37,14 +40,21 @@ impl IntoResponse for AppError {
             AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, self.to_string()),
             AppError::Forbidden(_) => (StatusCode::FORBIDDEN, self.to_string()),
             AppError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
+            AppError::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, self.to_string()),
             AppError::NotImplemented => (StatusCode::NOT_IMPLEMENTED, self.to_string()),
             AppError::Internal(msg) => {
                 tracing::error!("Internal error: {msg}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
             }
             AppError::Sqlx(e) => {
                 tracing::error!("Database error: {e}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database error".to_string(),
+                )
             }
         };
         (status, Json(serde_json::json!({ "message": message }))).into_response()
@@ -73,7 +83,8 @@ mod tests {
 
     #[tokio::test]
     async fn bad_request_returns_400() {
-        let (status, body) = extract_status_and_body(AppError::BadRequest("invalid input".into())).await;
+        let (status, body) =
+            extract_status_and_body(AppError::BadRequest("invalid input".into())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body["message"].as_str().unwrap().contains("invalid input"));
     }
@@ -97,10 +108,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn payload_too_large_returns_413() {
+        let (status, body) =
+            extract_status_and_body(AppError::PayloadTooLarge("archive exceeds limit".into()))
+                .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("archive exceeds limit")
+        );
+    }
+
+    #[tokio::test]
     async fn internal_returns_500_and_hides_details() {
-        let (status, body) = extract_status_and_body(
-            AppError::Internal("secret db path /var/lib/data".into())
-        ).await;
+        let (status, body) =
+            extract_status_and_body(AppError::Internal("secret db path /var/lib/data".into()))
+                .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         // Must NOT contain the internal error details
         let msg = body["message"].as_str().unwrap();

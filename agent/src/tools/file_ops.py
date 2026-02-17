@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import os
-from pathlib import Path
 from typing import Any, Type
 
 from langchain_core.tools import BaseTool
@@ -13,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from ._media import MEDIA_TYPES, classify_media, sandbox_url
 from ._paths import resolve_workspace_path as _resolve_path
+from .result_schema import make_tool_error, make_tool_success
 
 IMAGE_EXTENSIONS = MEDIA_TYPES["image"]
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
@@ -73,7 +72,7 @@ class ReadTool(BaseTool):
 
     def _run(
         self, file_path: str, offset: int = 0, limit: int = 2000
-    ) -> str | list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         try:
             resolved = _resolve_path(file_path, self.workspace)
             ext = os.path.splitext(resolved)[1].lower()
@@ -82,54 +81,120 @@ class ReadTool(BaseTool):
             if ext in IMAGE_EXTENSIONS:
                 size = resolved.stat().st_size
                 if size == 0:
-                    return f"Error: image file is empty: {file_path}"
+                    return make_tool_error(
+                        kind=self.name,
+                        error=f"image file is empty: {file_path}",
+                    )
                 if size > MAX_IMAGE_SIZE:
-                    return f"Error: image file too large ({size} bytes, max {MAX_IMAGE_SIZE}): {file_path}"
+                    return make_tool_error(
+                        kind=self.name,
+                        error=f"image file too large ({size} bytes, max {MAX_IMAGE_SIZE}): {file_path}",
+                    )
                 data = resolved.read_bytes()
                 b64 = base64.b64encode(data).decode("ascii")
                 mime = f"image/{ext.lstrip('.')}"
                 if ext in (".jpg", ".jpeg"):
                     mime = "image/jpeg"
                 s_url = sandbox_url(resolved, self.workspace)
-                return [
+                text = f"Image file: {file_path}\n![{file_path}]({s_url})"
+                llm_content: list[dict[str, Any]] = [
                     {"type": "text", "text": f"Image file: {file_path}\n![{file_path}]({s_url})"},
                     {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
                 ]
+                return make_tool_success(
+                    kind=self.name,
+                    text=text,
+                    data={
+                        "file_path": file_path,
+                        "media": [
+                            {
+                                "type": "image",
+                                "name": os.path.basename(file_path),
+                                "url": s_url,
+                                "mime": mime,
+                                "size": size,
+                            }
+                        ],
+                    },
+                    meta={"bytes": size},
+                    llm_content=llm_content,
+                )
 
             # Video/audio files: return text with sandbox URL
             media_type = classify_media(ext)
             if media_type in ("video", "audio"):
                 size = resolved.stat().st_size
                 if size == 0:
-                    return f"Error: {media_type} file is empty: {file_path}"
+                    return make_tool_error(
+                        kind=self.name,
+                        error=f"{media_type} file is empty: {file_path}",
+                    )
                 if size > MAX_MEDIA_SIZE:
-                    return f"Error: {media_type} file too large ({size} bytes, max {MAX_MEDIA_SIZE}): {file_path}"
+                    return make_tool_error(
+                        kind=self.name,
+                        error=f"{media_type} file too large ({size} bytes, max {MAX_MEDIA_SIZE}): {file_path}",
+                    )
                 s_url = sandbox_url(resolved, self.workspace)
                 name = os.path.basename(file_path)
                 label = media_type.capitalize()
-                return f"{label} file: {file_path} ({size} bytes)\n[{label}: {name}]({s_url})"
+                text = f"{label} file: {file_path} ({size} bytes)\n[{label}: {name}]({s_url})"
+                return make_tool_success(
+                    kind=self.name,
+                    text=text,
+                    data={
+                        "file_path": file_path,
+                        "media": [
+                            {
+                                "type": media_type,
+                                "name": name,
+                                "url": s_url,
+                                "size": size,
+                            }
+                        ],
+                    },
+                    meta={"bytes": size},
+                )
 
-            with open(resolved, "r", encoding="utf-8", errors="replace") as fh:
-                lines = fh.readlines()
-            selected = lines[offset : offset + limit]
-            numbered = [
-                f"{i + offset + 1:>6}\t{line}"
-                for i, line in enumerate(selected)
-            ]
-            return "".join(numbered) if numbered else "(empty file)"
+            safe_offset = max(offset, 0)
+            safe_limit = max(limit, 0)
+            numbered: list[str] = []
+            if safe_limit > 0:
+                with open(resolved, "r", encoding="utf-8", errors="replace") as fh:
+                    selected_idx = 0
+                    for line_no, line in enumerate(fh, start=1):
+                        if line_no <= safe_offset:
+                            continue
+                        if selected_idx >= safe_limit:
+                            break
+                        numbered.append(f"{line_no:>6}\t{line}")
+                        selected_idx += 1
+            text = "".join(numbered) if numbered else "(empty file)"
+            return make_tool_success(
+                kind=self.name,
+                text=text,
+                data={
+                    "file_path": file_path,
+                    "offset": safe_offset,
+                    "limit": safe_limit,
+                    "lines_returned": len(numbered),
+                },
+            )
         except FileNotFoundError:
-            return f"Error: file not found: {file_path}"
+            return make_tool_error(kind=self.name, error=f"file not found: {file_path}")
         except IsADirectoryError:
-            return f"Error: path is a directory, not a file: {file_path}"
+            return make_tool_error(
+                kind=self.name,
+                error=f"path is a directory, not a file: {file_path}",
+            )
         except ValueError as exc:
-            return f"Error: {exc}"
+            return make_tool_error(kind=self.name, error=str(exc))
         except Exception as exc:
-            return f"Error reading file: {exc}"
+            return make_tool_error(kind=self.name, error=f"reading file failed: {exc}")
 
     async def _arun(
         self, file_path: str, offset: int = 0, limit: int = 2000
-    ) -> str | list[dict[str, Any]]:
-        return await asyncio.to_thread(self._run, file_path, offset, limit)
+    ) -> dict[str, Any]:
+        return self._run(file_path, offset, limit)
 
 
 # ---------------------------------------------------------------------------
@@ -147,20 +212,24 @@ class WriteTool(BaseTool):
     args_schema: Type[BaseModel] = WriteInput
     workspace: str = "/workspace"
 
-    def _run(self, file_path: str, content: str) -> str:
+    def _run(self, file_path: str, content: str) -> dict[str, Any]:
         try:
             resolved = _resolve_path(file_path, self.workspace)
             resolved.parent.mkdir(parents=True, exist_ok=True)
             with open(resolved, "w", encoding="utf-8") as fh:
                 fh.write(content)
-            return f"Successfully wrote {len(content)} characters to {file_path}."
+            return make_tool_success(
+                kind=self.name,
+                text=f"Successfully wrote {len(content)} characters to {file_path}.",
+                data={"file_path": file_path, "chars_written": len(content)},
+            )
         except ValueError as exc:
-            return f"Error: {exc}"
+            return make_tool_error(kind=self.name, error=str(exc))
         except Exception as exc:
-            return f"Error writing file: {exc}"
+            return make_tool_error(kind=self.name, error=f"writing file failed: {exc}")
 
-    async def _arun(self, file_path: str, content: str) -> str:
-        return await asyncio.to_thread(self._run, file_path, content)
+    async def _arun(self, file_path: str, content: str) -> dict[str, Any]:
+        return self._run(file_path, content)
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +254,7 @@ class EditTool(BaseTool):
         old_string: str,
         new_string: str,
         replace_all: bool = False,
-    ) -> str:
+    ) -> dict[str, Any]:
         try:
             resolved = _resolve_path(file_path, self.workspace)
             with open(resolved, "r", encoding="utf-8", errors="replace") as fh:
@@ -193,11 +262,14 @@ class EditTool(BaseTool):
 
             count = content.count(old_string)
             if count == 0:
-                return "Error: old_string not found in the file."
+                return make_tool_error(kind=self.name, error="old_string not found in the file")
             if not replace_all and count > 1:
-                return (
-                    f"Error: old_string appears {count} times. "
-                    "Use replace_all=True or provide a more unique string."
+                return make_tool_error(
+                    kind=self.name,
+                    error=(
+                        f"old_string appears {count} times. "
+                        "Use replace_all=True or provide a more unique string."
+                    ),
                 )
 
             new_content = content.replace(old_string, new_string, -1 if replace_all else 1)
@@ -205,16 +277,24 @@ class EditTool(BaseTool):
                 fh.write(new_content)
 
             replacements = count if replace_all else 1
-            return (
-                f"Successfully replaced {replacements} occurrence(s) "
-                f"in {file_path}."
+            return make_tool_success(
+                kind=self.name,
+                text=(
+                    f"Successfully replaced {replacements} occurrence(s) "
+                    f"in {file_path}."
+                ),
+                data={
+                    "file_path": file_path,
+                    "replacements": replacements,
+                    "replace_all": replace_all,
+                },
             )
         except FileNotFoundError:
-            return f"Error: file not found: {file_path}"
+            return make_tool_error(kind=self.name, error=f"file not found: {file_path}")
         except ValueError as exc:
-            return f"Error: {exc}"
+            return make_tool_error(kind=self.name, error=str(exc))
         except Exception as exc:
-            return f"Error editing file: {exc}"
+            return make_tool_error(kind=self.name, error=f"editing file failed: {exc}")
 
     async def _arun(
         self,
@@ -222,7 +302,5 @@ class EditTool(BaseTool):
         old_string: str,
         new_string: str,
         replace_all: bool = False,
-    ) -> str:
-        return await asyncio.to_thread(
-            self._run, file_path, old_string, new_string, replace_all
-        )
+    ) -> dict[str, Any]:
+        return self._run(file_path, old_string, new_string, replace_all)

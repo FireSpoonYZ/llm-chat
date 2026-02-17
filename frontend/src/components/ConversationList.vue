@@ -5,16 +5,22 @@
       :key="conv.id"
       class="conversation-item"
       :class="{ active: conv.id === currentId }"
-      @click="$emit('select', conv.id)"
     >
-      <span class="title">{{ conv.title }}</span>
+      <button
+        type="button"
+        class="conversation-select"
+        :aria-current="conv.id === currentId ? 'true' : undefined"
+        @click="$emit('select', conv.id)"
+      >
+        <span class="title">{{ conv.title }}</span>
+      </button>
       <el-button
         class="delete-btn"
         text
         size="small"
         :icon="Close"
         @click.stop="$emit('delete', conv.id)"
-        aria-label="Delete conversation"
+        :aria-label="t('conversation.deleteConversation')"
       />
     </div>
   </div>
@@ -23,6 +29,7 @@
 <script setup lang="ts">
 import { Close } from '@element-plus/icons-vue'
 import type { Conversation } from '../types'
+import { t } from '../i18n'
 
 defineProps<{
   conversations: Conversation[]
@@ -42,8 +49,7 @@ defineEmits<{
   padding: 4px 8px;
 }
 .conversation-item {
-  padding: 10px 12px;
-  cursor: pointer;
+  padding: 2px 6px 2px 10px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -51,11 +57,26 @@ defineEmits<{
   margin-bottom: 2px;
   transition: background var(--transition-fast);
 }
+.conversation-item.active {
+  background: var(--bg-sidebar-active);
+}
 .conversation-item:hover {
   background: var(--bg-sidebar-hover);
 }
-.conversation-item.active {
-  background: var(--bg-sidebar-active);
+.conversation-select {
+  border: none;
+  background: transparent;
+  text-align: left;
+  color: inherit;
+  width: 100%;
+  cursor: pointer;
+  min-height: 36px;
+  padding: 8px 0;
+}
+.conversation-select:focus-visible {
+  outline: 2px solid rgba(217, 119, 6, 0.6);
+  outline-offset: 2px;
+  border-radius: 6px;
 }
 .title {
   overflow: hidden;

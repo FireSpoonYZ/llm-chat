@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from .base import BASE_PROMPT
@@ -25,6 +26,10 @@ def assemble_system_prompt(
     Order: base → behaviors (if tools) → tool descriptions → mcp → user override.
     """
     parts = [base_prompt if base_prompt is not None else BASE_PROMPT]
+
+    # Inject current date so the agent can use it in web searches etc.
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    parts.append(f"# Context\n\nToday's date is {today} (UTC).")
 
     if tool_names:
         parts.append(TOOL_USAGE_POLICY)

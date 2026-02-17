@@ -12,6 +12,8 @@ from .search import GlobTool, GrepTool
 from .web import WebFetchTool, WebSearchTool
 from .code_interpreter import CodeInterpreterTool
 from .image_gen import ImageGenerationTool
+from .task import TaskTool
+from .capabilities import annotate_builtin_tools, set_tool_capabilities
 
 ALL_TOOLS = [
     BashTool,
@@ -24,6 +26,7 @@ ALL_TOOLS = [
     WebSearchTool,
     CodeInterpreterTool,
     ImageGenerationTool,
+    TaskTool,
 ]
 
 
@@ -60,4 +63,11 @@ def create_all_tools(
             endpoint_url=image_endpoint_url,
             model=image_model,
         ))
+    annotate_builtin_tools(tools)
     return tools
+
+
+def create_task_tool(runner: object) -> BaseTool:
+    tool = TaskTool(runner=runner)
+    set_tool_capabilities(tool, source="builtin", read_only=False)
+    return tool

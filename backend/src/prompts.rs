@@ -31,6 +31,7 @@ pub fn builtin_presets() -> Vec<SystemPromptPreset> {
     ]
 }
 
+#[allow(dead_code)]
 pub fn get_preset(id: &str) -> Option<SystemPromptPreset> {
     builtin_presets().into_iter().find(|p| p.id == id)
 }

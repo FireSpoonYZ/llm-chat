@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -26,12 +27,18 @@ const router = createRouter({
   ],
 })
 
-router.beforeEach((to) => {
-  const token = localStorage.getItem('access_token')
-  if (to.meta.requiresAuth && !token) {
+router.beforeEach(async (to) => {
+  const auth = useAuthStore()
+  const requiresAuth = !!to.meta.requiresAuth
+  const isAuthPage = to.name === 'login' || to.name === 'register'
+  if (requiresAuth || isAuthPage) {
+    await auth.ensureSession()
+  }
+
+  if (requiresAuth && !auth.isAuthenticated) {
     return { name: 'login' }
   }
-  if ((to.name === 'login' || to.name === 'register') && token) {
+  if (isAuthPage && auth.isAuthenticated) {
     return { name: 'chat' }
   }
 })

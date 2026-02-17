@@ -227,7 +227,7 @@ npx vue-tsc --noEmit   # Type checking
 
 ### WebSocket
 
-Connect to `ws://host/api/ws?token={jwt}` for real-time chat streaming.
+Connect to `ws://host/api/ws` for real-time chat streaming (session auth via cookies).
 
 ## Built-in Tools
 
@@ -256,6 +256,7 @@ MCP tools are dynamically registered from enabled MCP servers.
 | `HOST` | Backend bind address | `0.0.0.0` |
 | `PORT` | Backend API port | `3000` |
 | `INTERNAL_WS_PORT` | Internal WebSocket port for containers | `3001` |
+| `COOKIE_SECURE` | Add `Secure` flag to auth cookies (set `true` behind HTTPS) | `false` |
 | `CONTAINER_IMAGE` | Docker image for agent containers | `claude-chat-agent:latest` |
 | `CONTAINER_IDLE_TIMEOUT` | Seconds before idle containers are stopped | `600` |
 

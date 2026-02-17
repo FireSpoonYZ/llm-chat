@@ -110,6 +110,119 @@ describe('ChatMessage', () => {
 })
 
 describe('ChatMessage - contentBlocks parsing', () => {
+  it('prefers message.parts over message.tool_calls when both exist', () => {
+    const wrapper = mount(ChatMessage, {
+      props: {
+        message: makeMessage({
+          role: 'assistant',
+          content: 'legacy content',
+          parts: [
+            { seq: 0, type: 'text', text: 'from parts', json_payload: null, tool_call_id: null },
+          ],
+          tool_calls: JSON.stringify([{ type: 'text', content: 'from tool calls' }]),
+        }),
+      },
+      global: globalConfig,
+    })
+    expect(wrapper.text()).toContain('from parts')
+    expect(wrapper.text()).not.toContain('from tool calls')
+  })
+
+  it('renders ordered blocks from parts and attaches tool_result to tool_call', () => {
+    const wrapper = mount(ChatMessage, {
+      props: {
+        message: makeMessage({
+          role: 'assistant',
+          content: '',
+          parts: [
+            { seq: 2, type: 'tool_result', text: null, json_payload: { kind: 'bash', text: 'ok' }, tool_call_id: 'tc-1' },
+            {
+              seq: 1,
+              type: 'tool_call',
+              text: null,
+              json_payload: { id: 'tc-1', name: 'bash', input: { command: 'echo ok' } },
+              tool_call_id: 'tc-1',
+            },
+            { seq: 0, type: 'reasoning', text: 'thinking...', json_payload: null, tool_call_id: null },
+            { seq: 3, type: 'text', text: 'done', json_payload: null, tool_call_id: null },
+          ],
+          tool_calls: null,
+        }),
+      },
+      global: globalConfig,
+    })
+
+    const children = wrapper.findAll('.thinking-block, .tool-call-display, .message-content')
+    expect(children.length).toBe(3)
+    expect(children[0].classes()).toContain('thinking-block')
+    expect(children[1].classes()).toContain('tool-call-display')
+    expect(children[2].classes()).toContain('message-content')
+
+    const toolDisplay = wrapper.findComponent({ name: 'ToolCallDisplay' })
+    expect(toolDisplay.exists()).toBe(true)
+    expect(toolDisplay.props('toolName')).toBe('bash')
+    expect(toolDisplay.props('toolCallId')).toBe('tc-1')
+    expect(toolDisplay.props('toolResult')).toEqual({ kind: 'bash', text: 'ok' })
+  })
+
+  it('marks parts-based tool_result as error when payload has success=false', () => {
+    const wrapper = mount(ChatMessage, {
+      props: {
+        message: makeMessage({
+          role: 'assistant',
+          content: '',
+          parts: [
+            {
+              seq: 0,
+              type: 'tool_call',
+              text: null,
+              json_payload: { id: 'tc-err', name: 'bash', input: { command: 'exit 1' } },
+              tool_call_id: 'tc-err',
+            },
+            {
+              seq: 1,
+              type: 'tool_result',
+              text: null,
+              json_payload: { kind: 'bash', text: 'failed', success: false, error: 'non-zero exit' },
+              tool_call_id: 'tc-err',
+            },
+          ],
+          tool_calls: null,
+        }),
+      },
+      global: globalConfig,
+    })
+
+    const toolDisplay = wrapper.findComponent({ name: 'ToolCallDisplay' })
+    expect(toolDisplay.exists()).toBe(true)
+    expect(toolDisplay.props('isError')).toBe(true)
+  })
+
+  it('renders text fallback for orphan tool_result object payload from parts', () => {
+    const wrapper = mount(ChatMessage, {
+      props: {
+        message: makeMessage({
+          role: 'assistant',
+          content: '',
+          parts: [
+            {
+              seq: 0,
+              type: 'tool_result',
+              text: null,
+              json_payload: { kind: 'bash', text: 'orphan output', success: true },
+              tool_call_id: null,
+            },
+          ],
+          tool_calls: null,
+        }),
+      },
+      global: globalConfig,
+    })
+
+    expect(wrapper.text()).toContain('orphan output')
+    expect(wrapper.find('.message-content').exists()).toBe(true)
+  })
+
   it('renders new-format blocks in interleaved order (thinking → text → tool_call)', () => {
     const blocks = [
       { type: 'thinking', content: 'Let me think...' },
@@ -153,6 +266,53 @@ describe('ChatMessage - contentBlocks parsing', () => {
     const toolDisplay = wrapper.findComponent({ name: 'ToolCallDisplay' })
     expect(toolDisplay.exists()).toBe(true)
     expect(toolDisplay.props('isError')).toBe(true)
+  })
+
+  it('passes structured tool result object to ToolCallDisplay', () => {
+    const blocks = [
+      {
+        type: 'tool_call',
+        id: 'tc-bash',
+        name: 'bash',
+        input: { command: 'echo ok' },
+        result: {
+          kind: 'bash',
+          text: 'ok',
+          stdout: 'ok',
+          stderr: '',
+          exit_code: 0,
+          timed_out: false,
+          truncated: false,
+          duration_ms: 8,
+          error: false,
+        },
+        isError: false,
+      },
+    ]
+    const wrapper = mount(ChatMessage, {
+      props: {
+        message: makeMessage({
+          role: 'assistant',
+          content: '',
+          tool_calls: JSON.stringify(blocks),
+        }),
+      },
+      global: globalConfig,
+    })
+    const toolDisplay = wrapper.findComponent({ name: 'ToolCallDisplay' })
+    expect(toolDisplay.exists()).toBe(true)
+    expect(toolDisplay.props('toolResult')).toEqual({
+      kind: 'bash',
+      text: 'ok',
+      stdout: 'ok',
+      stderr: '',
+      exit_code: 0,
+      timed_out: false,
+      truncated: false,
+      duration_ms: 8,
+      error: false,
+    })
+    expect(toolDisplay.props('isError')).toBe(false)
   })
 
   it('renders legacy format (no type field) with text on top and tool calls below', () => {

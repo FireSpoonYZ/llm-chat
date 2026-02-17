@@ -79,6 +79,13 @@ def _events_by_type(events: list[StreamEvent], t: str) -> list[StreamEvent]:
     return [e for e in events if e.type == t]
 
 
+def _result_text(event: StreamEvent) -> str:
+    result = event.data["result"]
+    if isinstance(result, dict):
+        return str(result.get("text", ""))
+    return str(result)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures (workspace provided by conftest.py)
 # ---------------------------------------------------------------------------
@@ -108,13 +115,15 @@ class TestBashToolIntegration:
 
         tr_events = _events_by_type(events, "tool_result")
         assert len(tr_events) == 1
-        assert "hello" in tr_events[0].data["result"]
+        assert tr_events[0].data["result"]["kind"] == "bash"
+        assert "hello" in _result_text(tr_events[0])
         assert tr_events[0].data["is_error"] is False
 
         complete = _events_by_type(events, "complete")
         assert len(complete) == 1
         assert complete[0].data["tool_calls"] is not None
         assert complete[0].data["tool_calls"][0]["name"] == "bash"
+        assert complete[0].data["tool_calls"][0]["result"]["kind"] == "bash"
 
 
 class TestReadToolIntegration:
@@ -138,7 +147,8 @@ class TestReadToolIntegration:
         events = await _collect_events(agent)
 
         tr = _events_by_type(events, "tool_result")[0]
-        assert "hello world" in tr.data["result"]
+        assert tr.data["result"]["kind"] == "read"
+        assert "hello world" in _result_text(tr)
         assert tr.data["is_error"] is False
 
 
@@ -157,7 +167,8 @@ class TestWriteToolIntegration:
         events = await _collect_events(agent)
 
         tr = _events_by_type(events, "tool_result")[0]
-        assert "Successfully wrote" in tr.data["result"]
+        assert tr.data["result"]["kind"] == "write"
+        assert "Successfully wrote" in _result_text(tr)
         assert tr.data["is_error"] is False
 
         # Verify file was actually written
@@ -190,7 +201,8 @@ class TestEditToolIntegration:
         events = await _collect_events(agent)
 
         tr = _events_by_type(events, "tool_result")[0]
-        assert "Successfully replaced" in tr.data["result"]
+        assert tr.data["result"]["kind"] == "edit"
+        assert "Successfully replaced" in _result_text(tr)
 
         with open(test_file) as f:
             assert "new text here" in f.read()
@@ -216,9 +228,10 @@ class TestGlobToolIntegration:
         events = await _collect_events(agent)
 
         tr = _events_by_type(events, "tool_result")[0]
-        assert "a.txt" in tr.data["result"]
-        assert "b.txt" in tr.data["result"]
-        assert "c.py" not in tr.data["result"]
+        assert tr.data["result"]["kind"] == "glob"
+        assert "a.txt" in _result_text(tr)
+        assert "b.txt" in _result_text(tr)
+        assert "c.py" not in _result_text(tr)
 
 
 class TestGrepToolIntegration:
@@ -240,7 +253,8 @@ class TestGrepToolIntegration:
         events = await _collect_events(agent)
 
         tr = _events_by_type(events, "tool_result")[0]
-        assert "hello world" in tr.data["result"]
+        assert tr.data["result"]["kind"] == "grep"
+        assert "hello world" in _result_text(tr)
 
 
 class TestWebFetchToolIntegration:
@@ -271,7 +285,8 @@ class TestWebFetchToolIntegration:
         events = await _collect_events(agent)
 
         tr = _events_by_type(events, "tool_result")[0]
-        assert "Example Page Content" in tr.data["result"]
+        assert tr.data["result"]["kind"] == "web_fetch"
+        assert "Example Page Content" in _result_text(tr)
         assert tr.data["is_error"] is False
 
 
@@ -290,7 +305,8 @@ class TestCodeInterpreterToolIntegration:
         events = await _collect_events(agent)
 
         tr = _events_by_type(events, "tool_result")[0]
-        assert "42" in tr.data["result"]
+        assert tr.data["result"]["kind"] == "code_interpreter"
+        assert "42" in _result_text(tr)
         assert tr.data["is_error"] is False
 
 
@@ -333,7 +349,8 @@ class TestWebSearchToolIntegration:
         events = await _collect_events(agent)
 
         tr = _events_by_type(events, "tool_result")[0]
-        assert "Latest news results" in tr.data["result"]
+        assert tr.data["result"]["kind"] == "web_search"
+        assert "Latest news results" in _result_text(tr)
         assert tr.data["is_error"] is False
 
 

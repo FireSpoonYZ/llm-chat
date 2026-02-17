@@ -1,7 +1,7 @@
 <template>
   <div class="file-browser">
     <div class="fb-toolbar">
-      <span class="fb-title">workspace</span>
+      <span class="fb-title">{{ t('fileBrowser.workspace') }}</span>
       <div class="fb-toolbar-actions">
         <el-checkbox
           v-if="treeData.length > 0"
@@ -9,9 +9,9 @@
           :indeterminate="someSelected && !allSelected"
           @change="toggleSelectAll"
           data-testid="select-all"
-        >All</el-checkbox>
-        <el-button text :icon="Upload" @click="triggerUpload" title="Upload" data-testid="upload-btn" />
-        <el-button text :icon="Refresh" @click="loadFiles" title="Refresh" />
+        >{{ t('fileBrowser.all') }}</el-checkbox>
+        <el-button text :icon="Upload" @click="triggerUpload" :title="t('common.upload')" data-testid="upload-btn" />
+        <el-button text :icon="Refresh" @click="loadFiles" :title="t('common.refresh')" />
         <input
           ref="fileInputRef"
           type="file"
@@ -33,7 +33,7 @@
 
     <div v-if="loading" v-loading="true" class="fb-loading" element-loading-background="transparent" />
     <div v-else-if="error" class="fb-error">{{ error }}</div>
-    <div v-else-if="treeData.length === 0" class="fb-empty">No files</div>
+    <div v-else-if="treeData.length === 0" class="fb-empty">{{ t('fileBrowser.noFiles') }}</div>
     <template v-else>
       <el-tree
         ref="treeRef"
@@ -42,7 +42,8 @@
         :props="treeProps"
         node-key="path"
         show-checkbox
-        default-expand-all
+        lazy
+        :load="loadNode"
         :expand-on-click-node="false"
         @check="onCheck"
       >
@@ -68,12 +69,12 @@
         </template>
       </el-tree>
 
-      <div v-if="checkedCount > 0" class="fb-selection-bar">
-        <span class="fb-selection-count">{{ checkedCount }} selected</span>
+      <div v-if="hasSelection" class="fb-selection-bar">
+        <span class="fb-selection-count">{{ selectionLabel }}</span>
         <el-button size="small" :disabled="batchDownloading" @click="handleBatchDownload">
-          {{ batchDownloading ? 'Downloading...' : 'Download' }}
+          {{ batchDownloading ? t('fileBrowser.downloading') : t('common.download') }}
         </el-button>
-        <el-button size="small" @click="clearSelection">Clear</el-button>
+        <el-button size="small" @click="clearSelection">{{ t('common.clear') }}</el-button>
       </div>
     </template>
   </div>
@@ -86,11 +87,21 @@ import { ElMessage } from 'element-plus'
 import { listFiles, downloadFile, downloadBatch, uploadFiles } from '../api/conversations'
 import type { FileEntry } from '../types'
 import type { TreeInstance } from 'element-plus'
+import { t } from '../i18n'
 
 interface TreeNode extends FileEntry {
   path: string
+  leaf: boolean
+  loaded?: boolean
   children?: TreeNode[]
 }
+
+interface TreeLoadNode {
+  level: number
+  data?: TreeNode
+}
+
+const MAX_BATCH_DOWNLOAD_PATHS = 100
 
 const props = defineProps<{ conversationId: string }>()
 
@@ -104,57 +115,155 @@ const fileInputRef = ref<HTMLInputElement>()
 const uploading = ref(false)
 const uploadProgress = ref(0)
 
-const treeProps = { label: 'name', children: 'children' }
+const treeProps = { label: 'name', children: 'children', isLeaf: 'leaf' }
+const workspaceAllSelected = ref(false)
+const suppressCheckUpdate = ref(false)
+const childrenCache = new Map<string, TreeNode[]>()
+const childrenInFlight = new Map<string, Promise<TreeNode[]>>()
 
-function addPaths(entries: FileEntry[], parentPath: string): TreeNode[] {
-  return entries.map(e => ({
-    ...e,
-    path: parentPath + '/' + e.name,
-    children: e.children ? addPaths(e.children, parentPath + '/' + e.name) : undefined,
-  }))
+function joinPath(parentPath: string, name: string): string {
+  if (!parentPath || parentPath === '/') return `/${name}`
+  return `${parentPath}/${name}`
 }
 
-function collectAllPaths(nodes: TreeNode[]): string[] {
+function addPaths(entries: FileEntry[], parentPath: string): TreeNode[] {
+  return entries.map((entry) => {
+    const path = joinPath(parentPath, entry.name)
+    const children = entry.children ? addPaths(entry.children, path) : undefined
+    return {
+      ...entry,
+      path,
+      leaf: !entry.is_dir,
+      loaded: !!children,
+      children,
+    }
+  })
+}
+
+function collectLoadedPaths(nodes: TreeNode[]): string[] {
   const paths: string[] = []
-  for (const n of nodes) {
-    paths.push(n.path)
-    if (n.children) paths.push(...collectAllPaths(n.children))
+  for (const node of nodes) {
+    paths.push(node.path)
+    if (node.children && node.children.length > 0) {
+      paths.push(...collectLoadedPaths(node.children))
+    }
   }
   return paths
 }
 
-const allPaths = computed(() => collectAllPaths(treeData.value))
-const allSelected = computed(() => allPaths.value.length > 0 && checkedCount.value === allPaths.value.length)
-const someSelected = computed(() => checkedCount.value > 0)
+const loadedPaths = computed(() => collectLoadedPaths(treeData.value))
+const allSelected = computed(() =>
+  workspaceAllSelected.value || (loadedPaths.value.length > 0 && checkedCount.value === loadedPaths.value.length),
+)
+const someSelected = computed(() => workspaceAllSelected.value || checkedCount.value > 0)
+const hasSelection = computed(() => workspaceAllSelected.value || checkedCount.value > 0)
+const selectionLabel = computed(() =>
+  workspaceAllSelected.value
+    ? t('fileBrowser.workspaceSelected')
+    : t('fileBrowser.selectedCount', { count: checkedCount.value }),
+)
 
-function onCheck() {
+function setCheckedCountFromTree() {
   const keys = treeRef.value?.getCheckedKeys(false) ?? []
   const halfKeys = treeRef.value?.getHalfCheckedKeys() ?? []
   checkedCount.value = keys.length + halfKeys.length
 }
 
+function onCheck() {
+  if (suppressCheckUpdate.value) return
+  setCheckedCountFromTree()
+  // User changed selection manually while in global mode; fall back to normal explicit selection.
+  if (workspaceAllSelected.value) {
+    workspaceAllSelected.value = false
+  }
+}
+
+function setCheckedKeysSafely(paths: string[]) {
+  suppressCheckUpdate.value = true
+  treeRef.value?.setCheckedKeys(paths, false)
+  suppressCheckUpdate.value = false
+}
+
 function toggleSelectAll(val: boolean | string | number) {
   if (val) {
-    treeRef.value?.setCheckedKeys(allPaths.value, false)
-  } else {
-    treeRef.value?.setCheckedKeys([], false)
+    workspaceAllSelected.value = true
+    setCheckedKeysSafely(loadedPaths.value)
+    checkedCount.value = loadedPaths.value.length
+    return
   }
-  checkedCount.value = val ? allPaths.value.length : 0
+  workspaceAllSelected.value = false
+  setCheckedKeysSafely([])
+  checkedCount.value = 0
 }
 
 function clearSelection() {
-  treeRef.value?.setCheckedKeys([], false)
+  workspaceAllSelected.value = false
+  setCheckedKeysSafely([])
   checkedCount.value = 0
+}
+
+async function fetchChildren(path: string): Promise<TreeNode[]> {
+  const normalized = path || '/'
+  const cached = childrenCache.get(normalized)
+  if (cached) return cached
+
+  const inFlight = childrenInFlight.get(normalized)
+  if (inFlight) return inFlight
+
+  const request = (async () => {
+    const res = await listFiles(props.conversationId, normalized, false)
+    const parentPath = normalized === '/' ? '' : normalized
+    const children = addPaths(res.entries, parentPath)
+    childrenCache.set(normalized, children)
+    return children
+  })()
+
+  childrenInFlight.set(normalized, request)
+  try {
+    return await request
+  } finally {
+    childrenInFlight.delete(normalized)
+  }
+}
+
+async function loadNode(node: TreeLoadNode, resolve: (children: TreeNode[]) => void) {
+  if (node.level === 0) {
+    resolve(treeData.value)
+    return
+  }
+
+  const data = node.data
+  if (!data || !data.is_dir) {
+    resolve([])
+    return
+  }
+
+  try {
+    const children = await fetchChildren(data.path)
+    data.children = children
+    data.loaded = true
+    resolve(children)
+  } catch {
+    ElMessage.error(t('fileBrowser.loadChildrenFailed'))
+    resolve([])
+  }
+}
+
+function resetTreeState() {
+  clearSelection()
+  childrenCache.clear()
+  childrenInFlight.clear()
 }
 
 async function loadFiles() {
   loading.value = true
   error.value = ''
+  resetTreeState()
   try {
-    const res = await listFiles(props.conversationId, '/', true)
+    const res = await listFiles(props.conversationId, '/', false)
     treeData.value = addPaths(res.entries, '')
   } catch {
-    error.value = 'Failed to load files'
+    error.value = t('fileBrowser.failedLoadFiles')
     treeData.value = []
   } finally {
     loading.value = false
@@ -178,8 +287,23 @@ async function handleDownload(filePath: string) {
 }
 
 async function handleBatchDownload() {
+  if (workspaceAllSelected.value) {
+    batchDownloading.value = true
+    try {
+      await downloadFile(props.conversationId, '/')
+    } finally {
+      batchDownloading.value = false
+    }
+    return
+  }
+
   const paths = getSmartCheckedPaths()
   if (paths.length === 0) return
+  if (paths.length > MAX_BATCH_DOWNLOAD_PATHS) {
+    ElMessage.error(t('fileBrowser.tooManySelections'))
+    return
+  }
+
   batchDownloading.value = true
   try {
     if (paths.length === 1) {
@@ -207,10 +331,10 @@ async function handleFileSelect(event: Event) {
     await uploadFiles(props.conversationId, files, '', (pct) => {
       uploadProgress.value = pct
     })
-    ElMessage.success(`Uploaded ${files.length} file(s)`)
+    ElMessage.success(t('fileBrowser.uploadedFiles', { count: files.length }))
     await loadFiles()
   } catch {
-    ElMessage.error('Upload failed')
+    ElMessage.error(t('fileBrowser.uploadFailed'))
   } finally {
     uploading.value = false
     uploadProgress.value = 0

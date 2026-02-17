@@ -5,7 +5,7 @@
       <div class="sidebar-header">
         <el-button class="new-chat-btn" @click="showNewChatDialog = true">
           <el-icon><Plus /></el-icon>
-          <span v-if="!sidebarCollapsed">New Chat</span>
+          <span v-if="!sidebarCollapsed">{{ t('chat.newChat') }}</span>
         </el-button>
       </div>
       <ConversationList
@@ -17,11 +17,11 @@
       <div class="sidebar-footer">
         <el-button class="sidebar-link" text @click="$router.push('/settings')">
           <el-icon><Setting /></el-icon>
-          <span>Settings</span>
+          <span>{{ t('chat.settings') }}</span>
         </el-button>
         <el-button class="sidebar-link logout" text @click="auth.logout()">
           <el-icon><SwitchButton /></el-icon>
-          <span>Logout</span>
+          <span>{{ t('chat.logout') }}</span>
         </el-button>
       </div>
     </aside>
@@ -38,31 +38,41 @@
       <template v-if="chatStore.currentConversationId && currentConversation">
         <div class="chat-toolbar">
           <div class="toolbar-inner">
-            <span class="toolbar-label">Model</span>
+            <span class="toolbar-label">{{ t('chat.model') }}</span>
             <el-cascader
               :model-value="cascaderValue"
               :options="cascaderOptions"
               :props="{ expandTrigger: 'hover' }"
-              placeholder="Select provider / model"
+              :placeholder="t('chat.selectProviderModel')"
               clearable
               size="small"
               class="model-cascader"
               @change="handleCascaderChange"
             />
-            <span class="toolbar-label">Image</span>
+            <span class="toolbar-label">{{ t('chat.subagent') }}</span>
+            <el-cascader
+              :model-value="subagentCascaderValue"
+              :options="subagentCascaderOptions"
+              :props="{ expandTrigger: 'hover' }"
+              :placeholder="t('chat.selectSubagentModel')"
+              clearable
+              size="small"
+              class="model-cascader"
+              @change="handleSubagentCascaderChange"
+            />
+            <span class="toolbar-label">{{ t('chat.image') }}</span>
             <el-cascader
               :model-value="imageCascaderValue"
               :options="imageCascaderOptions"
               :props="{ expandTrigger: 'hover' }"
-              placeholder="Select image model"
+              :placeholder="t('chat.selectImageModel')"
               clearable
               size="small"
               class="model-cascader"
               @change="handleImageCascaderChange"
             />
-            <el-button class="toolbar-btn" text @click="showPromptDrawer = true">System Prompt</el-button>
-            <el-button class="toolbar-btn" text @click="showFilesDrawer = true">Files</el-button>
-            <el-button class="toolbar-btn" text @click="showShareDialog = true">Share</el-button>
+            <el-button class="toolbar-btn" text @click="showFilesDrawer = true">{{ t('chat.files') }}</el-button>
+            <el-button class="toolbar-btn" text @click="showShareDialog = true">{{ t('chat.share') }}</el-button>
           </div>
         </div>
         <div class="chat-messages">
@@ -86,27 +96,39 @@
             />
           </div>
         </div>
-        <ChatInput @send="handleSend" :disabled="chatStore.isStreaming" :deep-thinking="deepThinking" @update:deep-thinking="toggleDeepThinking" @attach-files="handleAttachFiles" />
+        <ChatInput
+          @send="handleSend"
+          @stop="chatStore.cancelGeneration"
+          :disabled="chatStore.isStreaming || chatStore.isWaiting"
+          :streaming="chatStore.isStreaming || chatStore.isWaiting"
+          :deep-thinking="deepThinking"
+          :thinking-budget="thinkingBudget"
+          :subagent-thinking-budget="subagentThinkingBudget"
+          @update:deep-thinking="toggleDeepThinking"
+          @update:thinking-budget="updateThinkingBudget"
+          @update:subagent-thinking-budget="updateSubagentThinkingBudget"
+          @attach-files="handleAttachFiles"
+        />
         <div v-if="!chatStore.wsConnected" class="ws-status-bar ws-disconnected">
           <span class="ws-dot pulse"></span>
-          <span>Connection lost, reconnecting...</span>
+          <span>{{ t('chat.connectionLost') }}</span>
         </div>
         <div v-if="chatStore.sendFailed" class="ws-status-bar ws-send-failed">
-          <span>Failed to send message. Please check your connection.</span>
+          <span>{{ t('chat.sendFailed') }}</span>
         </div>
       </template>
       <template v-else>
         <div class="empty-state">
-          <p>Select a conversation or start a new chat</p>
+          <p>{{ t('chat.emptyState') }}</p>
         </div>
       </template>
     </main>
 
     <!-- New Chat Dialog -->
-    <el-dialog v-model="showNewChatDialog" title="New Chat" width="520px">
+    <el-dialog v-model="showNewChatDialog" :title="t('chat.dialog.newChatTitle')" width="520px">
       <el-form label-position="top">
-        <el-form-item label="System Prompt Preset">
-          <el-select v-model="newChatPresetId" placeholder="Select a preset" style="width: 100%" @change="handlePresetSelect">
+        <el-form-item :label="t('chat.dialog.systemPromptPreset')">
+          <el-select v-model="newChatPresetId" :placeholder="t('chat.dialog.selectPreset')" style="width: 100%" @change="handlePresetSelect">
             <el-option
               v-for="preset in presets"
               :key="preset.id"
@@ -116,62 +138,49 @@
               <span>{{ preset.name }}</span>
               <span style="color: var(--text-secondary); font-size: 12px; margin-left: 8px">{{ preset.description }}</span>
             </el-option>
-            <el-option label="Custom" value="__custom__" />
+            <el-option :label="t('chat.dialog.customPreset')" value="__custom__" />
           </el-select>
         </el-form-item>
-        <el-form-item label="System Prompt">
+        <el-form-item :label="t('chat.dialog.systemPrompt')">
           <el-input
             v-model="newChatPrompt"
             type="textarea"
             :rows="6"
-            placeholder="Enter a custom system prompt or select a preset above"
+            :placeholder="t('chat.dialog.customPromptPlaceholder')"
           />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showNewChatDialog = false">Cancel</el-button>
-        <el-button type="primary" @click="handleCreateChat">Create</el-button>
+        <el-button @click="showNewChatDialog = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" @click="handleCreateChat">{{ t('common.create') }}</el-button>
       </template>
     </el-dialog>
 
-    <!-- System Prompt Drawer -->
-    <el-drawer v-model="showPromptDrawer" title="System Prompt" size="480px">
-      <el-input
-        v-model="editingPrompt"
-        type="textarea"
-        :rows="20"
-        placeholder="System prompt for this conversation"
-      />
-      <div style="margin-top: 16px; text-align: right">
-        <el-button type="primary" @click="handleSavePrompt">Save</el-button>
-      </div>
-    </el-drawer>
-
     <!-- Files Drawer -->
-    <el-drawer v-model="showFilesDrawer" title="Workspace Files" size="480px" @open="fileBrowserRef?.refresh()">
+    <el-drawer v-model="showFilesDrawer" :title="t('chat.dialog.workspaceFilesTitle')" size="480px" @open="fileBrowserRef?.refresh()">
       <FileBrowser v-if="chatStore.currentConversationId" ref="fileBrowserRef" :conversation-id="chatStore.currentConversationId" />
     </el-drawer>
 
     <!-- Share Dialog -->
-    <el-dialog v-model="showShareDialog" title="Share Conversation" width="480px">
+    <el-dialog v-model="showShareDialog" :title="t('chat.dialog.shareConversationTitle')" width="480px">
       <template v-if="!currentConversation?.share_token">
-        <p style="color: var(--text-secondary); margin: 0 0 16px">Anyone with the link can view this conversation in read-only mode. New messages will be visible when they refresh.</p>
-        <el-button type="primary" @click="handleCreateShare" :loading="shareLoading">Create Link</el-button>
+        <p style="color: var(--text-secondary); margin: 0 0 16px">{{ t('chat.dialog.shareCreateHint') }}</p>
+        <el-button type="primary" @click="handleCreateShare" :loading="shareLoading">{{ t('chat.dialog.createLink') }}</el-button>
       </template>
       <template v-else>
-        <p style="color: var(--text-secondary); margin: 0 0 12px">This conversation is shared. Anyone with the link can view it.</p>
+        <p style="color: var(--text-secondary); margin: 0 0 12px">{{ t('chat.dialog.shareActiveHint') }}</p>
         <div style="display: flex; gap: 8px; margin-bottom: 16px">
           <el-input :model-value="shareUrl" readonly />
-          <el-button @click="copyShareUrl">Copy</el-button>
+          <el-button @click="copyShareUrl">{{ t('common.copy') }}</el-button>
         </div>
-        <el-button type="danger" plain @click="handleRevokeShare" :loading="shareLoading">Stop Sharing</el-button>
+        <el-button type="danger" plain @click="handleRevokeShare" :loading="shareLoading">{{ t('chat.dialog.stopSharing') }}</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, computed, ref, watch } from 'vue'
+import { onMounted, onUnmounted, computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Fold, Expand, Setting, SwitchButton } from '@element-plus/icons-vue'
 import { useAuthStore } from '../stores/auth'
@@ -183,6 +192,7 @@ import ChatInput from '../components/ChatInput.vue'
 import FileBrowser from '../components/FileBrowser.vue'
 import { uploadFiles } from '../api/conversations'
 import { createShare, revokeShare } from '../api/sharing'
+import { t } from '../i18n'
 
 const auth = useAuthStore()
 const chatStore = useChatStore()
@@ -192,27 +202,38 @@ const sidebarCollapsed = ref(false)
 const showNewChatDialog = ref(false)
 const newChatPresetId = ref('')
 const newChatPrompt = ref('')
-const showPromptDrawer = ref(false)
-const editingPrompt = ref('')
 const showFilesDrawer = ref(false)
 const fileBrowserRef = ref<InstanceType<typeof FileBrowser> | null>(null)
 const showShareDialog = ref(false)
 const shareLoading = ref(false)
 
 const deepThinking = computed(() => currentConversation.value?.deep_thinking ?? false)
+const thinkingBudget = computed(() => currentConversation.value?.thinking_budget ?? null)
+const subagentThinkingBudget = computed(() => currentConversation.value?.subagent_thinking_budget ?? null)
 
 const presets = computed(() => settingsStore.presets)
 
 onMounted(async () => {
-  await Promise.all([
+  const [convResult, providersResult, presetsResult] = await Promise.allSettled([
     chatStore.loadConversations(),
     settingsStore.loadProviders(),
     settingsStore.loadPresets(),
   ])
-  if (auth.accessToken) {
-    chatStore.connectWs(auth.accessToken)
+
+  if (convResult.status === 'rejected') {
+    ElMessage.error(t('chat.messages.failedLoadConversations'))
   }
-  if (settingsStore.defaultPreset) {
+  if (providersResult.status === 'rejected') {
+    ElMessage.error(t('chat.messages.failedLoadProviders'))
+  }
+  if (presetsResult.status === 'rejected') {
+    ElMessage.error(t('chat.messages.failedLoadPromptPresets'))
+  }
+
+  if (auth.isAuthenticated) {
+    chatStore.connectWs()
+  }
+  if (presetsResult.status === 'fulfilled' && settingsStore.defaultPreset) {
     newChatPresetId.value = settingsStore.defaultPreset.id
     newChatPrompt.value = settingsStore.defaultPreset.content
   }
@@ -237,7 +258,16 @@ async function handleCreateChat() {
     const defaultProvider = settingsStore.providers.find(p => p.is_default)
     const provider = defaultProvider?.name
     const modelName = defaultProvider?.models[0]
-    const conv = await chatStore.createConversation(undefined, prompt, provider, modelName)
+    const conv = await chatStore.createConversation(
+      undefined,
+      prompt,
+      provider,
+      modelName,
+      undefined,
+      undefined,
+      provider,
+      modelName,
+    )
     await chatStore.selectConversation(conv.id)
     showNewChatDialog.value = false
     if (settingsStore.defaultPreset) {
@@ -248,7 +278,7 @@ async function handleCreateChat() {
       newChatPrompt.value = ''
     }
   } catch (e) {
-    ElMessage.error('Failed to create chat')
+    ElMessage.error(t('chat.messages.failedCreateChat'))
     console.error(e)
   }
 }
@@ -257,16 +287,21 @@ async function handleSelectConversation(id: string) {
   try {
     await chatStore.selectConversation(id)
   } catch (e) {
-    ElMessage.error('Failed to load conversation')
+    ElMessage.error(t('chat.messages.failedLoadConversation'))
     console.error(e)
   }
 }
 
 async function handleDeleteConversation(id: string) {
   try {
-    await ElMessageBox.confirm('Delete this conversation? This cannot be undone.', 'Confirm', { type: 'warning' })
+    await ElMessageBox.confirm(t('chat.confirmDeleteConversation'), t('common.confirm'), { type: 'warning' })
   } catch { return }
-  await chatStore.deleteConversation(id)
+  try {
+    await chatStore.deleteConversation(id)
+  } catch (e) {
+    ElMessage.error(t('chat.messages.failedDeleteConversation'))
+    console.error(e)
+  }
 }
 
 function handleSend(content: string) {
@@ -277,12 +312,12 @@ async function handleAttachFiles(files: File[]) {
   if (!chatStore.currentConversationId) return
   try {
     await uploadFiles(chatStore.currentConversationId, files)
-    ElMessage.success(`Uploaded ${files.length} file(s)`)
+    ElMessage.success(t('chat.messages.uploadedFiles', { count: files.length }))
     if (showFilesDrawer.value) {
       fileBrowserRef.value?.refresh()
     }
   } catch {
-    ElMessage.error('Upload failed')
+    ElMessage.error(t('chat.messages.uploadFailed'))
   }
 }
 
@@ -301,19 +336,18 @@ function toggleDeepThinking() {
   })
 }
 
-watch(showPromptDrawer, (open) => {
-  if (open) {
-    editingPrompt.value = currentConversation.value?.system_prompt_override || ''
-  }
-})
-
-async function handleSavePrompt() {
+function updateThinkingBudget(value: number | null) {
   if (!chatStore.currentConversationId) return
-  await chatStore.updateConversation(chatStore.currentConversationId, {
-    system_prompt_override: editingPrompt.value || '',
+  chatStore.updateConversation(chatStore.currentConversationId, {
+    thinking_budget: value,
   })
-  showPromptDrawer.value = false
-  ElMessage.success('System prompt updated')
+}
+
+function updateSubagentThinkingBudget(value: number | null) {
+  if (!chatStore.currentConversationId) return
+  chatStore.updateConversation(chatStore.currentConversationId, {
+    subagent_thinking_budget: value,
+  })
 }
 
 const currentConversation = computed(() =>
@@ -335,7 +369,7 @@ async function handleCreateShare() {
     const conv = chatStore.conversations.find(c => c.id === chatStore.currentConversationId)
     if (conv) conv.share_token = resp.share_token
   } catch {
-    ElMessage.error('Failed to create share link')
+    ElMessage.error(t('chat.messages.failedCreateShareLink'))
   } finally {
     shareLoading.value = false
   }
@@ -349,7 +383,7 @@ async function handleRevokeShare() {
     const conv = chatStore.conversations.find(c => c.id === chatStore.currentConversationId)
     if (conv) conv.share_token = null
   } catch {
-    ElMessage.error('Failed to revoke share link')
+    ElMessage.error(t('chat.messages.failedRevokeShareLink'))
   } finally {
     shareLoading.value = false
   }
@@ -358,9 +392,9 @@ async function handleRevokeShare() {
 async function copyShareUrl() {
   try {
     await navigator.clipboard.writeText(shareUrl.value)
-    ElMessage.success({ message: 'Link copied', duration: 1500 })
+    ElMessage.success({ message: t('chat.messages.linkCopied'), duration: 1500 })
   } catch {
-    ElMessage.error('Copy failed')
+    ElMessage.error(t('chat.messages.copyFailed'))
   }
 }
 
@@ -410,6 +444,40 @@ const imageCascaderOptions = computed(() => {
       })),
     }))
 })
+
+const subagentCascaderOptions = computed(() => {
+  return settingsStore.providers.map(p => ({
+    value: p.name,
+    label: p.name || p.provider,
+    children: p.models.map(m => ({
+      value: m,
+      label: m,
+    })),
+  }))
+})
+
+const subagentCascaderValue = computed(() => {
+  const conv = currentConversation.value
+  if (conv?.subagent_provider && conv?.subagent_model) {
+    return [conv.subagent_provider, conv.subagent_model]
+  }
+  return []
+})
+
+async function handleSubagentCascaderChange(val: string[] | null) {
+  if (!chatStore.currentConversationId) return
+  if (val && val.length === 2) {
+    await chatStore.updateConversation(chatStore.currentConversationId, {
+      subagent_provider: val[0],
+      subagent_model: val[1],
+    })
+  } else {
+    await chatStore.updateConversation(chatStore.currentConversationId, {
+      subagent_provider: '',
+      subagent_model: '',
+    })
+  }
+}
 
 const imageCascaderValue = computed(() => {
   const conv = currentConversation.value
@@ -512,6 +580,8 @@ async function handleImageCascaderChange(val: string[] | null) {
   padding: 8px 16px;
   border-bottom: 1px solid var(--border-light);
   flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 .toolbar-inner {
   max-width: var(--max-width-chat);
@@ -519,18 +589,26 @@ async function handleImageCascaderChange(val: string[] | null) {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: nowrap;
+  min-width: max-content;
   padding-left: 40px;
 }
 .toolbar-label {
   color: var(--text-secondary);
   font-size: 13px;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 .model-cascader {
-  width: 340px;
+  width: 300px;
+  min-width: 300px;
+  flex: 0 0 300px;
 }
 .toolbar-btn {
   color: var(--text-secondary) !important;
   font-size: 13px;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .waiting-indicator {

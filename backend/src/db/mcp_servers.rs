@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use sqlx::prelude::FromRow;
 use sqlx::SqlitePool;
+use sqlx::prelude::FromRow;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct McpServer {
@@ -12,10 +12,13 @@ pub struct McpServer {
     pub args: Option<String>,
     pub url: Option<String>,
     pub env_vars: Option<String>,
+    pub read_only_overrides: Option<String>,
     pub is_enabled: bool,
     pub created_at: String,
 }
 
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub async fn create_mcp_server(
     pool: &SqlitePool,
     name: &str,
@@ -27,14 +30,42 @@ pub async fn create_mcp_server(
     env_vars: Option<&str>,
     is_enabled: bool,
 ) -> Result<McpServer, sqlx::Error> {
+    create_mcp_server_with_overrides(
+        pool,
+        name,
+        description,
+        transport,
+        command,
+        args,
+        url,
+        env_vars,
+        None,
+        is_enabled,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_mcp_server_with_overrides(
+    pool: &SqlitePool,
+    name: &str,
+    description: Option<&str>,
+    transport: &str,
+    command: Option<&str>,
+    args: Option<&str>,
+    url: Option<&str>,
+    env_vars: Option<&str>,
+    read_only_overrides: Option<&str>,
+    is_enabled: bool,
+) -> Result<McpServer, sqlx::Error> {
     let id = uuid::Uuid::new_v4().to_string();
 
     sqlx::query_as::<_, McpServer>(
         "INSERT INTO mcp_servers (id, name, description, transport, \
-         command, args, url, env_vars, is_enabled) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         command, args, url, env_vars, read_only_overrides, is_enabled) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          RETURNING id, name, description, transport, \
-         command, args, url, env_vars, is_enabled, created_at",
+         command, args, url, env_vars, read_only_overrides, is_enabled, created_at",
     )
     .bind(&id)
     .bind(name)
@@ -44,6 +75,7 @@ pub async fn create_mcp_server(
     .bind(args)
     .bind(url)
     .bind(env_vars)
+    .bind(read_only_overrides)
     .bind(is_enabled)
     .fetch_one(pool)
     .await
@@ -52,7 +84,7 @@ pub async fn create_mcp_server(
 pub async fn list_mcp_servers(pool: &SqlitePool) -> Result<Vec<McpServer>, sqlx::Error> {
     sqlx::query_as::<_, McpServer>(
         "SELECT id, name, description, transport, \
-         command, args, url, env_vars, is_enabled, created_at \
+         command, args, url, env_vars, read_only_overrides, is_enabled, created_at \
          FROM mcp_servers ORDER BY name ASC",
     )
     .fetch_all(pool)
@@ -62,7 +94,7 @@ pub async fn list_mcp_servers(pool: &SqlitePool) -> Result<Vec<McpServer>, sqlx:
 pub async fn list_enabled_mcp_servers(pool: &SqlitePool) -> Result<Vec<McpServer>, sqlx::Error> {
     sqlx::query_as::<_, McpServer>(
         "SELECT id, name, description, transport, \
-         command, args, url, env_vars, is_enabled, created_at \
+         command, args, url, env_vars, read_only_overrides, is_enabled, created_at \
          FROM mcp_servers WHERE is_enabled = 1 \
          ORDER BY name ASC",
     )
@@ -70,13 +102,10 @@ pub async fn list_enabled_mcp_servers(pool: &SqlitePool) -> Result<Vec<McpServer
     .await
 }
 
-pub async fn get_mcp_server(
-    pool: &SqlitePool,
-    id: &str,
-) -> Result<Option<McpServer>, sqlx::Error> {
+pub async fn get_mcp_server(pool: &SqlitePool, id: &str) -> Result<Option<McpServer>, sqlx::Error> {
     sqlx::query_as::<_, McpServer>(
         "SELECT id, name, description, transport, \
-         command, args, url, env_vars, is_enabled, created_at \
+         command, args, url, env_vars, read_only_overrides, is_enabled, created_at \
          FROM mcp_servers WHERE id = ?",
     )
     .bind(id)
@@ -84,6 +113,8 @@ pub async fn get_mcp_server(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub async fn update_mcp_server(
     pool: &SqlitePool,
     id: &str,
@@ -96,13 +127,43 @@ pub async fn update_mcp_server(
     env_vars: Option<&str>,
     is_enabled: bool,
 ) -> Result<Option<McpServer>, sqlx::Error> {
+    update_mcp_server_with_overrides(
+        pool,
+        id,
+        name,
+        description,
+        transport,
+        command,
+        args,
+        url,
+        env_vars,
+        None,
+        is_enabled,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_mcp_server_with_overrides(
+    pool: &SqlitePool,
+    id: &str,
+    name: &str,
+    description: Option<&str>,
+    transport: &str,
+    command: Option<&str>,
+    args: Option<&str>,
+    url: Option<&str>,
+    env_vars: Option<&str>,
+    read_only_overrides: Option<&str>,
+    is_enabled: bool,
+) -> Result<Option<McpServer>, sqlx::Error> {
     sqlx::query_as::<_, McpServer>(
         "UPDATE mcp_servers SET name = ?, description = ?, \
          transport = ?, command = ?, args = ?, url = ?, \
-         env_vars = ?, is_enabled = ? \
+         env_vars = ?, read_only_overrides = ?, is_enabled = ? \
          WHERE id = ? \
          RETURNING id, name, description, transport, \
-         command, args, url, env_vars, is_enabled, created_at",
+         command, args, url, env_vars, read_only_overrides, is_enabled, created_at",
     )
     .bind(name)
     .bind(description)
@@ -111,6 +172,7 @@ pub async fn update_mcp_server(
     .bind(args)
     .bind(url)
     .bind(env_vars)
+    .bind(read_only_overrides)
     .bind(is_enabled)
     .bind(id)
     .fetch_optional(pool)
@@ -132,12 +194,10 @@ pub async fn set_conversation_mcp_servers(
     server_ids: &[String],
 ) -> Result<(), sqlx::Error> {
     // Delete existing associations
-    sqlx::query(
-        "DELETE FROM conversation_mcp_servers WHERE conversation_id = ?",
-    )
-    .bind(conversation_id)
-    .execute(pool)
-    .await?;
+    sqlx::query("DELETE FROM conversation_mcp_servers WHERE conversation_id = ?")
+        .bind(conversation_id)
+        .execute(pool)
+        .await?;
 
     // Insert new associations
     for server_id in server_ids {
@@ -160,7 +220,7 @@ pub async fn get_conversation_mcp_servers(
 ) -> Result<Vec<McpServer>, sqlx::Error> {
     sqlx::query_as::<_, McpServer>(
         "SELECT s.id, s.name, s.description, s.transport, \
-         s.command, s.args, s.url, s.env_vars, s.is_enabled, s.created_at \
+         s.command, s.args, s.url, s.env_vars, s.read_only_overrides, s.is_enabled, s.created_at \
          FROM mcp_servers s \
          INNER JOIN conversation_mcp_servers cms \
          ON s.id = cms.mcp_server_id \
@@ -175,8 +235,8 @@ pub async fn get_conversation_mcp_servers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::init_db;
     use crate::db::conversations::create_conversation;
+    use crate::db::init_db;
     use crate::db::users::create_user;
 
     async fn setup() -> SqlitePool {
@@ -213,8 +273,22 @@ mod tests {
     #[tokio::test]
     async fn test_list_mcp_servers() {
         let pool = setup().await;
-        create_mcp_server(&pool, "alpha", None, "stdio", None, None, None, None, true).await.unwrap();
-        create_mcp_server(&pool, "beta", None, "sse", None, None, Some("http://localhost"), None, false).await.unwrap();
+        create_mcp_server(&pool, "alpha", None, "stdio", None, None, None, None, true)
+            .await
+            .unwrap();
+        create_mcp_server(
+            &pool,
+            "beta",
+            None,
+            "sse",
+            None,
+            None,
+            Some("http://localhost"),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         let all = list_mcp_servers(&pool).await.unwrap();
         assert_eq!(all.len(), 2);
         // Should be ordered by name ASC
@@ -225,8 +299,32 @@ mod tests {
     #[tokio::test]
     async fn test_list_enabled_mcp_servers() {
         let pool = setup().await;
-        create_mcp_server(&pool, "enabled-one", None, "stdio", None, None, None, None, true).await.unwrap();
-        create_mcp_server(&pool, "disabled-one", None, "stdio", None, None, None, None, false).await.unwrap();
+        create_mcp_server(
+            &pool,
+            "enabled-one",
+            None,
+            "stdio",
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        create_mcp_server(
+            &pool,
+            "disabled-one",
+            None,
+            "stdio",
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         let enabled = list_enabled_mcp_servers(&pool).await.unwrap();
         assert_eq!(enabled.len(), 1);
         assert_eq!(enabled[0].name, "enabled-one");
@@ -267,7 +365,15 @@ mod tests {
     async fn test_delete_mcp_server() {
         let pool = setup().await;
         let server = create_mcp_server(
-            &pool, "to-delete", None, "stdio", None, None, None, None, true,
+            &pool,
+            "to-delete",
+            None,
+            "stdio",
+            None,
+            None,
+            None,
+            None,
+            true,
         )
         .await
         .unwrap();
@@ -284,25 +390,62 @@ mod tests {
     async fn test_conversation_mcp_servers() {
         let pool = setup().await;
         // Create a user and conversation for the foreign key
-        let user = create_user(&pool, "testuser", "test@example.com", "hash").await.unwrap();
-        let conv = create_conversation(&pool, &user.id, "Test Conv", None, None, None, false, None, None).await.unwrap();
+        let user = create_user(&pool, "testuser", "test@example.com", "hash")
+            .await
+            .unwrap();
+        let conv = create_conversation(
+            &pool,
+            &user.id,
+            "Test Conv",
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
-        let s1 = create_mcp_server(&pool, "server-a", None, "stdio", None, None, None, None, true).await.unwrap();
-        let s2 = create_mcp_server(&pool, "server-b", None, "sse", None, None, Some("http://b"), None, true).await.unwrap();
+        let s1 = create_mcp_server(
+            &pool, "server-a", None, "stdio", None, None, None, None, true,
+        )
+        .await
+        .unwrap();
+        let s2 = create_mcp_server(
+            &pool,
+            "server-b",
+            None,
+            "sse",
+            None,
+            None,
+            Some("http://b"),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
 
         // Associate both servers with the conversation
-        set_conversation_mcp_servers(&pool, &conv.id, &[s1.id.clone(), s2.id.clone()]).await.unwrap();
+        set_conversation_mcp_servers(&pool, &conv.id, &[s1.id.clone(), s2.id.clone()])
+            .await
+            .unwrap();
         let servers = get_conversation_mcp_servers(&pool, &conv.id).await.unwrap();
         assert_eq!(servers.len(), 2);
 
         // Replace with only one server
-        set_conversation_mcp_servers(&pool, &conv.id, &[s1.id.clone()]).await.unwrap();
+        set_conversation_mcp_servers(&pool, &conv.id, std::slice::from_ref(&s1.id))
+            .await
+            .unwrap();
         let servers = get_conversation_mcp_servers(&pool, &conv.id).await.unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "server-a");
 
         // Clear all associations
-        set_conversation_mcp_servers(&pool, &conv.id, &[]).await.unwrap();
+        set_conversation_mcp_servers(&pool, &conv.id, &[])
+            .await
+            .unwrap();
         let servers = get_conversation_mcp_servers(&pool, &conv.id).await.unwrap();
         assert_eq!(servers.len(), 0);
     }

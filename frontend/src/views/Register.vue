@@ -2,25 +2,25 @@
   <div class="auth-container">
     <el-card class="auth-card">
       <template #header>
-        <h2>Claude Chat</h2>
+        <h2>{{ t('auth.title') }}</h2>
       </template>
       <el-form ref="formRef" :model="form" :rules="rules" @submit.prevent="handleRegister" label-position="top">
-        <el-form-item label="Username" prop="username">
-          <el-input v-model="form.username" placeholder="Username" />
+        <el-form-item :label="t('auth.username')" prop="username">
+          <el-input v-model="form.username" :placeholder="t('auth.username')" />
         </el-form-item>
-        <el-form-item label="Email" prop="email">
-          <el-input v-model="form.email" type="email" placeholder="Email" />
+        <el-form-item :label="t('auth.email')" prop="email">
+          <el-input v-model="form.email" type="email" :placeholder="t('auth.email')" />
         </el-form-item>
-        <el-form-item label="Password" prop="password">
-          <el-input v-model="form.password" type="password" placeholder="Password" show-password />
+        <el-form-item :label="t('auth.password')" prop="password">
+          <el-input v-model="form.password" type="password" :placeholder="t('auth.password')" show-password />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" native-type="submit" :loading="loading" style="width: 100%">
-            Register
+            {{ t('auth.register') }}
           </el-button>
         </el-form-item>
         <p style="text-align: center">
-          Already have an account? <router-link to="/login">Login</router-link>
+          {{ t('auth.hasAccount') }} <router-link to="/login">{{ t('auth.login') }}</router-link>
         </p>
       </el-form>
     </el-card>
@@ -28,11 +28,12 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { useAuthStore } from '../stores/auth'
+import { t } from '../i18n'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -40,17 +41,17 @@ const formRef = ref<FormInstance>()
 const form = reactive({ username: '', email: '', password: '' })
 const loading = ref(false)
 
-const rules = reactive<FormRules>({
-  username: [{ required: true, message: 'Username is required', trigger: 'blur' }],
+const rules = computed<FormRules>(() => ({
+  username: [{ required: true, message: t('auth.validation.usernameRequired'), trigger: 'blur' }],
   email: [
-    { required: true, message: 'Email is required', trigger: 'blur' },
-    { type: 'email', message: 'Please enter a valid email', trigger: 'blur' },
+    { required: true, message: t('auth.validation.emailRequired'), trigger: 'blur' },
+    { type: 'email', message: t('auth.validation.emailInvalid'), trigger: 'blur' },
   ],
   password: [
-    { required: true, message: 'Password is required', trigger: 'blur' },
-    { min: 6, message: 'Password must be at least 6 characters', trigger: 'blur' },
+    { required: true, message: t('auth.validation.passwordRequired'), trigger: 'blur' },
+    { min: 8, message: t('auth.validation.passwordMin'), trigger: 'blur' },
   ],
-})
+}))
 
 async function handleRegister() {
   if (!formRef.value) return
@@ -62,7 +63,7 @@ async function handleRegister() {
     router.push('/')
   } catch (err: unknown) {
     const error = err as { response?: { data?: { message?: string } } }
-    ElMessage.error(error.response?.data?.message || 'Registration failed')
+    ElMessage.error(error.response?.data?.message || t('auth.messages.registrationFailed'))
   } finally {
     loading.value = false
   }

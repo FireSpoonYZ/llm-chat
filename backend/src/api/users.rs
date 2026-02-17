@@ -1,8 +1,8 @@
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     routing::{delete, get},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -33,7 +33,8 @@ async fn get_profile(
     State(state): State<Arc<AppState>>,
     auth: AuthUser,
 ) -> Result<Json<ProfileResponse>, AppError> {
-    let user = db::users::get_user_by_id(&state.db, &auth.user_id).await?
+    let user = db::users::get_user_by_id(&state.db, &auth.user_id)
+        .await?
         .ok_or(AppError::NotFound)?;
 
     Ok(Json(ProfileResponse {
@@ -113,24 +114,36 @@ async fn upsert_provider(
     auth: AuthUser,
     Json(req): Json<UpsertProviderRequest>,
 ) -> Result<Json<ProviderResponse>, AppError> {
-    req.validate().map_err(|e| AppError::BadRequest(e.to_string()))?;
+    req.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     // If editing and keeping existing key, look up the existing encrypted key
     let encrypted_key = if req.api_key == "__KEEP_EXISTING__" {
         // Find existing provider by name to reuse its encrypted key
-        let existing = db::providers::list_providers(&state.db, &auth.user_id).await?
+        let existing = db::providers::list_providers(&state.db, &auth.user_id)
+            .await?
             .into_iter()
             .find(|p| p.name.as_deref() == Some(req.name.as_str()));
         match existing {
             Some(p) => p.api_key_encrypted,
-            None => return Err(AppError::BadRequest("API key is required for new providers".into())),
+            None => {
+                return Err(AppError::BadRequest(
+                    "API key is required for new providers".into(),
+                ));
+            }
         }
     } else {
         crypto::encrypt(&req.api_key, &state.config.encryption_key)?
     };
 
-    let models_json = req.models.as_ref().and_then(|m| serde_json::to_string(m).ok());
-    let image_models_json = req.image_models.as_ref().and_then(|m| serde_json::to_string(m).ok());
+    let models_json = req
+        .models
+        .as_ref()
+        .and_then(|m| serde_json::to_string(m).ok());
+    let image_models_json = req
+        .image_models
+        .as_ref()
+        .and_then(|m| serde_json::to_string(m).ok());
     let first_model = req.models.as_ref().and_then(|m| m.first().cloned());
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -146,7 +159,8 @@ async fn upsert_provider(
         models_json.as_deref(),
         Some(&req.name),
         image_models_json.as_deref(),
-    ).await?;
+    )
+    .await?;
 
     Ok(Json(ProviderResponse {
         id: provider.id,

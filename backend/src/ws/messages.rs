@@ -34,7 +34,8 @@ pub enum ContainerMessage {
         token_usage: Option<serde_json::Value>,
     },
     Error,
-    /// Forwarded types: assistant_delta, thinking_delta, tool_call, tool_result.
+    /// Forwarded types: assistant_delta, thinking_delta, tool_call, tool_result,
+    /// task_trace_delta, and other streaming passthrough events.
     /// These are handled as raw JSON to preserve all fields during forwarding.
     #[serde(other)]
     Forward,
@@ -48,28 +49,36 @@ mod tests {
     fn deserialize_join_conversation() {
         let json = r#"{"type": "join_conversation", "conversation_id": "conv-1"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
-        assert!(matches!(msg, ClientMessage::JoinConversation { conversation_id } if conversation_id == "conv-1"));
+        assert!(
+            matches!(msg, ClientMessage::JoinConversation { conversation_id } if conversation_id == "conv-1")
+        );
     }
 
     #[test]
     fn deserialize_user_message() {
         let json = r#"{"type": "user_message", "content": "hello"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
-        assert!(matches!(msg, ClientMessage::UserMessage { content, attachments } if content == "hello" && attachments.is_empty()));
+        assert!(
+            matches!(msg, ClientMessage::UserMessage { content, attachments } if content == "hello" && attachments.is_empty())
+        );
     }
 
     #[test]
     fn deserialize_user_message_with_attachments() {
         let json = r#"{"type": "user_message", "content": "look at this", "attachments": ["/uploads/img.png"]}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
-        assert!(matches!(msg, ClientMessage::UserMessage { content, attachments } if content == "look at this" && attachments.len() == 1));
+        assert!(
+            matches!(msg, ClientMessage::UserMessage { content, attachments } if content == "look at this" && attachments.len() == 1)
+        );
     }
 
     #[test]
     fn deserialize_edit_message() {
         let json = r#"{"type": "edit_message", "message_id": "msg-1", "content": "edited"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
-        assert!(matches!(msg, ClientMessage::EditMessage { message_id, content } if message_id == "msg-1" && content == "edited"));
+        assert!(
+            matches!(msg, ClientMessage::EditMessage { message_id, content } if message_id == "msg-1" && content == "edited")
+        );
     }
 
     #[test]
@@ -102,7 +111,8 @@ mod tests {
 
     #[test]
     fn deserialize_container_complete() {
-        let json = r#"{"type": "complete", "content": "done", "tool_calls": null, "token_usage": null}"#;
+        let json =
+            r#"{"type": "complete", "content": "done", "tool_calls": null, "token_usage": null}"#;
         let msg: ContainerMessage = serde_json::from_str(json).unwrap();
         assert!(matches!(msg, ContainerMessage::Complete { content: Some(c), .. } if c == "done"));
     }

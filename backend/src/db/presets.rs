@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use sqlx::prelude::FromRow;
 use sqlx::SqlitePool;
+use sqlx::prelude::FromRow;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct UserPreset {
@@ -14,7 +14,10 @@ pub struct UserPreset {
     pub updated_at: String,
 }
 
-pub async fn list_presets(pool: &SqlitePool, user_id: &str) -> Result<Vec<UserPreset>, sqlx::Error> {
+pub async fn list_presets(
+    pool: &SqlitePool,
+    user_id: &str,
+) -> Result<Vec<UserPreset>, sqlx::Error> {
     sqlx::query_as::<_, UserPreset>(
         "SELECT id, user_id, name, description, content, is_default, \
          created_at, updated_at FROM user_presets \
@@ -26,12 +29,12 @@ pub async fn list_presets(pool: &SqlitePool, user_id: &str) -> Result<Vec<UserPr
 }
 
 pub async fn count_presets(pool: &SqlitePool, user_id: &str) -> Result<i64, sqlx::Error> {
-    Ok(sqlx::query_scalar::<_, i32>(
-        "SELECT COUNT(*) FROM user_presets WHERE user_id = ?",
+    Ok(
+        sqlx::query_scalar::<_, i32>("SELECT COUNT(*) FROM user_presets WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await? as i64,
     )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await? as i64)
 }
 
 pub async fn create_preset(
@@ -101,7 +104,7 @@ pub async fn update_preset(
             .await?;
     }
 
-    Ok(sqlx::query_as::<_, UserPreset>(
+    sqlx::query_as::<_, UserPreset>(
         "UPDATE user_presets SET name = ?, description = ?, content = ?, \
          is_default = ?, updated_at = datetime('now') \
          WHERE id = ? AND user_id = ? \
@@ -114,10 +117,14 @@ pub async fn update_preset(
     .bind(id)
     .bind(user_id)
     .fetch_optional(pool)
-    .await?)
+    .await
 }
 
-pub async fn delete_preset(pool: &SqlitePool, id: &str, user_id: &str) -> Result<bool, sqlx::Error> {
+pub async fn delete_preset(
+    pool: &SqlitePool,
+    id: &str,
+    user_id: &str,
+) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM user_presets WHERE id = ? AND user_id = ?")
         .bind(id)
         .bind(user_id)
@@ -133,8 +140,15 @@ pub async fn seed_builtin_presets(pool: &SqlitePool, user_id: &str) -> Result<()
     let builtins = crate::prompts::builtin_presets();
     for preset in &builtins {
         let is_default = preset.id == "default";
-        create_preset(pool, user_id, preset.name, preset.description, preset.content, is_default)
-            .await?;
+        create_preset(
+            pool,
+            user_id,
+            preset.name,
+            preset.description,
+            preset.content,
+            is_default,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -147,14 +161,18 @@ mod tests {
 
     async fn setup() -> (SqlitePool, String) {
         let pool = init_db("sqlite::memory:").await;
-        let user = create_user(&pool, "testuser", "test@example.com", "hash").await.unwrap();
+        let user = create_user(&pool, "testuser", "test@example.com", "hash")
+            .await
+            .unwrap();
         (pool, user.id)
     }
 
     #[tokio::test]
     async fn test_create_and_list_presets() {
         let (pool, uid) = setup().await;
-        create_preset(&pool, &uid, "Test", "desc", "content", false).await.unwrap();
+        create_preset(&pool, &uid, "Test", "desc", "content", false)
+            .await
+            .unwrap();
         let all = list_presets(&pool, &uid).await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].name, "Test");
@@ -174,8 +192,12 @@ mod tests {
     #[tokio::test]
     async fn test_update_preset() {
         let (pool, uid) = setup().await;
-        let p = create_preset(&pool, &uid, "Old", "old desc", "old", false).await.unwrap();
-        let updated = update_preset(&pool, &p.id, &uid, Some("New"), None, Some("new"), None).await.unwrap();
+        let p = create_preset(&pool, &uid, "Old", "old desc", "old", false)
+            .await
+            .unwrap();
+        let updated = update_preset(&pool, &p.id, &uid, Some("New"), None, Some("new"), None)
+            .await
+            .unwrap();
         assert!(updated.is_some());
         let u = updated.unwrap();
         assert_eq!(u.name, "New");
@@ -186,7 +208,9 @@ mod tests {
     #[tokio::test]
     async fn test_delete_preset() {
         let (pool, uid) = setup().await;
-        let p = create_preset(&pool, &uid, "Del", "", "", false).await.unwrap();
+        let p = create_preset(&pool, &uid, "Del", "", "", false)
+            .await
+            .unwrap();
         assert!(delete_preset(&pool, &p.id, &uid).await.unwrap());
         assert!(!delete_preset(&pool, &p.id, &uid).await.unwrap());
     }
@@ -209,7 +233,9 @@ mod tests {
     async fn test_count_presets() {
         let (pool, uid) = setup().await;
         assert_eq!(count_presets(&pool, &uid).await.unwrap(), 0);
-        create_preset(&pool, &uid, "A", "", "", false).await.unwrap();
+        create_preset(&pool, &uid, "A", "", "", false)
+            .await
+            .unwrap();
         assert_eq!(count_presets(&pool, &uid).await.unwrap(), 1);
     }
 
@@ -217,12 +243,17 @@ mod tests {
     async fn test_update_preset_sets_default_clears_others() {
         let (pool, uid) = setup().await;
         let a = create_preset(&pool, &uid, "A", "", "", true).await.unwrap();
-        let b = create_preset(&pool, &uid, "B", "", "", false).await.unwrap();
+        let b = create_preset(&pool, &uid, "B", "", "", false)
+            .await
+            .unwrap();
         assert!(a.is_default);
         assert!(!b.is_default);
 
         // Update B to be default — should clear A
-        let updated_b = update_preset(&pool, &b.id, &uid, None, None, None, Some(true)).await.unwrap().unwrap();
+        let updated_b = update_preset(&pool, &b.id, &uid, None, None, None, Some(true))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(updated_b.is_default);
         let all = list_presets(&pool, &uid).await.unwrap();
         let a_now = all.iter().find(|p| p.name == "A").unwrap();
@@ -232,15 +263,21 @@ mod tests {
     #[tokio::test]
     async fn test_update_nonexistent_preset_returns_none() {
         let (pool, uid) = setup().await;
-        let result = update_preset(&pool, "nonexistent-id", &uid, Some("X"), None, None, None).await.unwrap();
+        let result = update_preset(&pool, "nonexistent-id", &uid, Some("X"), None, None, None)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn test_delete_other_users_preset_returns_false() {
         let (pool, uid) = setup().await;
-        let other = crate::db::users::create_user(&pool, "other", "other@example.com", "hash2").await.unwrap();
-        let p = create_preset(&pool, &uid, "Mine", "", "", false).await.unwrap();
+        let other = crate::db::users::create_user(&pool, "other", "other@example.com", "hash2")
+            .await
+            .unwrap();
+        let p = create_preset(&pool, &uid, "Mine", "", "", false)
+            .await
+            .unwrap();
         // Other user cannot delete this preset
         assert!(!delete_preset(&pool, &p.id, &other.id).await.unwrap());
         // Original user can
@@ -250,9 +287,15 @@ mod tests {
     #[tokio::test]
     async fn test_preset_isolation_between_users() {
         let (pool, uid) = setup().await;
-        let other = crate::db::users::create_user(&pool, "other", "other@example.com", "hash2").await.unwrap();
-        create_preset(&pool, &uid, "UserA Preset", "", "", false).await.unwrap();
-        create_preset(&pool, &other.id, "UserB Preset", "", "", false).await.unwrap();
+        let other = crate::db::users::create_user(&pool, "other", "other@example.com", "hash2")
+            .await
+            .unwrap();
+        create_preset(&pool, &uid, "UserA Preset", "", "", false)
+            .await
+            .unwrap();
+        create_preset(&pool, &other.id, "UserB Preset", "", "", false)
+            .await
+            .unwrap();
         let a_presets = list_presets(&pool, &uid).await.unwrap();
         let b_presets = list_presets(&pool, &other.id).await.unwrap();
         assert_eq!(a_presets.len(), 1);
@@ -265,7 +308,9 @@ mod tests {
     async fn test_seed_does_not_overwrite_existing() {
         let (pool, uid) = setup().await;
         // Create a custom preset first
-        create_preset(&pool, &uid, "Custom", "my desc", "my content", true).await.unwrap();
+        create_preset(&pool, &uid, "Custom", "my desc", "my content", true)
+            .await
+            .unwrap();
         // Seeding should be a no-op since count > 0
         seed_builtin_presets(&pool, &uid).await.unwrap();
         let all = list_presets(&pool, &uid).await.unwrap();
@@ -276,9 +321,14 @@ mod tests {
     #[tokio::test]
     async fn test_update_preset_partial_fields() {
         let (pool, uid) = setup().await;
-        let p = create_preset(&pool, &uid, "Original", "desc", "content", false).await.unwrap();
+        let p = create_preset(&pool, &uid, "Original", "desc", "content", false)
+            .await
+            .unwrap();
         // Update only name, leave everything else
-        let updated = update_preset(&pool, &p.id, &uid, Some("Renamed"), None, None, None).await.unwrap().unwrap();
+        let updated = update_preset(&pool, &p.id, &uid, Some("Renamed"), None, None, None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.name, "Renamed");
         assert_eq!(updated.description, "desc");
         assert_eq!(updated.content, "content");

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use sqlx::prelude::FromRow;
 use sqlx::SqlitePool;
+use sqlx::prelude::FromRow;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RefreshToken {
@@ -32,6 +32,7 @@ pub async fn create_refresh_token(
     .await
 }
 
+#[cfg(test)]
 pub async fn get_refresh_token_by_hash(
     pool: &SqlitePool,
     token_hash: &str,
@@ -45,6 +46,7 @@ pub async fn get_refresh_token_by_hash(
     .await
 }
 
+#[cfg(test)]
 pub async fn delete_refresh_token(pool: &SqlitePool, id: &str) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM refresh_tokens WHERE id = ?")
         .bind(id)
@@ -54,7 +56,11 @@ pub async fn delete_refresh_token(pool: &SqlitePool, id: &str) -> Result<bool, s
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn delete_user_refresh_tokens(pool: &SqlitePool, user_id: &str) -> Result<(), sqlx::Error> {
+#[cfg(test)]
+pub async fn delete_user_refresh_tokens(
+    pool: &SqlitePool,
+    user_id: &str,
+) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM refresh_tokens WHERE user_id = ?")
         .bind(user_id)
         .execute(pool)
@@ -63,7 +69,10 @@ pub async fn delete_user_refresh_tokens(pool: &SqlitePool, user_id: &str) -> Res
     Ok(())
 }
 
-pub async fn delete_refresh_token_by_hash(pool: &SqlitePool, token_hash: &str) -> Result<bool, sqlx::Error> {
+pub async fn delete_refresh_token_by_hash(
+    pool: &SqlitePool,
+    token_hash: &str,
+) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM refresh_tokens WHERE token_hash = ?")
         .bind(token_hash)
         .execute(pool)
@@ -80,18 +89,18 @@ mod tests {
 
     async fn setup() -> (SqlitePool, String) {
         let pool = init_db("sqlite::memory:").await;
-        let user = create_user(&pool, "testuser", "test@example.com", "hash").await.unwrap();
+        let user = create_user(&pool, "testuser", "test@example.com", "hash")
+            .await
+            .unwrap();
         (pool, user.id)
     }
 
     #[tokio::test]
     async fn test_create_refresh_token() {
         let (pool, user_id) = setup().await;
-        let token = create_refresh_token(
-            &pool, &user_id, "hash_abc", "2099-12-31T23:59:59",
-        )
-        .await
-        .unwrap();
+        let token = create_refresh_token(&pool, &user_id, "hash_abc", "2099-12-31T23:59:59")
+            .await
+            .unwrap();
         assert_eq!(token.user_id, user_id);
         assert_eq!(token.token_hash, "hash_abc");
         assert_eq!(token.expires_at, "2099-12-31T23:59:59");
@@ -102,23 +111,25 @@ mod tests {
     #[tokio::test]
     async fn test_get_refresh_token_by_hash() {
         let (pool, user_id) = setup().await;
-        create_refresh_token(&pool, &user_id, "hash_xyz", "2099-12-31T23:59:59").await.unwrap();
+        create_refresh_token(&pool, &user_id, "hash_xyz", "2099-12-31T23:59:59")
+            .await
+            .unwrap();
         let fetched = get_refresh_token_by_hash(&pool, "hash_xyz").await.unwrap();
         assert!(fetched.is_some());
         assert_eq!(fetched.unwrap().token_hash, "hash_xyz");
         // Non-existent hash
-        let missing = get_refresh_token_by_hash(&pool, "no_such_hash").await.unwrap();
+        let missing = get_refresh_token_by_hash(&pool, "no_such_hash")
+            .await
+            .unwrap();
         assert!(missing.is_none());
     }
 
     #[tokio::test]
     async fn test_delete_refresh_token() {
         let (pool, user_id) = setup().await;
-        let token = create_refresh_token(
-            &pool, &user_id, "hash_del", "2099-12-31T23:59:59",
-        )
-        .await
-        .unwrap();
+        let token = create_refresh_token(&pool, &user_id, "hash_del", "2099-12-31T23:59:59")
+            .await
+            .unwrap();
         let deleted = delete_refresh_token(&pool, &token.id).await.unwrap();
         assert!(deleted);
         // Should be gone
@@ -132,30 +143,59 @@ mod tests {
     #[tokio::test]
     async fn test_delete_refresh_token_by_hash() {
         let (pool, user_id) = setup().await;
-        create_refresh_token(&pool, &user_id, "hash_bh", "2099-12-31T23:59:59").await.unwrap();
-        let deleted = delete_refresh_token_by_hash(&pool, "hash_bh").await.unwrap();
+        create_refresh_token(&pool, &user_id, "hash_bh", "2099-12-31T23:59:59")
+            .await
+            .unwrap();
+        let deleted = delete_refresh_token_by_hash(&pool, "hash_bh")
+            .await
+            .unwrap();
         assert!(deleted);
         let fetched = get_refresh_token_by_hash(&pool, "hash_bh").await.unwrap();
         assert!(fetched.is_none());
         // Deleting again should return false
-        let deleted_again = delete_refresh_token_by_hash(&pool, "hash_bh").await.unwrap();
+        let deleted_again = delete_refresh_token_by_hash(&pool, "hash_bh")
+            .await
+            .unwrap();
         assert!(!deleted_again);
     }
 
     #[tokio::test]
     async fn test_delete_user_refresh_tokens() {
         let (pool, user_id) = setup().await;
-        create_refresh_token(&pool, &user_id, "hash_1", "2099-12-31T23:59:59").await.unwrap();
-        create_refresh_token(&pool, &user_id, "hash_2", "2099-12-31T23:59:59").await.unwrap();
+        create_refresh_token(&pool, &user_id, "hash_1", "2099-12-31T23:59:59")
+            .await
+            .unwrap();
+        create_refresh_token(&pool, &user_id, "hash_2", "2099-12-31T23:59:59")
+            .await
+            .unwrap();
         // Create a token for a different user to ensure it is not deleted
-        let other = create_user(&pool, "other", "other@example.com", "hash").await.unwrap();
-        create_refresh_token(&pool, &other.id, "hash_other", "2099-12-31T23:59:59").await.unwrap();
+        let other = create_user(&pool, "other", "other@example.com", "hash")
+            .await
+            .unwrap();
+        create_refresh_token(&pool, &other.id, "hash_other", "2099-12-31T23:59:59")
+            .await
+            .unwrap();
 
         delete_user_refresh_tokens(&pool, &user_id).await.unwrap();
 
-        assert!(get_refresh_token_by_hash(&pool, "hash_1").await.unwrap().is_none());
-        assert!(get_refresh_token_by_hash(&pool, "hash_2").await.unwrap().is_none());
+        assert!(
+            get_refresh_token_by_hash(&pool, "hash_1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_refresh_token_by_hash(&pool, "hash_2")
+                .await
+                .unwrap()
+                .is_none()
+        );
         // Other user's token should still exist
-        assert!(get_refresh_token_by_hash(&pool, "hash_other").await.unwrap().is_some());
+        assert!(
+            get_refresh_token_by_hash(&pool, "hash_other")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 }

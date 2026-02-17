@@ -13,6 +13,7 @@ pub struct ContainerRegistry {
 pub struct ContainerInfo {
     pub container_id: String,
     pub conversation_id: String,
+    #[allow(dead_code)]
     pub user_id: String,
     pub last_activity: std::time::Instant,
 }
@@ -22,12 +23,7 @@ impl ContainerRegistry {
         Arc::new(Self::default())
     }
 
-    pub async fn register(
-        &self,
-        conversation_id: &str,
-        container_id: &str,
-        user_id: &str,
-    ) {
+    pub async fn register(&self, conversation_id: &str, container_id: &str, user_id: &str) {
         let mut containers = self.containers.write().await;
         containers.insert(
             conversation_id.to_string(),

@@ -12,6 +12,7 @@ services:
       - DATABASE_URL=sqlite:/app/data/claude-chat.db?mode=rwc
       - PORT=3000
       - INTERNAL_WS_PORT=3001
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
       - DOCKER_NETWORK=llm-chat_default
       - HOST_DATA_DIR=${PWD}/data
       - FILESERVER_URL=http://fileserver:5000

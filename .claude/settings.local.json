@@ -77,7 +77,15 @@
       "Bash(git diff:*)",
       "Bash(docker system df:*)",
       "Bash(~/.local/bin/uv run --project /home/firespoon/llm-chat/agent pytest:*)",
-      "Bash(uv run python:*)"
+      "Bash(uv run python:*)",
+      "Bash(PATH=\"$HOME/.local/bin:$PATH\" uv run pytest:*)",
+      "Bash(PATH=\"$HOME/.local/bin:$PATH\" uv run python:*)",
+      "Bash(PATH=\"$HOME/.local/bin:$PATH\" uv run python -c \"\nimport httpx_sse\nimport inspect\n# Check how httpx_sse processes the byte stream\nsrc = inspect.getsource\\(httpx_sse\\)\n# Look for decode or text handling\nlines = src.split\\(''\\\\n''\\)\nfor i, line in enumerate\\(lines\\):\n    if ''decode'' in line.lower\\(\\) or ''text'' in line.lower\\(\\) or ''utf'' in line.lower\\(\\) or ''byte'' in line.lower\\(\\):\n        print\\(f''{i}: {line}''\\)\n\")",
+      "Bash(PATH=\"$HOME/.local/bin:$PATH\" uv run python -c \"\nimport httpx\nimport inspect\n# Find aiter_text method\nsrc = inspect.getsource\\(httpx.Response.aiter_text\\)\nprint\\(src\\)\n\")",
+      "Bash(gh api:*)",
+      "Bash(gh search repos:*)",
+      "WebFetch(domain:platform.openai.com)",
+      "WebFetch(domain:developers.openai.com)"
     ],
     "deny": [
       "WebSearch"

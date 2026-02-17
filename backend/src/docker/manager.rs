@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bollard::Docker;
 use bollard::container::{
-    Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions,
-    StopContainerOptions, NetworkingConfig,
+    Config, CreateContainerOptions, NetworkingConfig, RemoveContainerOptions,
+    StartContainerOptions, StopContainerOptions,
 };
 use bollard::models::{EndpointSettings, HostConfig};
-use bollard::Docker;
 
 use super::registry::ContainerRegistry;
 use crate::auth;
 use crate::config;
+use crate::ws::WsState;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DockerError {
@@ -64,14 +65,15 @@ impl DockerManager {
         }
 
         // Generate container token
-        let container_token =
-            auth::create_container_token(conversation_id, user_id, &self.config.jwt_secret, self.config.container_token_ttl_secs)?;
+        let container_token = auth::create_container_token(
+            conversation_id,
+            user_id,
+            &self.config.jwt_secret,
+            self.config.container_token_ttl_secs,
+        )?;
 
         let backend_ws_url = if self.config.docker_network.is_some() {
-            format!(
-                "ws://backend:{}/internal/ws",
-                self.config.internal_ws_port
-            )
+            format!("ws://backend:{}/internal/ws", self.config.internal_ws_port)
         } else {
             format!(
                 "ws://host.docker.internal:{}/internal/ws",
@@ -121,19 +123,17 @@ impl DockerManager {
                     None
                 },
                 memory: Some(512 * 1024 * 1024), // 512MB
-                nano_cpus: Some(1_000_000_000),   // 1 CPU
+                nano_cpus: Some(1_000_000_000),  // 1 CPU
                 ..Default::default()
             }),
-            networking_config: if let Some(ref network) = self.config.docker_network {
-                Some(NetworkingConfig {
+            networking_config: self.config.docker_network.as_ref().map(|network| {
+                NetworkingConfig {
                     endpoints_config: HashMap::from([(
                         network.clone(),
                         EndpointSettings::default(),
                     )]),
-                })
-            } else {
-                None
-            },
+                }
+            }),
             working_dir: Some("/workspace".to_string()),
             ..Default::default()
         };
@@ -182,10 +182,7 @@ impl DockerManager {
         // Stop container
         let _ = self
             .docker
-            .stop_container(
-                &info.container_id,
-                Some(StopContainerOptions { t: 10 }),
-            )
+            .stop_container(&info.container_id, Some(StopContainerOptions { t: 10 }))
             .await;
 
         // Remove container
@@ -209,8 +206,13 @@ impl DockerManager {
         Ok(())
     }
 
+    /// Refresh the last-activity timestamp for a conversation's container.
+    pub async fn touch_activity(&self, conversation_id: &str) {
+        self.registry.touch(conversation_id).await;
+    }
+
     /// Stop idle containers that have exceeded the timeout.
-    pub async fn cleanup_idle_containers(&self) {
+    pub async fn cleanup_idle_containers(&self, ws_state: &WsState) {
         let idle = self
             .registry
             .get_idle_containers(self.config.container_idle_timeout_secs)
@@ -222,11 +224,31 @@ impl DockerManager {
                 info.container_id,
                 info.conversation_id
             );
-            let _ = self.stop_container(&info.conversation_id).await;
+            // Remove from WsState AND registry before touching Docker, so any
+            // concurrent send_to_container returns false AND start_container
+            // creates a fresh container instead of returning the stale one.
+            ws_state.remove_container(&info.conversation_id).await;
+            self.registry.unregister(&info.conversation_id).await;
+
+            let _ = self
+                .docker
+                .stop_container(&info.container_id, Some(StopContainerOptions { t: 10 }))
+                .await;
+            let _ = self
+                .docker
+                .remove_container(
+                    &info.container_id,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
         }
     }
 
     /// List all running containers.
+    #[allow(dead_code)]
     pub async fn list_containers(&self) -> Vec<super::registry::ContainerInfo> {
         self.registry.list_all().await
     }
@@ -246,12 +268,84 @@ impl DockerManager {
 }
 
 /// Spawn a background task that periodically cleans up idle containers.
-pub fn spawn_idle_cleanup(manager: Arc<DockerManager>, interval_secs: u64) {
+pub fn spawn_idle_cleanup(manager: Arc<DockerManager>, ws_state: Arc<WsState>, interval_secs: u64) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         loop {
             interval.tick().await;
-            manager.cleanup_idle_containers().await;
+            manager.cleanup_idle_containers(&ws_state).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_touch_activity_updates_registry() {
+        let registry = ContainerRegistry::new();
+        registry.register("conv1", "container_abc", "user1").await;
+
+        let before = registry.get("conv1").await.unwrap().last_activity;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let config = config::Config::from_env();
+        let manager = DockerManager::new_for_test(config, registry.clone());
+        manager.touch_activity("conv1").await;
+
+        let after = registry.get("conv1").await.unwrap().last_activity;
+        assert!(after > before);
+    }
+
+    #[tokio::test]
+    async fn test_touch_activity_nonexistent_is_noop() {
+        let registry = ContainerRegistry::new();
+        let config = config::Config::from_env();
+        let manager = DockerManager::new_for_test(config, registry);
+        // Should not panic
+        manager.touch_activity("nonexistent").await;
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_idle_removes_ws_state_and_registry() {
+        let registry = ContainerRegistry::new();
+        registry.register("conv1", "c1", "user1").await;
+
+        let ws_state = WsState::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        ws_state.add_container("conv1", tx).await;
+
+        // Use 0-second timeout so everything is idle
+        let mut config = config::Config::from_env();
+        config.container_idle_timeout_secs = 0;
+        let manager = DockerManager::new_for_test(config, registry.clone());
+
+        manager.cleanup_idle_containers(&ws_state).await;
+
+        // Both registry and WsState should be cleaned up
+        assert!(registry.get("conv1").await.is_none());
+        assert!(!ws_state.send_to_container("conv1", "ping").await);
+    }
+
+    #[tokio::test]
+    async fn test_touch_activity_prevents_idle_cleanup() {
+        let registry = ContainerRegistry::new();
+        registry.register("conv1", "c1", "user1").await;
+
+        let ws_state = WsState::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        ws_state.add_container("conv1", tx).await;
+
+        let mut config = config::Config::from_env();
+        config.container_idle_timeout_secs = 999999;
+        let manager = DockerManager::new_for_test(config, registry.clone());
+
+        manager.touch_activity("conv1").await;
+        manager.cleanup_idle_containers(&ws_state).await;
+
+        // Container should still be registered (not idle)
+        assert!(registry.get("conv1").await.is_some());
+        assert!(ws_state.send_to_container("conv1", "ping").await);
+    }
 }

@@ -1,8 +1,8 @@
 import client from './client'
-import type { ProviderConfig, McpServer } from '../types'
+import type { ProviderConfig, McpServer, User } from '../types'
 
-export async function getProfile() {
-  const { data } = await client.get('/users/me')
+export async function getProfile(): Promise<User> {
+  const { data } = await client.get<User>('/users/me')
   return data
 }
 

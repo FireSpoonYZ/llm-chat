@@ -9,7 +9,7 @@ import math
 import os
 import re
 import time
-from typing import Optional, Type
+from typing import Any, Optional, Type
 
 import openai
 from google import genai
@@ -18,6 +18,7 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from ._paths import resolve_workspace_path
+from .result_schema import make_tool_error, make_tool_success
 
 # Regex to extract data URIs from chat completion content
 _DATA_URI_RE = re.compile(r"data:image/(\w+);base64,([A-Za-z0-9+/=]+)")
@@ -108,7 +109,7 @@ class ImageGenerationTool(BaseTool):
     endpoint_url: Optional[str] = None
     model: str = ""
 
-    def _run(self, **kwargs) -> str:
+    def _run(self, **kwargs) -> dict[str, Any]:
         raise NotImplementedError("Use async _arun for image generation.")
 
     async def _arun(
@@ -118,19 +119,51 @@ class ImageGenerationTool(BaseTool):
         quality: str = "auto",
         n: int = 1,
         reference_image: Optional[str] = None,
-    ) -> str:
+    ) -> dict[str, Any]:
         if not self.model:
-            raise ValueError("No model specified for image generation.")
-        ref_data = None
-        if reference_image:
-            ref_data = self._load_reference_image(reference_image)
-        provider = self.provider.lower()
-        if provider == "openai":
-            return await self._generate_openai(prompt, size, quality, n, ref_data)
-        elif provider == "google":
-            return await self._generate_google(prompt, size, n, ref_data)
-        else:
-            raise ValueError(f"Provider '{self.provider}' does not support image generation. Supported: openai, google.")
+            return make_tool_error(kind=self.name, error="No model specified for image generation")
+
+        try:
+            ref_data = None
+            if reference_image:
+                ref_data = self._load_reference_image(reference_image)
+
+            provider = self.provider.lower()
+            if provider == "openai":
+                images = await self._generate_openai(prompt, size, quality, n, ref_data)
+            elif provider == "google":
+                images = await self._generate_google(prompt, size, n, ref_data)
+            else:
+                return make_tool_error(
+                    kind=self.name,
+                    error=(
+                        f"Provider '{self.provider}' does not support image generation. "
+                        "Supported: openai, google"
+                    ),
+                )
+
+            if not images:
+                return make_tool_error(
+                    kind=self.name,
+                    error="No images were generated. The model may not support image generation",
+                )
+
+            text, media = self._save_images(images)
+            return make_tool_success(
+                kind=self.name,
+                text=text,
+                data={
+                    "prompt": prompt,
+                    "size": size,
+                    "quality": quality,
+                    "requested": n,
+                    "provider": provider,
+                    "media": media,
+                },
+                meta={"image_count": len(media)},
+            )
+        except Exception as exc:
+            return make_tool_error(kind=self.name, error=f"image generation failed: {exc}")
 
     def _load_reference_image(self, path: str) -> tuple[bytes, str]:
         """Load a reference image from the workspace and return (bytes, mime_type)."""
@@ -146,7 +179,7 @@ class ImageGenerationTool(BaseTool):
     async def _generate_openai(
         self, prompt: str, size: str, quality: str, n: int,
         ref_data: Optional[tuple[bytes, str]] = None,
-    ) -> str:
+    ) -> list[tuple[bytes, str]]:
         kwargs = {"api_key": self.api_key}
         if self.endpoint_url:
             kwargs["base_url"] = self.endpoint_url
@@ -160,7 +193,7 @@ class ImageGenerationTool(BaseTool):
         if ref_data:
             image_bytes, mime_type = ref_data
             b64 = base64.b64encode(image_bytes).decode()
-            message_content = [
+            message_content: str | list[dict[str, Any]] = [
                 {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
                 {"type": "text", "text": effective_prompt},
             ]
@@ -173,7 +206,7 @@ class ImageGenerationTool(BaseTool):
                 messages=[{"role": "user", "content": message_content}],
             )
             content = response.choices[0].message.content or ""
-            images = []
+            images: list[tuple[bytes, str]] = []
             for match in _DATA_URI_RE.finditer(content):
                 fmt, b64 = match.group(1), match.group(2)
                 ext = f".{fmt}" if fmt != "jpeg" else ".jpg"
@@ -181,20 +214,15 @@ class ImageGenerationTool(BaseTool):
             return images
 
         if n <= 1:
-            all_images = await _single_call()
-        else:
-            results = await asyncio.gather(*[_single_call() for _ in range(n)])
-            all_images = [img for batch in results for img in batch]
+            return await _single_call()
 
-        if not all_images:
-            return "No images were generated. The model may not support image generation."
-
-        return self._save_images(all_images)
+        results = await asyncio.gather(*[_single_call() for _ in range(n)])
+        return [img for batch in results for img in batch]
 
     async def _generate_google(
         self, prompt: str, size: str, n: int,
         ref_data: Optional[tuple[bytes, str]] = None,
-    ) -> str:
+    ) -> list[tuple[bytes, str]]:
         kwargs = {"api_key": self.api_key}
         if self.endpoint_url:
             kwargs["http_options"] = {"base_url": self.endpoint_url}
@@ -206,7 +234,7 @@ class ImageGenerationTool(BaseTool):
 
         if ref_data:
             image_bytes, mime_type = ref_data
-            contents = types.Content(
+            contents: str | types.Content = types.Content(
                 role="user",
                 parts=[
                     types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
@@ -228,7 +256,7 @@ class ImageGenerationTool(BaseTool):
                     ),
                 ),
             )
-            images = []
+            images: list[tuple[bytes, str]] = []
             candidates = response.candidates or []
             if not candidates or not candidates[0].content:
                 return images
@@ -239,21 +267,17 @@ class ImageGenerationTool(BaseTool):
             return images
 
         if n <= 1:
-            all_images = await _single_call()
-        else:
-            results = await asyncio.gather(*[_single_call() for _ in range(n)])
-            all_images = [img for batch in results for img in batch]
+            return await _single_call()
 
-        if not all_images:
-            return "No images were generated. The model may not support image generation."
+        results = await asyncio.gather(*[_single_call() for _ in range(n)])
+        return [img for batch in results for img in batch]
 
-        return self._save_images(all_images)
-
-    def _save_images(self, images: list[tuple[bytes, str]]) -> str:
+    def _save_images(self, images: list[tuple[bytes, str]]) -> tuple[str, list[dict[str, Any]]]:
         out_dir = os.path.join(self.workspace, "generated_images")
         os.makedirs(out_dir, exist_ok=True)
 
-        results = []
+        markdown: list[str] = []
+        media: list[dict[str, Any]] = []
         for i, (data, ext) in enumerate(images):
             ts = int(time.time() * 1000)
             h = hashlib.md5(data).hexdigest()[:8]
@@ -262,6 +286,14 @@ class ImageGenerationTool(BaseTool):
             with open(filepath, "wb") as f:
                 f.write(data)
             sandbox_url = f"sandbox:///generated_images/{filename}"
-            results.append(f"![Generated Image]({sandbox_url})")
+            markdown.append(f"![Generated Image]({sandbox_url})")
+            media.append(
+                {
+                    "type": "image",
+                    "name": filename,
+                    "url": sandbox_url,
+                    "size": len(data),
+                }
+            )
 
-        return "\n\n".join(results)
+        return "\n\n".join(markdown), media

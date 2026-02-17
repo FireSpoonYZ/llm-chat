@@ -2,14 +2,14 @@
   <div class="shared-chat">
     <div v-if="loading" v-loading="true" class="loading-state" element-loading-background="transparent" />
     <div v-else-if="error" class="error-state">
-      <h2>Not Found</h2>
-      <p>This shared conversation doesn't exist or has been revoked.</p>
+      <h2>{{ t('shared.notFoundTitle') }}</h2>
+      <p>{{ t('shared.notFoundDescription') }}</p>
     </div>
     <template v-else>
       <div class="shared-header">
         <div class="shared-header-inner">
           <h1 class="shared-title">{{ conversation?.title }}</h1>
-          <el-tag type="info" size="small">Read-only</el-tag>
+          <el-tag type="info" size="small">{{ t('shared.readOnly') }}</el-tag>
         </div>
         <div class="shared-meta">
           <span v-if="conversation?.model_name">{{ conversation.model_name }}</span>
@@ -26,7 +26,7 @@
             :share-token="shareToken"
           />
           <div v-if="hasMore" class="load-more">
-            <el-button @click="loadMore" :loading="loadingMore">Load more</el-button>
+            <el-button @click="loadMore" :loading="loadingMore">{{ t('shared.loadMore') }}</el-button>
           </div>
         </div>
       </div>
@@ -40,6 +40,7 @@ import { ElMessage } from 'element-plus'
 import ChatMessage from '../components/ChatMessage.vue'
 import { getSharedConversation, getSharedMessages } from '../api/sharing'
 import type { SharedConversation, Message } from '../types'
+import { currentLocale, t } from '../i18n'
 
 const props = defineProps<{ shareToken: string }>()
 
@@ -56,7 +57,7 @@ const hasMore = computed(() => messages.value.length < total.value)
 
 const formattedDate = computed(() => {
   if (!conversation.value?.created_at) return ''
-  return new Date(conversation.value.created_at).toLocaleDateString()
+  return new Date(conversation.value.created_at).toLocaleDateString(currentLocale.value)
 })
 
 onMounted(async () => {
@@ -82,7 +83,7 @@ async function loadMore() {
     messages.value.push(...resp.messages)
     total.value = resp.total
   } catch {
-    ElMessage.error('Failed to load more messages')
+    ElMessage.error(t('shared.failedLoadMore'))
   } finally {
     loadingMore.value = false
   }

@@ -3,9 +3,9 @@ pub mod container;
 pub mod messages;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{RwLock, mpsc};
 
 /// Maximum number of messages to fetch for WS history operations.
 pub const WS_MAX_HISTORY_MESSAGES: i64 = 1000;
@@ -49,10 +49,10 @@ impl WsState {
 
     pub async fn send_to_client(&self, user_id: &str, conversation_id: &str, msg: &str) {
         let conns = self.client_connections.read().await;
-        if let Some(user_conns) = conns.get(user_id) {
-            if let Some(sender) = user_conns.get(conversation_id) {
-                let _ = sender.send(msg.to_string());
-            }
+        if let Some(user_conns) = conns.get(user_id)
+            && let Some(sender) = user_conns.get(conversation_id)
+        {
+            let _ = sender.send(msg.to_string());
         }
     }
 
@@ -72,11 +72,11 @@ impl WsState {
     /// Returns `true` if removed, `false` if a newer connection has replaced it.
     pub async fn remove_container_if_gen(&self, conversation_id: &str, generation: u64) -> bool {
         let mut conns = self.container_connections.write().await;
-        if let Some((_, stored_gen)) = conns.get(conversation_id) {
-            if *stored_gen == generation {
-                conns.remove(conversation_id);
-                return true;
-            }
+        if let Some((_, stored_gen)) = conns.get(conversation_id)
+            && *stored_gen == generation
+        {
+            conns.remove(conversation_id);
+            return true;
         }
         false
     }
@@ -213,7 +213,9 @@ mod tests {
         assert!(state.take_pending_message("conv1").await.is_none());
 
         // Set a pending message
-        state.set_pending_message("conv1", "init msg".to_string()).await;
+        state
+            .set_pending_message("conv1", "init msg".to_string())
+            .await;
 
         // Take it — should return the message
         let msg = state.take_pending_message("conv1").await;
@@ -227,8 +229,12 @@ mod tests {
     async fn test_pending_message_overwrite() {
         let state = WsState::new();
 
-        state.set_pending_message("conv1", "first".to_string()).await;
-        state.set_pending_message("conv1", "second".to_string()).await;
+        state
+            .set_pending_message("conv1", "first".to_string())
+            .await;
+        state
+            .set_pending_message("conv1", "second".to_string())
+            .await;
 
         let msg = state.take_pending_message("conv1").await;
         assert_eq!(msg.as_deref(), Some("second"));
@@ -241,8 +247,14 @@ mod tests {
         state.set_pending_message("conv1", "msg1".to_string()).await;
         state.set_pending_message("conv2", "msg2".to_string()).await;
 
-        assert_eq!(state.take_pending_message("conv1").await.as_deref(), Some("msg1"));
-        assert_eq!(state.take_pending_message("conv2").await.as_deref(), Some("msg2"));
+        assert_eq!(
+            state.take_pending_message("conv1").await.as_deref(),
+            Some("msg1")
+        );
+        assert_eq!(
+            state.take_pending_message("conv2").await.as_deref(),
+            Some("msg2")
+        );
     }
 
     #[tokio::test]

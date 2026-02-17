@@ -1,12 +1,11 @@
 <template>
   <div class="mcp-server-config">
-    <h3>MCP Servers</h3>
+    <h3>{{ t('mcp.title') }}</h3>
     <p class="mcp-description">
-      Enable MCP servers for this conversation. The AI agent will be able to use
-      tools provided by enabled servers.
+      {{ t('mcp.description') }}
     </p>
 
-    <el-empty v-if="!servers.length" description="No MCP servers available" />
+    <el-empty v-if="!servers.length" :description="t('mcp.empty')" />
 
     <div v-else class="server-list">
       <div
@@ -34,6 +33,7 @@
 
 <script setup lang="ts">
 import type { McpServer } from '../types'
+import { t } from '../i18n'
 
 const props = defineProps<{
   servers: McpServer[]
