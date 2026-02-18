@@ -1,8 +1,11 @@
 <template>
   <div class="settings-layout">
     <header class="settings-header">
-      <el-button @click="$router.push('/')">{{ t('settings.backToChat') }}</el-button>
-      <h3>{{ t('settings.title') }}</h3>
+      <div class="settings-header-left">
+        <el-button @click="$router.push('/')">{{ t('settings.backToChat') }}</el-button>
+        <h3>{{ t('settings.title') }}</h3>
+      </div>
+      <LocaleToggle variant="header" />
     </header>
     <div class="settings-content">
       <el-tabs v-model="activeTab">
@@ -158,6 +161,7 @@ import type { FormInstance, FormRules } from 'element-plus'
 import { useSettingsStore } from '../stores/settings'
 import { PROVIDER_LABELS } from '../constants/providers'
 import type { ProviderConfig, SystemPromptPreset } from '../types'
+import LocaleToggle from '../components/LocaleToggle.vue'
 import { t } from '../i18n'
 
 const settingsStore = useSettingsStore()
@@ -384,11 +388,20 @@ async function handleDeletePreset(id: string) {
 .settings-header {
   display: flex;
   align-items: center;
-  gap: 16px;
+  justify-content: space-between;
+  gap: 12px;
   padding: 12px 24px;
   border-bottom: 1px solid var(--border-light);
   flex-shrink: 0;
 }
+
+.settings-header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
 .settings-header h3 {
   margin: 0;
   color: var(--text-primary);
@@ -412,5 +425,19 @@ async function handleDeletePreset(id: string) {
 }
 .text-muted {
   color: var(--text-muted);
+}
+
+@media (max-width: 768px) {
+  .settings-header {
+    padding: 10px 12px;
+  }
+
+  .settings-header-left {
+    gap: 10px;
+  }
+
+  .settings-header h3 {
+    font-size: 16px;
+  }
 }
 </style>

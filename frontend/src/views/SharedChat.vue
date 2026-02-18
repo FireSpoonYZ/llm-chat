@@ -7,9 +7,12 @@
     </div>
     <template v-else>
       <div class="shared-header">
-        <div class="shared-header-inner">
-          <h1 class="shared-title">{{ conversation?.title }}</h1>
-          <el-tag type="info" size="small">{{ t('shared.readOnly') }}</el-tag>
+        <div class="shared-header-top">
+          <div class="shared-header-main">
+            <h1 class="shared-title">{{ conversation?.title }}</h1>
+            <el-tag type="info" size="small">{{ t('shared.readOnly') }}</el-tag>
+          </div>
+          <LocaleToggle variant="header" class="shared-locale" />
         </div>
         <div class="shared-meta">
           <span v-if="conversation?.model_name">{{ conversation.model_name }}</span>
@@ -38,6 +41,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import ChatMessage from '../components/ChatMessage.vue'
+import LocaleToggle from '../components/LocaleToggle.vue'
 import { getSharedConversation, getSharedMessages } from '../api/sharing'
 import type { SharedConversation, Message } from '../types'
 import { currentLocale, t } from '../i18n'
@@ -117,19 +121,34 @@ async function loadMore() {
   padding: 24px 16px 16px;
   border-bottom: 1px solid var(--border-light);
 }
-.shared-header-inner {
+
+.shared-header-top {
   max-width: var(--max-width-chat);
   margin: 0 auto;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 12px;
 }
+
+.shared-header-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
 .shared-title {
   font-size: 18px;
   font-weight: 600;
   margin: 0;
   color: var(--text-primary);
 }
+
+.shared-locale {
+  flex: 0 0 auto;
+}
+
 .shared-meta {
   max-width: var(--max-width-chat);
   margin: 6px auto 0;
@@ -150,5 +169,23 @@ async function loadMore() {
 .load-more {
   text-align: center;
   padding: 16px 0;
+}
+
+@media (max-width: 768px) {
+  .shared-header {
+    padding: 14px 10px 12px;
+  }
+
+  .shared-header-top {
+    gap: 8px;
+  }
+
+  .shared-header-main {
+    gap: 8px;
+  }
+
+  .shared-title {
+    font-size: 16px;
+  }
 }
 </style>

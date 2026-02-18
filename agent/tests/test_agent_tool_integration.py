@@ -233,6 +233,30 @@ class TestGlobToolIntegration:
         assert "b.txt" in _result_text(tr)
         assert "c.py" not in _result_text(tr)
 
+    @patch("src.agent.create_chat_model")
+    async def test_glob_null_path_defaults_to_workspace(self, mock_create, workspace):
+        import os
+        for name in ["a.txt", "b.txt"]:
+            with open(os.path.join(workspace, name), "w") as f:
+                f.write("x")
+
+        fake = _make_fake_astream(
+            [_tool_call_chunk("glob", {"pattern": "*.txt", "path": None})],
+            [_text_chunk("Found them")],
+        )
+        _setup_mock_llm(mock_create, fake)
+
+        tools = create_all_tools(workspace)
+        glob_tool = next(t for t in tools if t.name == "glob")
+        agent = ChatAgent(_make_config(), tools=[glob_tool])
+        events = await _collect_events(agent)
+
+        tr = _events_by_type(events, "tool_result")[0]
+        assert tr.data["result"]["kind"] == "glob"
+        assert "a.txt" in _result_text(tr)
+        assert "b.txt" in _result_text(tr)
+        assert tr.data["result"]["data"]["path"] == "."
+
 
 class TestGrepToolIntegration:
     @patch("src.agent.create_chat_model")

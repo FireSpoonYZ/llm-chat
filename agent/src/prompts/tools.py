@@ -43,7 +43,11 @@ TOOL_DESCRIPTIONS = {
         "  - Supports patterns like '**/*.py', 'src/**/*.ts'.\n"
         "  - Brace expansion supported (e.g., '*.{py,txt}').\n"
         "  - Returns up to 1000 matching file paths sorted alphabetically.\n"
-        "  - Optional `path` parameter to limit search to a subdirectory."
+        "  - `path` is optional. Omit `path` to search from workspace root.\n"
+        "  - For default behavior, omit `path` instead of passing null/undefined.\n"
+        "  - Empty or whitespace-only `path` is treated as workspace root for compatibility.\n"
+        "  - Do not pass the literal strings 'undefined' or 'null' as `path`.\n"
+        "  - Use `path` only when you need to limit search to a subdirectory."
     ),
     "grep": (
         "**grep** - Search file contents using regex patterns.\n"

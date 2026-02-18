@@ -374,6 +374,19 @@ async fn handle_container_ws(
                         continue;
                     }
                 };
+                if let Err(e) = db::conversations::touch_conversation_activity(
+                    &state.db,
+                    &conversation_id,
+                    &user_id,
+                )
+                .await
+                {
+                    tracing::error!(
+                        conversation_id = %conversation_id,
+                        error = %e,
+                        "Failed to touch conversation activity after assistant completion"
+                    );
+                }
 
                 // Dual-write v2 structured parts for migration.
                 let parts_owned = build_parts_from_complete(content_str, tool_calls.as_ref());
@@ -411,7 +424,10 @@ async fn handle_container_ws(
 
                 let mut forwarded = with_conversation_id(&parsed, &conversation_id);
                 if let Some(obj) = forwarded.as_object_mut() {
-                    obj.insert("message_id".to_string(), serde_json::Value::String(saved_msg.id));
+                    obj.insert(
+                        "message_id".to_string(),
+                        serde_json::Value::String(saved_msg.id),
+                    );
                 }
                 ws_state
                     .send_to_client(&user_id, &conversation_id, &forwarded.to_string())
@@ -666,7 +682,10 @@ mod tests {
         assert_eq!(forwarded["event_type"], "tool_result");
         assert_eq!(forwarded["payload"]["tool_call_id"], "sub-tc-1");
         assert_eq!(forwarded["payload"]["result"]["kind"], "read");
-        assert_eq!(forwarded["payload"]["result"]["data"]["trace"][0]["content"], "Investigating");
+        assert_eq!(
+            forwarded["payload"]["result"]["data"]["trace"][0]["content"],
+            "Investigating"
+        );
         assert_eq!(forwarded["conversation_id"], "conv-123");
     }
 
@@ -707,7 +726,10 @@ mod tests {
         assert_eq!(parsed["event_type"], "tool_result");
         assert_eq!(parsed["payload"]["tool_call_id"], "sub-tc-1");
         assert_eq!(parsed["payload"]["result"]["kind"], "read");
-        assert_eq!(parsed["payload"]["result"]["data"]["trace"][0]["content"], "Investigating");
+        assert_eq!(
+            parsed["payload"]["result"]["data"]["trace"][0]["content"],
+            "Investigating"
+        );
         assert_eq!(parsed["conversation_id"], "conv-123");
     }
 }

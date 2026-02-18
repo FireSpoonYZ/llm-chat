@@ -100,6 +100,7 @@ function mountView() {
         ChatMessage: true,
         ChatInput: true,
         FileBrowser: true,
+        LocaleToggle: true,
         'el-button': true,
         'el-icon': true,
         'el-cascader': true,

@@ -269,17 +269,20 @@ function toToolResultOrUndefined(payloadObj: Record<string, unknown> | null): To
   const kind = toStringOrEmpty(payloadObj.kind)
   const text = toStringOrEmpty(payloadObj.text)
   const success = payloadObj.success
-  if (kind && text && typeof success === 'boolean') {
-    return {
-      kind,
-      text,
-      success,
-      error: typeof payloadObj.error === 'string' || payloadObj.error === null
-        ? (payloadObj.error as string | null)
-        : null,
-      data: toObjectOrNull(payloadObj.data) ?? {},
-      meta: toObjectOrNull(payloadObj.meta) ?? {},
+  if (kind && text) {
+    if (typeof success === 'boolean') {
+      return {
+        kind,
+        text,
+        success,
+        error: typeof payloadObj.error === 'string' || payloadObj.error === null
+          ? (payloadObj.error as string | null)
+          : null,
+        data: toObjectOrNull(payloadObj.data) ?? {},
+        meta: toObjectOrNull(payloadObj.meta) ?? {},
+      }
     }
+    return { kind, text } as ToolResult
   }
   return undefined
 }

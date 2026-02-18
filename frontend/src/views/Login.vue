@@ -2,7 +2,10 @@
   <div class="auth-container">
     <el-card class="auth-card">
       <template #header>
-        <h2>{{ t('auth.title') }}</h2>
+        <div class="auth-card-header">
+          <h2>{{ t('auth.title') }}</h2>
+          <LocaleToggle variant="header" />
+        </div>
       </template>
       <el-form ref="formRef" :model="form" :rules="rules" @submit.prevent="handleLogin" label-position="top">
         <el-form-item :label="t('auth.username')" prop="username">
@@ -30,6 +33,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { useAuthStore } from '../stores/auth'
+import LocaleToggle from '../components/LocaleToggle.vue'
 import { t } from '../i18n'
 
 const auth = useAuthStore()
@@ -72,9 +76,27 @@ async function handleLogin() {
   width: 400px;
   border-color: var(--border-light);
 }
+
+.auth-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .auth-card h2 {
   margin: 0;
-  text-align: center;
   color: var(--text-primary);
+}
+
+@media (max-width: 768px) {
+  .auth-container {
+    padding: 0 12px;
+  }
+
+  .auth-card {
+    width: 100%;
+    max-width: 400px;
+  }
 }
 </style>

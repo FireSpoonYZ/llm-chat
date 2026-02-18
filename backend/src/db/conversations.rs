@@ -106,7 +106,7 @@ pub async fn list_conversations(
                 image_provider, image_model, share_token, thinking_budget, subagent_thinking_budget
          FROM conversations
          WHERE user_id = ?
-         ORDER BY updated_at DESC",
+         ORDER BY updated_at DESC, created_at DESC, id DESC",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -211,6 +211,24 @@ pub async fn update_conversation_with_subagent(
     .bind(user_id)
     .fetch_optional(pool)
     .await
+}
+
+pub async fn touch_conversation_activity(
+    pool: &SqlitePool,
+    id: &str,
+    user_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE conversations
+         SET updated_at = datetime('now')
+         WHERE id = ? AND user_id = ?",
+    )
+    .bind(id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn delete_conversation(
@@ -696,5 +714,134 @@ mod tests {
         .unwrap();
         assert_eq!(updated.thinking_budget, Some(200000));
         assert_eq!(updated.subagent_thinking_budget, Some(200000));
+    }
+
+    #[tokio::test]
+    async fn test_touch_conversation_activity_updates_timestamp() {
+        let (pool, user_id) = setup().await;
+        let conv = create_conversation(
+            &pool, &user_id, "Chat", None, None, None, false, None, None, None,
+        )
+        .await
+        .unwrap();
+
+        sqlx::query("UPDATE conversations SET updated_at = '2000-01-01 00:00:00' WHERE id = ?")
+            .bind(&conv.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let before = get_conversation(&pool, &conv.id, &user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.updated_at, "2000-01-01 00:00:00");
+
+        let touched = touch_conversation_activity(&pool, &conv.id, &user_id)
+            .await
+            .unwrap();
+        assert!(touched);
+
+        let after = get_conversation(&pool, &conv.id, &user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(after.updated_at > before.updated_at);
+    }
+
+    #[tokio::test]
+    async fn test_list_conversations_orders_by_activity_after_touch() {
+        let (pool, user_id) = setup().await;
+        let conv1 = create_conversation(
+            &pool, &user_id, "Chat 1", None, None, None, false, None, None, None,
+        )
+        .await
+        .unwrap();
+        let conv2 = create_conversation(
+            &pool, &user_id, "Chat 2", None, None, None, false, None, None, None,
+        )
+        .await
+        .unwrap();
+
+        sqlx::query("UPDATE conversations SET updated_at = '2000-01-01 00:00:00' WHERE id = ?")
+            .bind(&conv1.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE conversations SET updated_at = '2001-01-01 00:00:00' WHERE id = ?")
+            .bind(&conv2.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let touched = touch_conversation_activity(&pool, &conv1.id, &user_id)
+            .await
+            .unwrap();
+        assert!(touched);
+
+        let convs = list_conversations(&pool, &user_id).await.unwrap();
+        assert_eq!(convs.len(), 2);
+        assert_eq!(convs[0].id, conv1.id);
+    }
+
+    #[tokio::test]
+    async fn test_list_conversations_uses_stable_tiebreakers() {
+        let (pool, user_id) = setup().await;
+
+        sqlx::query(
+            "INSERT INTO conversations (id, user_id, title, created_at, updated_at)
+             VALUES (?, ?, 'Chat A', ?, ?)",
+        )
+        .bind("aaa")
+        .bind(&user_id)
+        .bind("2000-01-01 00:00:00")
+        .bind("2000-01-01 00:00:00")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO conversations (id, user_id, title, created_at, updated_at)
+             VALUES (?, ?, 'Chat Z', ?, ?)",
+        )
+        .bind("zzz")
+        .bind(&user_id)
+        .bind("2000-01-01 00:00:00")
+        .bind("2000-01-01 00:00:00")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let convs = list_conversations(&pool, &user_id).await.unwrap();
+        assert!(convs.len() >= 2);
+        assert_eq!(convs[0].id, "zzz");
+        assert_eq!(convs[1].id, "aaa");
+    }
+
+    #[tokio::test]
+    async fn test_touch_conversation_activity_wrong_user_returns_false() {
+        let (pool, user_id) = setup().await;
+        let other_user = create_user(&pool, "other", "other@example.com", "hash2")
+            .await
+            .unwrap();
+        let conv = create_conversation(
+            &pool,
+            &user_id,
+            "Private Chat",
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let touched = touch_conversation_activity(&pool, &conv.id, &other_user.id)
+            .await
+            .unwrap();
+        assert!(!touched);
     }
 }

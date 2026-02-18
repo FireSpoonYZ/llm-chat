@@ -48,6 +48,18 @@ fn ws_origin_allowed(headers: &HeaderMap, allowed_origins: &Option<String>) -> b
     configured.contains(&origin)
 }
 
+fn should_touch_after_edit(
+    message_updated: bool,
+    deleted_messages: bool,
+    deleted_messages_v2: bool,
+) -> bool {
+    message_updated && deleted_messages && deleted_messages_v2
+}
+
+fn should_touch_after_regenerate(deleted_messages: bool, deleted_messages_v2: bool) -> bool {
+    deleted_messages && deleted_messages_v2
+}
+
 async fn send_to_container_or_start(
     ws_state: &Arc<WsState>,
     docker_manager: &Arc<DockerManager>,
@@ -245,6 +257,16 @@ async fn handle_client_ws(
                         "Failed to persist user message to messages_v2"
                     );
                 }
+                if let Err(e) =
+                    db::conversations::touch_conversation_activity(&state.db, &conv_id, &user_id)
+                        .await
+                {
+                    tracing::error!(
+                        conversation_id = %conv_id,
+                        error = %e,
+                        "Failed to touch conversation activity after user message"
+                    );
+                }
 
                 let conv = db::conversations::get_conversation(&state.db, &conv_id, &user_id)
                     .await
@@ -360,9 +382,22 @@ async fn handle_client_ws(
                     .filter(|m| m.role == "user")
                     .count();
 
-                db::messages::update_message_content(&state.db, &msg.id, &content)
-                    .await
-                    .ok();
+                let message_updated = match db::messages::update_message_content(
+                    &state.db, &msg.id, &content,
+                )
+                .await
+                {
+                    Ok(updated) => updated,
+                    Err(e) => {
+                        tracing::error!(
+                            conversation_id = %conv_id,
+                            message_id = %msg.id,
+                            error = %e,
+                            "Failed to update user message"
+                        );
+                        false
+                    }
+                };
                 if let Err(e) = db::messages_v2::upsert_message_text_part(
                     &state.db, &msg.id, &conv_id, "user", &content,
                 )
@@ -375,12 +410,56 @@ async fn handle_client_ws(
                         "Failed to update user message parts in messages_v2"
                     );
                 }
-                db::messages::delete_messages_after(&state.db, &conv_id, &msg.id)
+                let deleted_messages =
+                    match db::messages::delete_messages_after(&state.db, &conv_id, &msg.id).await {
+                        Ok(_) => true,
+                        Err(e) => {
+                            tracing::error!(
+                                conversation_id = %conv_id,
+                                message_id = %msg.id,
+                                error = %e,
+                                "Failed to delete trailing messages after edit"
+                            );
+                            false
+                        }
+                    };
+                let deleted_messages_v2 =
+                    match db::messages_v2::delete_messages_v2_after(&state.db, &conv_id, &msg.id)
+                        .await
+                    {
+                        Ok(_) => true,
+                        Err(e) => {
+                            tracing::error!(
+                                conversation_id = %conv_id,
+                                message_id = %msg.id,
+                                error = %e,
+                                "Failed to delete trailing messages_v2 after edit"
+                            );
+                            false
+                        }
+                    };
+                if should_touch_after_edit(message_updated, deleted_messages, deleted_messages_v2) {
+                    if let Err(e) = db::conversations::touch_conversation_activity(
+                        &state.db, &conv_id, &user_id,
+                    )
                     .await
-                    .ok();
-                db::messages_v2::delete_messages_v2_after(&state.db, &conv_id, &msg.id)
-                    .await
-                    .ok();
+                    {
+                        tracing::error!(
+                            conversation_id = %conv_id,
+                            error = %e,
+                            "Failed to touch conversation activity after edit_message"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        conversation_id = %conv_id,
+                        message_id = %msg.id,
+                        message_updated,
+                        deleted_messages,
+                        deleted_messages_v2,
+                        "Skipping activity touch after edit due to failed message mutation"
+                    );
+                }
 
                 let _ = tx.send(
                     serde_json::json!({
@@ -477,12 +556,60 @@ async fn handle_client_ws(
                     .filter(|m| m.role == "user")
                     .count();
 
-                db::messages::delete_messages_after(&state.db, &conv_id, &user_msg.id)
+                let deleted_messages =
+                    match db::messages::delete_messages_after(&state.db, &conv_id, &user_msg.id)
+                        .await
+                    {
+                        Ok(_) => true,
+                        Err(e) => {
+                            tracing::error!(
+                                conversation_id = %conv_id,
+                                message_id = %user_msg.id,
+                                error = %e,
+                                "Failed to delete trailing messages after regenerate"
+                            );
+                            false
+                        }
+                    };
+                let deleted_messages_v2 = match db::messages_v2::delete_messages_v2_after(
+                    &state.db,
+                    &conv_id,
+                    &user_msg.id,
+                )
+                .await
+                {
+                    Ok(_) => true,
+                    Err(e) => {
+                        tracing::error!(
+                            conversation_id = %conv_id,
+                            message_id = %user_msg.id,
+                            error = %e,
+                            "Failed to delete trailing messages_v2 after regenerate"
+                        );
+                        false
+                    }
+                };
+                if should_touch_after_regenerate(deleted_messages, deleted_messages_v2) {
+                    if let Err(e) = db::conversations::touch_conversation_activity(
+                        &state.db, &conv_id, &user_id,
+                    )
                     .await
-                    .ok();
-                db::messages_v2::delete_messages_v2_after(&state.db, &conv_id, &user_msg.id)
-                    .await
-                    .ok();
+                    {
+                        tracing::error!(
+                            conversation_id = %conv_id,
+                            error = %e,
+                            "Failed to touch conversation activity after regenerate"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        conversation_id = %conv_id,
+                        message_id = %user_msg.id,
+                        deleted_messages,
+                        deleted_messages_v2,
+                        "Skipping activity touch after regenerate due to failed message mutation"
+                    );
+                }
 
                 let _ = tx.send(
                     serde_json::json!({
@@ -558,7 +685,10 @@ async fn handle_client_ws(
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_ws_access_token, ws_origin_allowed};
+    use super::{
+        extract_ws_access_token, should_touch_after_edit, should_touch_after_regenerate,
+        ws_origin_allowed,
+    };
     use axum::http::{HeaderMap, HeaderValue, header};
 
     #[test]
@@ -630,5 +760,20 @@ mod tests {
             &headers,
             &Some("https://app.example.com".to_string())
         ));
+    }
+
+    #[test]
+    fn touch_after_edit_requires_all_mutations_successful() {
+        assert!(should_touch_after_edit(true, true, true));
+        assert!(!should_touch_after_edit(false, true, true));
+        assert!(!should_touch_after_edit(true, false, true));
+        assert!(!should_touch_after_edit(true, true, false));
+    }
+
+    #[test]
+    fn touch_after_regenerate_requires_all_deletions_successful() {
+        assert!(should_touch_after_regenerate(true, true));
+        assert!(!should_touch_after_regenerate(false, true));
+        assert!(!should_touch_after_regenerate(true, false));
     }
 }

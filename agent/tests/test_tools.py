@@ -542,6 +542,34 @@ class TestGlobTool:
         tool = GlobTool(workspace=workspace)
         result = tool._run("*.py", path="")
         assert "hello.py" in _rtext(result)
+        assert _rdata(result)["path"] == "."
+
+    def test_glob_null_path_defaults_to_workspace(self, workspace):
+        with open(os.path.join(workspace, "hello.py"), "w") as f:
+            f.write("")
+        tool = GlobTool(workspace=workspace)
+        result = tool._run("*.py", path=None)
+        assert "hello.py" in _rtext(result)
+        assert _rdata(result)["path"] == "."
+
+    def test_glob_whitespace_path_defaults_to_workspace(self, workspace):
+        with open(os.path.join(workspace, "hello.py"), "w") as f:
+            f.write("")
+        tool = GlobTool(workspace=workspace)
+        result = tool._run("*.py", path="   ")
+        assert "hello.py" in _rtext(result)
+        assert _rdata(result)["path"] == "."
+
+    def test_glob_preserves_significant_surrounding_spaces_in_path(self, workspace):
+        sub = os.path.join(workspace, " pkg ")
+        os.makedirs(sub)
+        with open(os.path.join(sub, "mod.py"), "w") as f:
+            f.write("")
+        tool = GlobTool(workspace=workspace)
+        result = tool._run("*.py", path=" pkg ")
+        assert "pkg/mod.py" not in _rtext(result)
+        assert " pkg /mod.py" in _rtext(result)
+        assert _rdata(result)["path"] == " pkg "
 
     def test_glob_path_is_subdirectory(self, workspace):
         sub = os.path.join(workspace, "pkg")

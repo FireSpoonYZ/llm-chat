@@ -37,42 +37,55 @@
 
       <template v-if="chatStore.currentConversationId && currentConversation">
         <div class="chat-toolbar">
-          <div class="toolbar-inner">
-            <span class="toolbar-label">{{ t('chat.model') }}</span>
-            <el-cascader
-              :model-value="cascaderValue"
-              :options="cascaderOptions"
-              :props="{ expandTrigger: 'hover' }"
-              :placeholder="t('chat.selectProviderModel')"
-              clearable
-              size="small"
-              class="model-cascader"
-              @change="handleCascaderChange"
-            />
-            <span class="toolbar-label">{{ t('chat.subagent') }}</span>
-            <el-cascader
-              :model-value="subagentCascaderValue"
-              :options="subagentCascaderOptions"
-              :props="{ expandTrigger: 'hover' }"
-              :placeholder="t('chat.selectSubagentModel')"
-              clearable
-              size="small"
-              class="model-cascader"
-              @change="handleSubagentCascaderChange"
-            />
-            <span class="toolbar-label">{{ t('chat.image') }}</span>
-            <el-cascader
-              :model-value="imageCascaderValue"
-              :options="imageCascaderOptions"
-              :props="{ expandTrigger: 'hover' }"
-              :placeholder="t('chat.selectImageModel')"
-              clearable
-              size="small"
-              class="model-cascader"
-              @change="handleImageCascaderChange"
-            />
-            <el-button class="toolbar-btn" text @click="showFilesDrawer = true">{{ t('chat.files') }}</el-button>
-            <el-button class="toolbar-btn" text @click="showShareDialog = true">{{ t('chat.share') }}</el-button>
+          <div class="chat-toolbar-frame">
+            <div class="toolbar-main">
+              <div class="toolbar-control">
+                <span class="toolbar-label">{{ t('chat.model') }}</span>
+                <el-cascader
+                  :model-value="cascaderValue"
+                  :options="cascaderOptions"
+                  :props="{ expandTrigger: 'hover' }"
+                  :placeholder="t('chat.selectProviderModel')"
+                  clearable
+                  size="small"
+                  class="model-cascader"
+                  @change="handleCascaderChange"
+                />
+              </div>
+              <div class="toolbar-control">
+                <span class="toolbar-label">{{ t('chat.subagent') }}</span>
+                <el-cascader
+                  :model-value="subagentCascaderValue"
+                  :options="subagentCascaderOptions"
+                  :props="{ expandTrigger: 'hover' }"
+                  :placeholder="t('chat.selectSubagentModel')"
+                  clearable
+                  size="small"
+                  class="model-cascader"
+                  @change="handleSubagentCascaderChange"
+                />
+              </div>
+              <div class="toolbar-control">
+                <span class="toolbar-label">{{ t('chat.image') }}</span>
+                <el-cascader
+                  :model-value="imageCascaderValue"
+                  :options="imageCascaderOptions"
+                  :props="{ expandTrigger: 'hover' }"
+                  :placeholder="t('chat.selectImageModel')"
+                  clearable
+                  size="small"
+                  class="model-cascader"
+                  @change="handleImageCascaderChange"
+                />
+              </div>
+            </div>
+            <div class="toolbar-side">
+              <div class="toolbar-actions">
+                <el-button class="toolbar-btn" text @click="showFilesDrawer = true">{{ t('chat.files') }}</el-button>
+                <el-button class="toolbar-btn" text @click="showShareDialog = true">{{ t('chat.share') }}</el-button>
+              </div>
+              <LocaleToggle variant="toolbar" class="toolbar-locale" />
+            </div>
           </div>
         </div>
         <div class="chat-messages">
@@ -190,6 +203,7 @@ import ConversationList from '../components/ConversationList.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
 import FileBrowser from '../components/FileBrowser.vue'
+import LocaleToggle from '../components/LocaleToggle.vue'
 import { uploadFiles } from '../api/conversations'
 import { createShare, revokeShare } from '../api/sharing'
 import { t } from '../i18n'
@@ -577,38 +591,77 @@ async function handleImageCascaderChange(val: string[] | null) {
 }
 
 .chat-toolbar {
-  padding: 8px 16px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--border-light);
   flex-shrink: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(250, 249, 246, 0.72));
 }
-.toolbar-inner {
+
+.chat-toolbar-frame {
   max-width: var(--max-width-chat);
   margin: 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: nowrap;
-  min-width: max-content;
-  padding-left: 40px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 14px;
+  min-width: 0;
 }
+
+.toolbar-main {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 10px;
+  padding-left: 40px;
+  min-width: 0;
+}
+
+.toolbar-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
 .toolbar-label {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
   white-space: nowrap;
-  flex: 0 0 auto;
 }
+
 .model-cascader {
-  width: 300px;
-  min-width: 300px;
-  flex: 0 0 300px;
+  width: 100%;
 }
+
+.toolbar-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .toolbar-btn {
   color: var(--text-secondary) !important;
   font-size: 13px;
   white-space: nowrap;
-  flex: 0 0 auto;
+  padding: 0 8px !important;
+}
+
+.toolbar-btn:hover {
+  color: var(--text-primary) !important;
+  background: rgba(0, 0, 0, 0.04) !important;
+}
+
+.toolbar-locale {
+  flex-shrink: 0;
 }
 
 .waiting-indicator {
@@ -663,5 +716,48 @@ async function handleImageCascaderChange(val: string[] | null) {
 @keyframes ws-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
+}
+
+@media (max-width: 768px) {
+  .chat-toolbar {
+    padding: 8px 10px;
+  }
+
+  .chat-toolbar-frame {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    align-items: stretch;
+  }
+
+  .toolbar-main {
+    grid-template-columns: 1fr;
+    padding-left: 30px;
+    gap: 8px;
+  }
+
+  .toolbar-side {
+    justify-content: space-between;
+    padding-left: 30px;
+  }
+
+  .toolbar-actions {
+    gap: 2px;
+  }
+}
+
+@media (max-width: 1024px) and (min-width: 769px) {
+  .chat-toolbar-frame {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .toolbar-main {
+    grid-template-columns: repeat(3, minmax(150px, 1fr));
+  }
+
+  .toolbar-side {
+    justify-content: space-between;
+    padding-left: 40px;
+  }
 }
 </style>

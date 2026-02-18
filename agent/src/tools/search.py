@@ -49,7 +49,10 @@ class GlobInput(BaseModel):
     """Input for the GlobTool."""
 
     pattern: str = Field(description="Glob pattern to match files against.")
-    path: str = Field(default="", description="Directory to search in. Defaults to workspace root.")
+    path: str | None = Field(
+        default=None,
+        description="Directory to search in. Omit or leave empty to use workspace root.",
+    )
 
 
 class GlobTool(BaseTool):
@@ -64,20 +67,29 @@ class GlobTool(BaseTool):
     args_schema: Type[BaseModel] = GlobInput
     workspace: str = "/workspace"
 
-    def _resolve_and_validate(self, path: str) -> Path:
-        """Resolve a path and ensure it is within the workspace."""
-        return resolve_workspace_path(path or ".", self.workspace)
+    def _normalize_path(self, path: str | None) -> str:
+        """Normalize optional path input for consistent default behavior."""
+        if path is None:
+            return "."
+        if path == "" or path.isspace():
+            return "."
+        return path
 
-    def _run(self, pattern: str, path: str = "") -> dict[str, Any]:
+    def _resolve_and_validate(self, path: str | None) -> Path:
+        """Resolve a path and ensure it is within the workspace."""
+        return resolve_workspace_path(self._normalize_path(path), self.workspace)
+
+    def _run(self, pattern: str, path: str | None = None) -> dict[str, Any]:
+        normalized_path = self._normalize_path(path)
         try:
             base = self._resolve_and_validate(path)
         except ValueError as exc:
             return make_tool_error(kind=self.name, error=str(exc))
 
         if not base.exists():
-            return make_tool_error(kind=self.name, error=f"path '{path}' does not exist")
+            return make_tool_error(kind=self.name, error=f"path '{normalized_path}' does not exist")
         if not base.is_dir():
-            return make_tool_error(kind=self.name, error=f"path '{path}' is not a directory")
+            return make_tool_error(kind=self.name, error=f"path '{normalized_path}' is not a directory")
 
         ws = Path(self.workspace).resolve()
         results: list[str] = []
@@ -108,17 +120,17 @@ class GlobTool(BaseTool):
             return make_tool_success(
                 kind=self.name,
                 text="No files matched the pattern.",
-                data={"paths": [], "pattern": pattern, "path": path or "."},
+                data={"paths": [], "pattern": pattern, "path": normalized_path},
                 meta={"match_count": 0, "truncated": False},
             )
         return make_tool_success(
             kind=self.name,
             text="\n".join(results),
-            data={"paths": results, "pattern": pattern, "path": path or "."},
+            data={"paths": results, "pattern": pattern, "path": normalized_path},
             meta={"match_count": len(results), "truncated": truncated},
         )
 
-    async def _arun(self, pattern: str, path: str = "") -> dict[str, Any]:
+    async def _arun(self, pattern: str, path: str | None = None) -> dict[str, Any]:
         return self._run(pattern, path)
 
 

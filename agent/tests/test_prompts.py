@@ -47,6 +47,14 @@ class TestToolDescriptions:
         desc = TOOL_DESCRIPTIONS["edit"]
         assert "unique" in desc.lower()
 
+    def test_glob_description_documents_default_path_behavior(self):
+        desc = TOOL_DESCRIPTIONS["glob"].lower()
+        assert "omit `path`" in desc
+        assert "workspace root" in desc
+        assert "instead of passing null/undefined" in desc
+        assert "'undefined'" in desc
+        assert "'null'" in desc
+
     def test_format_tool_descriptions(self):
         result = format_tool_descriptions(["bash", "read"])
         assert "bash" in result

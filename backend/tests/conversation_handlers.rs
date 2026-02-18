@@ -956,3 +956,39 @@ async fn list_messages_synthesizes_tool_result_part_for_legacy_tool_calls() {
     assert_eq!(parts[2]["tool_call_id"], "tc-legacy-1");
     assert_eq!(parts[2]["text"], "file-a\nfile-b");
 }
+
+#[tokio::test]
+async fn list_conversations_uses_stable_tiebreakers_when_updated_at_matches() {
+    let state = test_state().await;
+    let token = register_user(&state).await;
+    let conv_old = create_conv(&state, &token, "openai", "gpt-4o").await;
+    let conv_new = create_conv(&state, &token, "openai", "gpt-4o").await;
+
+    // Force same updated_at for both rows and different created_at values.
+    sqlx::query("UPDATE conversations SET updated_at = ?, created_at = ? WHERE id = ?")
+        .bind("2000-01-01 00:00:00")
+        .bind("1999-01-01 00:00:00")
+        .bind(&conv_old)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE conversations SET updated_at = ?, created_at = ? WHERE id = ?")
+        .bind("2000-01-01 00:00:00")
+        .bind("2001-01-01 00:00:00")
+        .bind(&conv_new)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let resp = app(state.clone())
+        .oneshot(get_with_auth("/api/conversations", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = json_body(resp).await;
+    let convs = body.as_array().unwrap();
+    assert_eq!(convs.len(), 2);
+    assert_eq!(convs[0]["id"], conv_new);
+    assert_eq!(convs[1]["id"], conv_old);
+}
