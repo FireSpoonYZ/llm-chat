@@ -418,7 +418,70 @@ class StreamEvent:
 logger = logging.getLogger("claude-chat-agent")
 
 _REPLACEMENT_CHAR = "\ufffd"
-TASK_EVENT_QUEUE_MAXSIZE = 256
+SUBAGENT_EVENT_QUEUE_MAXSIZE = 256
+
+
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y"}:
+            return True
+        if lowered in {"0", "false", "no", "n"}:
+            return False
+    return None
+
+
+def _tool_supports_runtime_events(tool: Any) -> bool:
+    """Return True when a tool explicitly opts into runtime event streaming."""
+    for attr in ("supports_runtime_events", "supports_subagent_trace"):
+        declared = _coerce_bool(getattr(tool, attr, None))
+        if declared is not None:
+            return declared
+
+    metadata = getattr(tool, "metadata", None)
+    if isinstance(metadata, dict):
+        for key in ("supports_runtime_events", "supports_subagent_trace"):
+            declared = _coerce_bool(metadata.get(key))
+            if declared is not None:
+                return declared
+    return False
+
+
+def _forward_tool_runtime_event(
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    raw_event: Any,
+) -> list[StreamEvent]:
+    """Convert tool-emitted runtime events into outward stream events."""
+    if isinstance(raw_event, StreamEvent):
+        return [StreamEvent("subagent_trace_delta", {
+            "tool_call_id": tool_call_id,
+            "event_type": raw_event.type,
+            "payload": raw_event.data,
+        })]
+
+    if isinstance(raw_event, dict):
+        event_type = raw_event.get("type")
+        payload = raw_event.get("data")
+        if event_type == "question" and isinstance(payload, dict):
+            forwarded = dict(payload)
+            forwarded["tool_call_id"] = tool_call_id
+            return [StreamEvent("question", forwarded)]
+
+    # Fallback keeps unknown runtime events inspectable without breaking flow.
+    return [StreamEvent("subagent_trace_delta", {
+        "tool_call_id": tool_call_id,
+        "event_type": "tool_runtime_event",
+        "payload": {
+            "tool_name": tool_name,
+            "raw_event": raw_event,
+        },
+    })]
 
 
 def _normalize_tool_result(tool_name: str, result: Any) -> dict[str, Any]:
@@ -545,6 +608,27 @@ class ChatAgent:
     def cancel(self) -> None:
         """Signal cancellation of the current generation."""
         self._cancelled = True
+
+    def submit_question_answer(
+        self,
+        questionnaire_id: str,
+        answers: list[dict[str, Any]],
+    ) -> bool:
+        """Submit answers for pending question tools."""
+        accepted = False
+        for tool in self.tools:
+            submit_answer = getattr(tool, "submit_answer", None)
+            if not callable(submit_answer):
+                continue
+            try:
+                accepted = bool(submit_answer(questionnaire_id, answers)) or accepted
+            except Exception:
+                logger.exception(
+                    "Failed to submit question answer (tool=%s, questionnaire_id=%s)",
+                    getattr(tool, "name", "<unknown>"),
+                    questionnaire_id,
+                )
+        return accepted
 
     def truncate_history(self, keep_turns: int) -> None:
         """Truncate message history to keep only the first *keep_turns* user exchanges.
@@ -779,73 +863,72 @@ class ChatAgent:
                     "tool_input": tc_args,
                 })
 
-                if tc_name == "task":
-                    task_tool = next((t for t in self.tools if t.name == tc_name), None)
-                    set_event_sink = getattr(task_tool, "set_event_sink", None)
-                    if task_tool is not None and callable(set_event_sink):
-                        task_event_queue: asyncio.Queue[StreamEvent] = asyncio.Queue(
-                            maxsize=TASK_EVENT_QUEUE_MAXSIZE
-                        )
+                tool = next((t for t in self.tools if t.name == tc_name), None)
+                set_event_sink = getattr(tool, "set_event_sink", None)
+                if _tool_supports_runtime_events(tool) and callable(set_event_sink):
+                    runtime_event_queue: asyncio.Queue[Any] = asyncio.Queue(
+                        maxsize=SUBAGENT_EVENT_QUEUE_MAXSIZE
+                    )
 
-                        async def _on_task_event(task_event: StreamEvent) -> None:
-                            await task_event_queue.put(task_event)
+                    async def _on_tool_runtime_event(runtime_event: Any) -> None:
+                        await runtime_event_queue.put(runtime_event)
 
-                        set_event_sink(_on_task_event)
-                        tool_task: asyncio.Task[Any] | None = None
-                        pending_event_task: asyncio.Task[StreamEvent] | None = None
-                        try:
-                            tool_task = asyncio.create_task(task_tool.ainvoke(tc_args))
-                            while tool_task is not None:
-                                if self._cancelled and not tool_task.done():
-                                    tool_task.cancel()
-
-                                if pending_event_task is None:
-                                    pending_event_task = asyncio.create_task(task_event_queue.get())
-
-                                done, _ = await asyncio.wait(
-                                    {tool_task, pending_event_task},
-                                    return_when=asyncio.FIRST_COMPLETED,
-                                )
-
-                                if pending_event_task in done:
-                                    task_event = pending_event_task.result()
-                                    pending_event_task = None
-                                    yield StreamEvent("task_trace_delta", {
-                                        "tool_call_id": tc_id,
-                                        "event_type": task_event.type,
-                                        "payload": task_event.data,
-                                    })
-
-                                if tool_task.done():
-                                    # Drain any buffered events emitted before task completion.
-                                    while not task_event_queue.empty():
-                                        task_event = await task_event_queue.get()
-                                        yield StreamEvent("task_trace_delta", {
-                                            "tool_call_id": tc_id,
-                                            "event_type": task_event.type,
-                                            "payload": task_event.data,
-                                        })
-                                    break
-
-                            raw_result = await tool_task
-                            result = _normalize_tool_result(tc_name, raw_result)
-                            is_error = not bool(result.get("success", True))
-                        except asyncio.CancelledError:
-                            if tool_task is not None and not tool_task.done():
+                    set_event_sink(_on_tool_runtime_event)
+                    tool_task: asyncio.Task[Any] | None = None
+                    pending_event_task: asyncio.Task[Any] | None = None
+                    try:
+                        tool_task = asyncio.create_task(tool.ainvoke(tc_args))
+                        while tool_task is not None:
+                            if self._cancelled and not tool_task.done():
                                 tool_task.cancel()
-                            raise
-                        except Exception as exc:
-                            result = make_tool_error(
-                                kind=tc_name,
-                                error=f"Tool error: {exc}",
+
+                            if pending_event_task is None:
+                                pending_event_task = asyncio.create_task(runtime_event_queue.get())
+
+                            done, _ = await asyncio.wait(
+                                {tool_task, pending_event_task},
+                                return_when=asyncio.FIRST_COMPLETED,
                             )
-                            is_error = True
-                        finally:
-                            if pending_event_task is not None and not pending_event_task.done():
-                                pending_event_task.cancel()
-                            set_event_sink(None)
-                    else:
-                        result, is_error = await self._execute_tool(tc_name, tc_args)
+
+                            if pending_event_task in done:
+                                runtime_event = pending_event_task.result()
+                                pending_event_task = None
+                                for event in _forward_tool_runtime_event(
+                                    tool_name=tc_name,
+                                    tool_call_id=tc_id,
+                                    raw_event=runtime_event,
+                                ):
+                                    yield event
+
+                            if tool_task.done():
+                                # Drain buffered events emitted before tool completion.
+                                while not runtime_event_queue.empty():
+                                    runtime_event = await runtime_event_queue.get()
+                                    for event in _forward_tool_runtime_event(
+                                        tool_name=tc_name,
+                                        tool_call_id=tc_id,
+                                        raw_event=runtime_event,
+                                    ):
+                                        yield event
+                                break
+
+                        raw_result = await tool_task
+                        result = _normalize_tool_result(tc_name, raw_result)
+                        is_error = not bool(result.get("success", True))
+                    except asyncio.CancelledError:
+                        if tool_task is not None and not tool_task.done():
+                            tool_task.cancel()
+                        raise
+                    except Exception as exc:
+                        result = make_tool_error(
+                            kind=tc_name,
+                            error=f"Tool error: {exc}",
+                        )
+                        is_error = True
+                    finally:
+                        if pending_event_task is not None and not pending_event_task.done():
+                            pending_event_task.cancel()
+                        set_event_sink(None)
                 else:
                     result, is_error = await self._execute_tool(tc_name, tc_args)
                 display_result = _normalize_tool_result_for_display(tc_name, result)

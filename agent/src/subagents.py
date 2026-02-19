@@ -1,4 +1,4 @@
-"""Subagent runtime for task-based delegation."""
+"""Subagent runtime for delegated subagent execution."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ To achieve this:
 
 
 class SubagentRunner:
-    """Runs specialized subagents from the task tool."""
+    """Runs specialized subagents behind top-level delegation tools."""
 
     def __init__(
         self,
@@ -69,25 +69,27 @@ class SubagentRunner:
         self._depth = 0
         self._depth_lock = asyncio.Lock()
 
-    async def run_task(
+    async def run_subagent(
         self,
         *,
         subagent_type: str,
+        result_kind: str | None = None,
         description: str,
         prompt: str,
         event_sink: Callable[[StreamEvent], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         subagent_type = (subagent_type or "").strip().lower()
+        kind = (result_kind or subagent_type or "subagent").strip().lower() or "subagent"
         if subagent_type != "explore":
             return make_tool_error(
-                kind="task",
+                kind=kind,
                 error=f"unsupported subagent_type: {subagent_type}",
                 text="Error: only subagent_type='explore' is supported.",
             )
 
         if not self.parent_config.subagent_provider or not self.parent_config.subagent_model:
             return make_tool_error(
-                kind="task",
+                kind=kind,
                 error="subagent model is not configured for this conversation",
                 text="Error: subagent provider/model is not configured for this conversation.",
             )
@@ -95,7 +97,7 @@ class SubagentRunner:
         async with self._depth_lock:
             if self._depth > 0:
                 return make_tool_error(
-                    kind="task",
+                    kind=kind,
                     error="nested subagent invocation is disabled",
                     text="Error: subagents cannot invoke subagents.",
                 )
@@ -103,6 +105,7 @@ class SubagentRunner:
 
         try:
             return await self._run_explore_subagent(
+                result_kind=kind,
                 description=description,
                 prompt=prompt,
                 event_sink=event_sink,
@@ -111,20 +114,38 @@ class SubagentRunner:
             async with self._depth_lock:
                 self._depth = max(0, self._depth - 1)
 
+    async def run_task(
+        self,
+        *,
+        subagent_type: str,
+        description: str,
+        prompt: str,
+        event_sink: Callable[[StreamEvent], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        """Backward-compatible wrapper for older task tool callers."""
+        return await self.run_subagent(
+            subagent_type=subagent_type,
+            result_kind="task",
+            description=description,
+            prompt=prompt,
+            event_sink=event_sink,
+        )
+
     async def _run_explore_subagent(
         self,
         *,
+        result_kind: str,
         description: str,
         prompt: str,
         event_sink: Callable[[StreamEvent], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         read_only_tools = [
             tool for tool in self.base_tools
-            if tool.name != "task" and tool_is_read_only(tool)
+            if tool.name not in {"task", "explore"} and tool_is_read_only(tool)
         ]
         if not read_only_tools:
             return make_tool_error(
-                kind="task",
+                kind=result_kind,
                 error="no read-only tools are available for explore subagent",
                 text="Error: no read-only tools available for explore subagent.",
             )
@@ -162,7 +183,7 @@ class SubagentRunner:
         )
         if error_msg:
             return make_tool_error(
-                kind="task",
+                kind=result_kind,
                 error=error_msg,
                 text=f"Error: {error_msg}",
                 data={
@@ -174,7 +195,7 @@ class SubagentRunner:
 
         text = final_content.strip() if final_content else "(no output)"
         return make_tool_success(
-            kind="task",
+            kind=result_kind,
             text=text,
             data={
                 "subagent_type": "explore",

@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Type
+from typing import Any, Literal, Type
 
 import html2text
 import httpx
 import httpx_sse
+from bs4 import BeautifulSoup
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from .result_schema import make_tool_error, make_tool_success
 
 EXA_MCP_URL = "https://mcp.exa.ai/mcp"
+MAX_WEBFETCH_BYTES = 5 * 1024 * 1024
 
 _h2t = html2text.HTML2Text()
 _h2t.ignore_links = False
@@ -27,6 +29,10 @@ class WebFetchInput(BaseModel):
         default=50000,
         description="Maximum number of characters to return from the fetched content.",
     )
+    format: Literal["text", "markdown", "html"] = Field(
+        default="markdown",
+        description="Desired output format: text, markdown, or html.",
+    )
 
 
 class WebFetchTool(BaseTool):
@@ -34,17 +40,69 @@ class WebFetchTool(BaseTool):
 
     name: str = "web_fetch"
     description: str = (
-        "Fetch content from a URL. Converts HTML to plain text by stripping tags. "
-        "Returns the text content truncated to max_length characters."
+        "Fetch content from a URL. Supports output formats text/markdown/html. "
+        "Returns content truncated to max_length characters."
     )
     args_schema: Type[BaseModel] = WebFetchInput
 
-    def _run(self, url: str, max_length: int = 50000) -> dict[str, Any]:
+    def _run(
+        self,
+        url: str,
+        max_length: int = 50000,
+        format: Literal["text", "markdown", "html"] = "markdown",
+    ) -> dict[str, Any]:
         raise NotImplementedError(
             "WebFetchTool does not support synchronous execution. Use the async interface."
         )
 
-    async def _arun(self, url: str, max_length: int = 50000) -> dict[str, Any]:
+    def _is_textual_content_type(self, content_type: str) -> bool:
+        lowered = content_type.lower()
+        return any(
+            token in lowered
+            for token in (
+                "text/",
+                "json",
+                "xml",
+                "javascript",
+                "yaml",
+                "csv",
+                "html",
+            )
+        )
+
+    def _format_response_body(
+        self,
+        *,
+        body: str,
+        content_type: str,
+        format: Literal["text", "markdown", "html"],
+    ) -> str:
+        lowered_type = content_type.lower()
+        if "html" in lowered_type:
+            if format == "html":
+                return body
+            if format == "markdown":
+                return _h2t.handle(body)
+            return BeautifulSoup(body, "html.parser").get_text("\n", strip=True)
+
+        if "json" in lowered_type:
+            try:
+                obj = json.loads(body)
+            except json.JSONDecodeError:
+                return body
+            pretty = json.dumps(obj, ensure_ascii=False, indent=2)
+            if format == "markdown":
+                return f"```json\n{pretty}\n```"
+            return pretty
+
+        return body
+
+    async def _arun(
+        self,
+        url: str,
+        max_length: int = 50000,
+        format: Literal["text", "markdown", "html"] = "markdown",
+    ) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(
                 follow_redirects=True,
@@ -75,14 +133,30 @@ class WebFetchTool(BaseTool):
             )
 
         content_type = response.headers.get("content-type", "")
-        body = response.text
+        if len(response.content) > MAX_WEBFETCH_BYTES:
+            return make_tool_error(
+                kind=self.name,
+                error=(
+                    f"response too large for '{url}': {len(response.content)} bytes "
+                    f"(max {MAX_WEBFETCH_BYTES} bytes)"
+                ),
+            )
+        if not self._is_textual_content_type(content_type):
+            return make_tool_error(
+                kind=self.name,
+                error=f"unsupported content type for text fetch: '{content_type}'",
+                data={"url": str(response.url), "content_type": content_type},
+            )
 
-        if "html" in content_type.lower():
-            text = _h2t.handle(body)
-        else:
-            text = body
+        body = response.text
+        text = self._format_response_body(
+            body=body,
+            content_type=content_type,
+            format=format,
+        )
 
         truncated = False
+        original_char_count = len(text)
         if len(text) > max_length:
             text = text[:max_length] + "\n... content truncated"
             truncated = True
@@ -90,8 +164,17 @@ class WebFetchTool(BaseTool):
         return make_tool_success(
             kind=self.name,
             text=text,
-            data={"url": str(response.url), "content_type": content_type},
-            meta={"truncated": truncated, "char_count": len(text)},
+            data={
+                "url": str(response.url),
+                "content_type": content_type,
+                "format": format,
+            },
+            meta={
+                "truncated": truncated,
+                "char_count": len(text),
+                "original_char_count": original_char_count,
+                "bytes": len(response.content),
+            },
         )
 
 

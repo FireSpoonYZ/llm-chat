@@ -22,7 +22,7 @@ from .agent import AgentConfig, ChatAgent, _build_multimodal_content
 from .mcp.manager import McpManager
 from .prompts.assembler import assemble_system_prompt
 from .subagents import SubagentRunner
-from .tools import create_all_tools, create_task_tool
+from .tools import create_all_tools, create_explore_tool
 from .tools.capabilities import annotate_mcp_tools
 
 logger = logging.getLogger("claude-chat-agent")
@@ -77,6 +77,8 @@ class AgentSession:
             await self._handle_init(msg)
         elif msg_type == "user_message":
             await self._handle_user_message(msg)
+        elif msg_type == "question_answer":
+            await self._handle_question_answer(msg)
         elif msg_type == "truncate_history":
             self._handle_truncate_history(msg)
         elif msg_type == "cancel":
@@ -112,14 +114,14 @@ class AgentSession:
             logger.info("Added %d MCP tools from %d servers",
                         len(mcp_tools), len(self.mcp_manager.connected_servers))
 
-        # Register task delegation tool after all other tools are available.
+        # Register explore delegation tool after all other tools are available.
         if tools:
             subagent_runner = SubagentRunner(
                 parent_config=config,
                 base_tools=tools,
                 mcp_servers=config.mcp_servers or None,
             )
-            tools.append(create_task_tool(subagent_runner))
+            tools.append(create_explore_tool(subagent_runner))
 
         # Assemble final system prompt with tool descriptions
         if tools:
@@ -198,6 +200,32 @@ class AgentSession:
             logger.warning("WebSocket closed during agent run")
         except asyncio.CancelledError:
             logger.info("Agent run cancelled")
+
+    async def _handle_question_answer(self, msg: dict[str, object]) -> None:
+        """Deliver questionnaire answers to pending question tools."""
+        if self.agent is None:
+            await self._send_error("not_initialized", "Agent not initialized")
+            return
+
+        questionnaire_id = str(msg.get("questionnaire_id") or "").strip()
+        if not questionnaire_id:
+            await self._send_error("invalid_question_answer", "Missing questionnaire_id")
+            return
+
+        raw_answers = msg.get("answers")
+        if not isinstance(raw_answers, list):
+            await self._send_error("invalid_question_answer", "answers must be a list")
+            return
+
+        answers: list[dict[str, object]] = [
+            item for item in raw_answers if isinstance(item, dict)
+        ]
+        accepted = self.agent.submit_question_answer(questionnaire_id, answers)
+        if not accepted:
+            await self._send_error(
+                "question_not_pending",
+                f"No pending questionnaire found for id '{questionnaire_id}'",
+            )
 
     def _handle_truncate_history(self, msg: dict) -> None:
         """Truncate the agent's in-memory history for regenerate/edit."""

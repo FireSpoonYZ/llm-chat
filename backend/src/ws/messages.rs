@@ -12,6 +12,10 @@ pub enum ClientMessage {
         #[serde(default)]
         attachments: Vec<String>,
     },
+    QuestionAnswer {
+        questionnaire_id: String,
+        answers: serde_json::Value,
+    },
     EditMessage {
         message_id: String,
         content: String,
@@ -35,7 +39,8 @@ pub enum ContainerMessage {
     },
     Error,
     /// Forwarded types: assistant_delta, thinking_delta, tool_call, tool_result,
-    /// task_trace_delta, and other streaming passthrough events.
+    /// subagent_trace_delta, task_trace_delta (legacy), and other streaming
+    /// passthrough events.
     /// These are handled as raw JSON to preserve all fields during forwarding.
     #[serde(other)]
     Forward,
@@ -70,6 +75,19 @@ mod tests {
         assert!(
             matches!(msg, ClientMessage::UserMessage { content, attachments } if content == "look at this" && attachments.len() == 1)
         );
+    }
+
+    #[test]
+    fn deserialize_question_answer() {
+        let json = r#"{"type":"question_answer","questionnaire_id":"qq-1","answers":[{"id":"q1","selected_options":["A"]}]}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            msg,
+            ClientMessage::QuestionAnswer {
+                questionnaire_id,
+                answers
+            } if questionnaire_id == "qq-1" && answers.is_array()
+        ));
     }
 
     #[test]

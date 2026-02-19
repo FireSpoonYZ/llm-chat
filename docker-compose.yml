@@ -4,6 +4,10 @@ services:
       context: .
       dockerfile: docker/Dockerfile.backend
       network: host
+      cache_from:
+        - type=local,src=.buildx-cache/backend
+      cache_to:
+        - type=local,dest=.buildx-cache/backend,mode=max
     ports:
       - "${PORT:-3000}:3000"
       - "${INTERNAL_WS_PORT:-3001}:3001"
@@ -26,6 +30,10 @@ services:
       context: .
       dockerfile: docker/Dockerfile.frontend
       network: host
+      cache_from:
+        - type=local,src=.buildx-cache/frontend
+      cache_to:
+        - type=local,dest=.buildx-cache/frontend,mode=max
     ports:
       - "${FRONTEND_PORT:-80}:80"
     depends_on:
@@ -44,5 +52,9 @@ services:
       context: ./agent
       dockerfile: ../docker/Dockerfile.agent
       network: host
+      cache_from:
+        - type=local,src=.buildx-cache/agent
+      cache_to:
+        - type=local,dest=.buildx-cache/agent,mode=max
     image: claude-chat-agent:latest
     entrypoint: ["echo", "Agent image built"]

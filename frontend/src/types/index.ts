@@ -117,6 +117,30 @@ export interface ToolResult {
   meta?: Record<string, unknown>
 }
 
+export interface QuestionItem {
+  id: string
+  header?: string | null
+  question: string
+  options?: string[]
+  placeholder?: string | null
+  multiple?: boolean
+  required?: boolean
+}
+
+export interface QuestionAnswer {
+  id: string
+  question: string
+  selected_options: string[]
+  free_text: string
+  notes: string
+}
+
+export interface ActiveQuestionnaire {
+  questionnaire_id: string
+  title?: string | null
+  questions: QuestionItem[]
+}
+
 export type ContentBlock =
   | { type: 'text'; content: string }
   | { type: 'thinking'; content: string }
@@ -140,15 +164,34 @@ export type WsMessageEvent =
   | { type: 'tool_call'; tool_call_id: string; tool_name: string; tool_input?: Record<string, unknown> }
   | { type: 'tool_result'; tool_call_id: string; result: ToolResult | string; is_error: boolean }
   | {
+      type: 'question'
+      tool_call_id?: string
+      questionnaire_id: string
+      title?: string
+      questions: QuestionItem[]
+    }
+  | {
+      type: 'subagent_trace_delta'
+      tool_call_id: string
+      event_type: 'assistant_delta' | 'thinking_delta' | 'tool_call' | 'tool_result' | 'complete' | 'error' | string
+      payload: Record<string, unknown>
+    }
+  | {
       type: 'task_trace_delta'
+      // Legacy compatibility path for historical task tool runs.
       tool_call_id: string
       event_type: 'assistant_delta' | 'thinking_delta' | 'tool_call' | 'tool_result' | 'complete' | 'error' | string
       payload: Record<string, unknown>
     }
   | { type: 'complete'; message_id: string; content: string; tool_calls?: unknown[] }
-  | { type: 'error'; message: string }
-  | { type: 'container_status'; status: string; message?: string }
-  | { type: 'messages_truncated'; after_message_id: string; updated_content?: string }
+  | { type: 'error'; message: string; code?: string }
+  | { type: 'container_status'; status: string; reason?: string; message?: string }
+  | {
+      type: 'messages_truncated'
+      after_message_id: string
+      updated_content?: string
+      updated_parts?: MessagePart[]
+    }
   | { type: 'pong' }
 
 export interface FileEntry {

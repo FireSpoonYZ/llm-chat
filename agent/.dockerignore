@@ -1,0 +1,6 @@
+# Ignore everything by default, then include only files copied in Dockerfile.agent.
+**
+!pyproject.toml
+!uv.lock
+!src/
+!src/**

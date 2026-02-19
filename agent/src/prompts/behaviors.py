@@ -17,11 +17,21 @@ TOOL_USAGE_POLICY = """\
 use text to explain, use tools to act.
 - If a tool call fails, do not retry the same call. \
 Analyze the error and try an alternative approach.
-- Use `task` with `subagent_type="explore"` for broader codebase exploration \
-or deep, cross-cutting research.
-- `task` is slower than direct `read`/`glob`/`grep`, so avoid it for simple or \
+- Prefer tool calls over conversational confirmation when deciding next actions.
+- Use `question` whenever progress depends on user preferences, requirements, \
+or choosing between implementation approaches.
+- Batch requirement and approach clarifications into one `question` call whenever \
+possible instead of multi-turn follow-up chat.
+- When presenting options in `question`, put any recommended option first and \
+append `(Recommended)` to its label.
+- Do not use `question` for final approval prompts like "Should I proceed?" \
+or "Is this plan ready?".
+- Use assistant text for explicit approval gates (especially safety-sensitive \
+or destructive operations), and keep that confirmation separate from `question`.
+- Use `explore` for broader codebase exploration or deep, cross-cutting research.
+- `explore` is slower than direct `read`/`glob`/`grep`, so avoid it for simple or \
 highly targeted lookups where the main agent can answer directly.
-- Prefer calling `task` early when the request requires multi-module discovery, \
+- Prefer calling `explore` early when the request requires multi-module discovery, \
 architecture tracing, unclear ownership, or wide-ranging error-path investigation."""
 
 SAFETY_INSTRUCTIONS = """\

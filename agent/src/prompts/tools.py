@@ -7,7 +7,7 @@ TOOL_DESCRIPTIONS = {
         "and other terminal tasks.\n"
         "  - Output exceeding 50,000 characters will be truncated. "
         "For large outputs, redirect to a file and use read.\n"
-        "  - Default timeout is 30 seconds. Set a higher `timeout` "
+        "  - Default timeout is 120 seconds. Set a higher `timeout` "
         "for long-running commands (e.g., installs, builds).\n"
         "  - Avoid long-running or interactive commands "
         "(servers, watchers, editors).\n"
@@ -38,6 +38,13 @@ TOOL_DESCRIPTIONS = {
         "  - Preserve exact indentation (tabs/spaces) from the original.\n"
         "  - All file paths must be within /workspace."
     ),
+    "list": (
+        "**list** - List files and directories as a tree view.\n"
+        "  - Use this for directory exploration before opening files.\n"
+        "  - Supports `path`, `depth`, and `ignore` filters.\n"
+        "  - Returns both readable tree text and structured entries in data.\n"
+        "  - Prefer this over bash `ls/find` for predictable output."
+    ),
     "glob": (
         "**glob** - Find files matching a glob pattern.\n"
         "  - Supports patterns like '**/*.py', 'src/**/*.ts'.\n"
@@ -59,7 +66,9 @@ TOOL_DESCRIPTIONS = {
     ),
     "web_fetch": (
         "**web_fetch** - Fetch content from a URL.\n"
-        "  - HTML is converted to plain text for readability.\n"
+        "  - Supports `format`: text, markdown (default), or html.\n"
+        "  - HTML can be returned as markdown/plain text/raw html.\n"
+        "  - Includes a 5MB response-size safeguard.\n"
         "  - Read-only operation; does not modify any files.\n"
         "  - Optional `max_length` parameter (default 50,000 characters).\n"
         "  - Use for retrieving documentation, API responses, "
@@ -84,23 +93,46 @@ TOOL_DESCRIPTIONS = {
         "  - Newly created media files (images, charts, SVG) are "
         "automatically detected and displayed inline."
     ),
+    "question": (
+        "**question** - Ask structured questions to the user during execution.\n"
+        "  - Use this when you need user input for requirements, preferences, "
+        "or choosing between implementation approaches.\n"
+        "  - Supports a single question or a `questions` array for multi-step forms.\n"
+        "  - Each question can define options, required/multiple flags, and placeholders.\n"
+        "    Claude-style `multiSelect` is also accepted as an alias of `multiple`.\n"
+        "  - Users can always provide custom context via free-text and notes fields.\n"
+        "  - If you recommend an option, place it first and suffix the label with "
+        "`(Recommended)`.\n"
+        "  - Batch related questions in one call whenever possible instead of "
+        "multi-turn chat follow-ups.\n"
+        "  - Do not use this tool for final approval checks such as "
+        "\"Should I proceed?\"; use explicit confirmation text when approval is required.\n"
+        "  - The UI collects responses (including per-question notes), then execution "
+        "automatically continues in the same run."
+    ),
     "image_generation": (
         "**image_generation** - Generate or edit images using AI.\n"
         "  - Provide a detailed prompt describing the desired image.\n"
-        "  - `size`: WxH format (e.g., '1024x1024', '1024x1536', '1536x1024'). "
-        "Google provider auto-maps to the closest supported aspect ratio.\n"
-        "  - `quality`: low, medium, high, auto (default).\n"
+        "  - `size`: WxH format (e.g., '1024x1024', '1920x1080'). "
+        "OpenAI treats size as a best-effort hint and may not return exact pixels. "
+        "Google auto-maps to the closest supported aspect ratio and size tier (1K/2K/4K).\n"
+        "  - `quality`: low, medium, high, auto (default). Applies to OpenAI only; "
+        "ignored by Google.\n"
         "  - `n`: number of images to generate (1-4).\n"
         "  - Optional `reference_image`: path (relative to /workspace) to an "
         "existing image to use as a starting point. The prompt then describes "
         "how to modify it. Supported formats: PNG, JPEG, GIF, WebP.\n"
-        "  - Returns sandbox:// URLs that display inline in chat.\n"
+        "  - Tool call results display markdown with sandbox:// image links for users.\n"
+        "  - The model also receives multimodal tool context (same text + data image blocks) "
+        "for follow-up reasoning.\n"
+        "  - If no image is produced but the provider returns text, include that text in the "
+        "tool error result (and model context) instead of dropping it.\n"
         "  - Available for OpenAI and Google providers."
     ),
-    "task": (
-        "**task** - Delegate a specialized subagent for broad codebase exploration.\n"
-        "  - Parameters: `subagent_type`, `description`, `prompt`.\n"
-        "  - Current supported `subagent_type`: `explore`.\n"
+    "explore": (
+        "**explore** - Delegate a specialized read-only subagent for broad "
+        "codebase exploration.\n"
+        "  - Parameters: `description`, `prompt`.\n"
         "  - Use when the request needs deep or wide investigation across "
         "multiple modules, architecture tracing, or uncertain code ownership.\n"
         "  - Do NOT use for simple targeted lookups (known file, known symbol, "

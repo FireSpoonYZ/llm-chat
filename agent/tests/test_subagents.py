@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
 from src.agent import AgentConfig, StreamEvent
 from src.subagents import EXPLORE_SUBAGENT_PROMPT, SubagentRunner
-from src.tools.task import TaskTool
+from src.tools.explore import ExploreTool
 
 
 class _FakeTool:
@@ -27,22 +28,23 @@ def _config(**overrides) -> AgentConfig:
 
 
 @pytest.mark.asyncio
-async def test_task_tool_requires_runner() -> None:
-    tool = TaskTool(runner=None)
-    result = await tool._arun("explore", "x", "y")
+async def test_explore_tool_requires_runner() -> None:
+    tool = ExploreTool(runner=None)
+    result = await tool._arun("x", "y")
     assert result["success"] is False
     assert "not configured" in result["error"]
 
 
 @pytest.mark.asyncio
-async def test_task_tool_delegates_to_runner() -> None:
+async def test_explore_tool_delegates_to_runner() -> None:
     runner = AsyncMock()
-    runner.run_task.return_value = {"kind": "task", "text": "ok", "success": True, "error": None, "data": {}, "meta": {}}
-    tool = TaskTool(runner=runner)
-    result = await tool._arun("explore", "desc", "prompt")
+    runner.run_subagent.return_value = {"kind": "explore", "text": "ok", "success": True, "error": None, "data": {}, "meta": {}}
+    tool = ExploreTool(runner=runner)
+    result = await tool._arun("desc", "prompt")
     assert result["success"] is True
-    runner.run_task.assert_awaited_once_with(
+    runner.run_subagent.assert_awaited_once_with(
         subagent_type="explore",
+        result_kind="explore",
         description="desc",
         prompt="prompt",
         event_sink=None,
@@ -50,21 +52,45 @@ async def test_task_tool_delegates_to_runner() -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_tool_forwards_event_sink_to_runner() -> None:
+async def test_explore_tool_forwards_event_sink_to_runner() -> None:
     runner = AsyncMock()
-    runner.run_task.return_value = {"kind": "task", "text": "ok", "success": True, "error": None, "data": {}, "meta": {}}
-    tool = TaskTool(runner=runner)
+    runner.run_subagent.return_value = {"kind": "explore", "text": "ok", "success": True, "error": None, "data": {}, "meta": {}}
+    tool = ExploreTool(runner=runner)
     sink = AsyncMock()
     tool.set_event_sink(sink)
 
-    result = await tool._arun("explore", "desc", "prompt")
+    result = await tool._arun("desc", "prompt")
     assert result["success"] is True
-    runner.run_task.assert_awaited_once_with(
+    runner.run_subagent.assert_awaited_once_with(
         subagent_type="explore",
+        result_kind="explore",
         description="desc",
         prompt="prompt",
         event_sink=sink,
     )
+
+
+@pytest.mark.asyncio
+async def test_explore_tool_falls_back_to_run_task_runner() -> None:
+    class _LegacyRunner:
+        async def run_task(self, **kwargs: Any) -> dict[str, Any]:
+            assert kwargs["subagent_type"] == "explore"
+            assert kwargs["description"] == "desc"
+            assert kwargs["prompt"] == "prompt"
+            assert kwargs["event_sink"] is None
+            return {
+                "kind": "task",
+                "text": "ok",
+                "success": True,
+                "error": None,
+                "data": {},
+                "meta": {},
+            }
+
+    tool = ExploreTool(runner=_LegacyRunner())
+    result = await tool._arun("desc", "prompt")
+    assert result["success"] is True
+    assert result["kind"] == "task"
 
 
 @pytest.mark.asyncio
@@ -73,9 +99,25 @@ async def test_subagent_runner_rejects_unsupported_type() -> None:
         parent_config=_config(subagent_provider="openai", subagent_model="gpt-4o"),
         base_tools=[],
     )
-    result = await runner.run_task(subagent_type="plan", description="x", prompt="y")
+    result = await runner.run_subagent(subagent_type="plan", description="x", prompt="y")
     assert result["success"] is False
     assert "only subagent_type='explore'" in result["text"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_runner_rejects_unsupported_type_with_result_kind() -> None:
+    runner = SubagentRunner(
+        parent_config=_config(subagent_provider="openai", subagent_model="gpt-4o"),
+        base_tools=[],
+    )
+    result = await runner.run_subagent(
+        subagent_type="plan",
+        result_kind="explore",
+        description="x",
+        prompt="y",
+    )
+    assert result["success"] is False
+    assert result["kind"] == "explore"
 
 
 @pytest.mark.asyncio
@@ -84,7 +126,7 @@ async def test_subagent_runner_requires_configured_model() -> None:
         parent_config=_config(provider="", model="", subagent_provider="", subagent_model=""),
         base_tools=[],
     )
-    result = await runner.run_task(subagent_type="explore", description="x", prompt="y")
+    result = await runner.run_subagent(subagent_type="explore", description="x", prompt="y")
     assert result["success"] is False
     assert "not configured for this conversation" in result["text"]
 
@@ -96,7 +138,7 @@ async def test_subagent_runner_rejects_nested_invocation() -> None:
         base_tools=[],
     )
     runner._depth = 1
-    result = await runner.run_task(subagent_type="explore", description="x", prompt="y")
+    result = await runner.run_subagent(subagent_type="explore", description="x", prompt="y")
     assert result["success"] is False
     assert "cannot invoke subagents" in result["text"]
 
@@ -134,17 +176,18 @@ async def test_subagent_runner_returns_trace_blocks(monkeypatch: pytest.MonkeyPa
         parent_config=_config(subagent_provider="openai", subagent_model="gpt-4o"),
         base_tools=[
             _FakeTool("read", {"read_only": True}),
-            _FakeTool("task", {"read_only": False}),
+            _FakeTool("explore", {"read_only": False}),
         ],
     )
     sink = AsyncMock()
-    result = await runner.run_task(
+    result = await runner.run_subagent(
         subagent_type="explore",
         description="Inspect docs",
         prompt="Find architecture notes",
         event_sink=sink,
     )
     assert result["success"] is True
+    assert result["kind"] == "explore"
     trace = result["data"]["trace"]
     assert isinstance(trace, list)
     assert len(trace) == 2

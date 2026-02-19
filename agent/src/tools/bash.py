@@ -23,7 +23,7 @@ class BashInput(BaseModel):
 
     command: str = Field(description="The shell command to execute.")
     timeout: int = Field(
-        default=30,
+        default=120,
         description="Maximum number of seconds the command is allowed to run.",
     )
 
@@ -104,7 +104,7 @@ class BashTool(BaseTool):
             },
         )
 
-    def _run(self, command: str, timeout: int = 30) -> dict[str, Any]:
+    def _run(self, command: str, timeout: int = 120) -> dict[str, Any]:
         """Execute *command* synchronously and return structured output."""
         start = time.monotonic()
         try:
@@ -151,7 +151,7 @@ class BashTool(BaseTool):
                 error=True,
             )
 
-    async def _arun(self, command: str, timeout: int = 30) -> dict[str, Any]:
+    async def _arun(self, command: str, timeout: int = 120) -> dict[str, Any]:
         """Execute *command* asynchronously."""
         start = time.monotonic()
         try:

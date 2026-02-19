@@ -21,7 +21,7 @@ from src.agent import (
     sanitize_delta,
 )
 from src.prompts.presets import BUILTIN_PRESETS
-from src.tools.task import TaskTool
+from src.tools.explore import ExploreTool
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 
@@ -1056,7 +1056,35 @@ class TestChatAgent:
         assert result["llm_content"] == multimodal_result
 
     @patch("src.agent.create_chat_model")
-    async def test_task_tool_streams_subagent_trace_events(self, mock_create):
+    async def test_structured_tool_result_keeps_llm_content(self, mock_create):
+        """Structured dict results should preserve llm_content for ToolMessage context."""
+        mock_create.return_value = MagicMock()
+        llm_content = [
+            {"type": "text", "text": "Generated image markdown"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc123"}},
+        ]
+        mock_tool = MagicMock()
+        mock_tool.name = "image_generation"
+        mock_tool.ainvoke = AsyncMock(return_value={
+            "kind": "image_generation",
+            "text": "![Generated Image](sandbox:///generated_images/sample.png)",
+            "success": True,
+            "error": None,
+            "data": {"media": [{"type": "image", "url": "sandbox:///generated_images/sample.png"}]},
+            "meta": {"image_count": 1},
+            "llm_content": llm_content,
+        })
+
+        agent = ChatAgent(self._make_config(), tools=[mock_tool])
+        result, is_error = await agent._execute_tool("image_generation", {"prompt": "a cat"})
+        assert is_error is False
+        assert result["kind"] == "image_generation"
+        assert result["success"] is True
+        assert result["text"].startswith("![Generated Image]")
+        assert result["llm_content"] == llm_content
+
+    @patch("src.agent.create_chat_model")
+    async def test_explore_tool_streams_subagent_trace_events(self, mock_create):
         from langchain_core.messages import AIMessageChunk, ToolCallChunk
 
         call_count = 0
@@ -1069,9 +1097,9 @@ class TestChatAgent:
                     content="",
                     tool_call_chunks=[
                         ToolCallChunk(
-                            name="task",
-                            args='{"subagent_type":"explore","description":"scan","prompt":"inspect"}',
-                            id="tc-task-1",
+                            name="explore",
+                            args='{"description":"scan","prompt":"inspect"}',
+                            id="tc-explore-1",
                             index=0,
                         ),
                     ],
@@ -1085,7 +1113,7 @@ class TestChatAgent:
         mock_create.return_value = mock_llm
 
         class _Runner:
-            async def run_task(self, **kwargs):
+            async def run_subagent(self, **kwargs):
                 sink = kwargs.get("event_sink")
                 if sink is not None:
                     await sink(StreamEvent("assistant_delta", {"delta": "Investigating"}))
@@ -1101,7 +1129,7 @@ class TestChatAgent:
                     }))
                     await sink(StreamEvent("complete", {"content": "Subagent summary"}))
                 return {
-                    "kind": "task",
+                    "kind": "explore",
                     "text": "Subagent summary",
                     "success": True,
                     "error": None,
@@ -1109,28 +1137,172 @@ class TestChatAgent:
                     "meta": {},
                 }
 
-        task_tool = TaskTool(runner=_Runner())
-        agent = ChatAgent(self._make_config(), tools=[task_tool])
+        explore_tool = ExploreTool(runner=_Runner())
+        agent = ChatAgent(self._make_config(), tools=[explore_tool])
 
         events = []
-        async for event in agent.handle_message("run task"):
+        async for event in agent.handle_message("run explore"):
             events.append(event)
 
-        trace_events = [e for e in events if e.type == "task_trace_delta"]
+        trace_events = [e for e in events if e.type == "subagent_trace_delta"]
         assert [e.data["event_type"] for e in trace_events] == [
             "assistant_delta",
             "tool_call",
             "tool_result",
             "complete",
         ]
+        assert not any(e.type == "task_trace_delta" for e in events)
         assert trace_events[1].data["payload"]["tool_name"] == "read"
 
         tool_result_event = next(e for e in events if e.type == "tool_result")
-        assert tool_result_event.data["result"]["kind"] == "task"
+        assert tool_result_event.data["result"]["kind"] == "explore"
         assert tool_result_event.data["is_error"] is False
 
     @patch("src.agent.create_chat_model")
-    async def test_task_tool_cancel_clears_event_sink(self, mock_create):
+    async def test_set_event_sink_alone_does_not_enable_subagent_trace(
+        self, mock_create
+    ):
+        from langchain_core.messages import AIMessageChunk, ToolCallChunk
+
+        call_count = 0
+
+        async def fake_astream(_messages):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        ToolCallChunk(
+                            name="runtime_hook_tool",
+                            args="{}",
+                            id="tc-runtime-hook-1",
+                            index=0,
+                        ),
+                    ],
+                )
+            else:
+                yield AIMessageChunk(content="done", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        class _RuntimeHookTool:
+            name = "runtime_hook_tool"
+
+            def __init__(self) -> None:
+                self.set_event_sink_called = False
+                self._sink = None
+
+            def set_event_sink(self, sink):
+                self.set_event_sink_called = True
+                self._sink = sink
+
+            async def ainvoke(self, _args):
+                if self._sink is not None:
+                    await self._sink(StreamEvent("assistant_delta", {"delta": "unexpected"}))
+                return {
+                    "kind": "runtime_hook_tool",
+                    "text": "ok",
+                    "success": True,
+                    "error": None,
+                    "data": {},
+                    "meta": {},
+                }
+
+        tool = _RuntimeHookTool()
+        agent = ChatAgent(self._make_config(), tools=[tool])
+        events = []
+        async for event in agent.handle_message("run hook"):
+            events.append(event)
+
+        assert tool.set_event_sink_called is False
+        assert not any(e.type == "subagent_trace_delta" for e in events)
+        assert not any(e.type == "task_trace_delta" for e in events)
+
+    @patch("src.agent.create_chat_model")
+    async def test_runtime_event_opt_in_forwards_question_events(self, mock_create):
+        from langchain_core.messages import AIMessageChunk, ToolCallChunk
+
+        call_count = 0
+
+        async def fake_astream(_messages):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        ToolCallChunk(
+                            name="question_hook_tool",
+                            args="{}",
+                            id="tc-question-hook-1",
+                            index=0,
+                        ),
+                    ],
+                )
+            else:
+                yield AIMessageChunk(content="continued", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        class _QuestionHookTool:
+            name = "question_hook_tool"
+            supports_runtime_events = True
+
+            def __init__(self) -> None:
+                self._sink = None
+
+            def set_event_sink(self, sink):
+                self._sink = sink
+
+            async def ainvoke(self, _args):
+                if self._sink is not None:
+                    await self._sink({
+                        "type": "question",
+                        "data": {
+                            "questionnaire_id": "qq-test",
+                            "title": "Need details",
+                            "questions": [
+                                {
+                                    "id": "q1",
+                                    "question": "Choose one",
+                                    "options": ["A", "B"],
+                                    "multiple": False,
+                                    "required": True,
+                                }
+                            ],
+                        },
+                    })
+                return {
+                    "kind": "question_hook_tool",
+                    "text": "ok",
+                    "success": True,
+                    "error": None,
+                    "data": {},
+                    "meta": {},
+                }
+
+        tool = _QuestionHookTool()
+        agent = ChatAgent(self._make_config(), tools=[tool])
+
+        events = []
+        async for event in agent.handle_message("ask"):
+            events.append(event)
+
+        question_event = next(e for e in events if e.type == "question")
+        assert question_event.data["tool_call_id"] == "tc-question-hook-1"
+        assert question_event.data["questionnaire_id"] == "qq-test"
+        assert not any(e.type == "subagent_trace_delta" for e in events)
+        assert any(e.type == "complete" for e in events)
+
+    @patch("src.agent.create_chat_model")
+    async def test_explore_tool_cancel_clears_event_sink(self, mock_create):
         from langchain_core.messages import AIMessageChunk, ToolCallChunk
 
         async def fake_astream(_messages):
@@ -1138,9 +1310,9 @@ class TestChatAgent:
                 content="",
                 tool_call_chunks=[
                     ToolCallChunk(
-                        name="task",
-                        args='{"subagent_type":"explore","description":"scan","prompt":"inspect"}',
-                        id="tc-task-cancel",
+                        name="explore",
+                        args='{"description":"scan","prompt":"inspect"}',
+                        id="tc-explore-cancel",
                         index=0,
                     ),
                 ],
@@ -1156,7 +1328,7 @@ class TestChatAgent:
                 self.started = asyncio.Event()
                 self.cancelled = asyncio.Event()
 
-            async def run_task(self, **kwargs):
+            async def run_subagent(self, **kwargs):
                 sink = kwargs.get("event_sink")
                 self.started.set()
                 if sink is not None:
@@ -1169,13 +1341,13 @@ class TestChatAgent:
                     raise
 
         runner = _Runner()
-        task_tool = TaskTool(runner=runner)
-        agent = ChatAgent(self._make_config(), tools=[task_tool])
+        explore_tool = ExploreTool(runner=runner)
+        agent = ChatAgent(self._make_config(), tools=[explore_tool])
 
         events: list[StreamEvent] = []
 
         async def _collect() -> None:
-            async for event in agent.handle_message("run task"):
+            async for event in agent.handle_message("run explore"):
                 events.append(event)
 
         collect_task = asyncio.create_task(_collect())
@@ -1184,13 +1356,13 @@ class TestChatAgent:
         await asyncio.wait_for(collect_task, timeout=1)
 
         assert runner.cancelled.is_set()
-        assert task_tool._event_sink is None
-        assert any(e.type == "task_trace_delta" for e in events)
+        assert explore_tool._event_sink is None
+        assert any(e.type == "subagent_trace_delta" for e in events)
         error_event = next(e for e in events if e.type == "error")
         assert error_event.data["code"] == "cancelled"
 
     @patch("src.agent.create_chat_model")
-    async def test_task_tool_streams_large_trace_burst(self, mock_create):
+    async def test_explore_tool_streams_large_trace_burst(self, mock_create):
         from langchain_core.messages import AIMessageChunk, ToolCallChunk
 
         call_count = 0
@@ -1203,9 +1375,9 @@ class TestChatAgent:
                     content="",
                     tool_call_chunks=[
                         ToolCallChunk(
-                            name="task",
-                            args='{"subagent_type":"explore","description":"scan","prompt":"inspect"}',
-                            id="tc-task-burst",
+                            name="explore",
+                            args='{"description":"scan","prompt":"inspect"}',
+                            id="tc-explore-burst",
                             index=0,
                         ),
                     ],
@@ -1221,13 +1393,13 @@ class TestChatAgent:
         burst_size = 300
 
         class _Runner:
-            async def run_task(self, **kwargs):
+            async def run_subagent(self, **kwargs):
                 sink = kwargs.get("event_sink")
                 if sink is not None:
                     for _ in range(burst_size):
                         await sink(StreamEvent("assistant_delta", {"delta": "x"}))
                 return {
-                    "kind": "task",
+                    "kind": "explore",
                     "text": "Subagent summary",
                     "success": True,
                     "error": None,
@@ -1235,14 +1407,14 @@ class TestChatAgent:
                     "meta": {},
                 }
 
-        task_tool = TaskTool(runner=_Runner())
-        agent = ChatAgent(self._make_config(), tools=[task_tool])
+        explore_tool = ExploreTool(runner=_Runner())
+        agent = ChatAgent(self._make_config(), tools=[explore_tool])
 
         events = []
-        async for event in agent.handle_message("run task"):
+        async for event in agent.handle_message("run explore"):
             events.append(event)
 
-        trace_events = [e for e in events if e.type == "task_trace_delta"]
+        trace_events = [e for e in events if e.type == "subagent_trace_delta"]
         assert len(trace_events) == burst_size
         assert all(e.data["event_type"] == "assistant_delta" for e in trace_events)
 
@@ -1298,6 +1470,66 @@ class TestChatAgent:
         tool_block = next(b for b in blocks if b.get("type") == "tool_call")
         assert tool_block["result"]["kind"] == "read"
         assert "base64" not in tool_block["result"]["text"]
+
+    @patch("src.agent.create_chat_model")
+    async def test_tool_result_hides_llm_content_but_tool_message_keeps_it(self, mock_create):
+        """tool_result should omit llm_content while ToolMessage keeps multimodal payload."""
+        from langchain_core.messages import AIMessageChunk, ToolCallChunk
+
+        call_count = 0
+
+        async def fake_astream(messages):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        ToolCallChunk(
+                            name="image_generation",
+                            args='{"prompt":"a cat"}',
+                            id="tc-img-1",
+                            index=0,
+                        ),
+                    ],
+                )
+            else:
+                yield AIMessageChunk(content="Done.", tool_call_chunks=[])
+
+        mock_llm = MagicMock()
+        mock_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+        mock_create.return_value = mock_llm
+
+        llm_content = [
+            {"type": "text", "text": "![Generated Image](sandbox:///generated_images/a.png)"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]
+        mock_tool = MagicMock()
+        mock_tool.name = "image_generation"
+        mock_tool.ainvoke = AsyncMock(return_value={
+            "kind": "image_generation",
+            "text": "![Generated Image](sandbox:///generated_images/a.png)",
+            "success": True,
+            "error": None,
+            "data": {"media": [{"type": "image", "url": "sandbox:///generated_images/a.png"}]},
+            "meta": {"image_count": 1},
+            "llm_content": llm_content,
+        })
+
+        agent = ChatAgent(self._make_config(), tools=[mock_tool])
+        events = []
+        async for event in agent.handle_message("generate image"):
+            events.append(event)
+
+        tool_result_event = next(e for e in events if e.type == "tool_result")
+        assert tool_result_event.data["result"]["kind"] == "image_generation"
+        assert "llm_content" not in tool_result_event.data["result"]
+        assert "sandbox:///" in tool_result_event.data["result"]["text"]
+
+        tool_msgs = [m for m in agent.messages if isinstance(m, ToolMessage)]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0].content == llm_content
 
     @patch("src.agent.create_chat_model")
     async def test_tool_message_contains_full_multimodal(self, mock_create):

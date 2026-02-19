@@ -24,6 +24,25 @@
             {{ isError ? t('tool.error') : t('tool.result') }}
           </div>
           <div v-if="bashMeta" class="bash-meta">{{ bashMeta }}</div>
+          <div v-if="questionAnswers.length > 0" class="question-answers">
+            <div v-for="(answer, i) in questionAnswers" :key="`${answer.id || i}`" class="question-answer-item">
+              <div class="question-answer-title">
+                {{ answer.question || `${t('questionnaire.questionLabel')} ${i + 1}` }}
+              </div>
+              <div v-if="answer.selected_options.length > 0" class="question-answer-line">
+                <strong>{{ t('questionnaire.selectedOptions') }}:</strong>
+                {{ answer.selected_options.join(', ') }}
+              </div>
+              <div v-if="answer.free_text" class="question-answer-line">
+                <strong>{{ t('questionnaire.freeText') }}:</strong>
+                {{ answer.free_text }}
+              </div>
+              <div v-if="answer.notes" class="question-answer-line">
+                <strong>{{ t('questionnaire.notes') }}:</strong>
+                {{ answer.notes }}
+              </div>
+            </div>
+          </div>
           <details
             v-if="taskTrace.length > 0"
             class="task-trace"
@@ -44,7 +63,7 @@
               <audio v-else-if="media.type === 'audio'" controls preload="metadata" :src="media.url" class="tool-media-audio" />
             </template>
           </div>
-          <pre v-if="cleanedResult" class="tool-content" :class="{ 'tool-error': isError }">{{
+          <pre v-if="cleanedResult && !(toolName === 'question' && questionAnswers.length > 0)" class="tool-content" :class="{ 'tool-error': isError }">{{
             cleanedResult
           }}</pre>
         </div>
@@ -65,6 +84,7 @@ import {
   Link,
   VideoPlay,
   Picture,
+  ChatLineSquare,
 } from '@element-plus/icons-vue'
 import { fileViewUrl, sharedFileViewUrl } from '../utils/fileUrl'
 import type { ToolResult, ToolMediaRef } from '../types'
@@ -83,6 +103,7 @@ const props = defineProps<{
 
 const expanded = ref(false)
 const taskTraceExpanded = ref(false)
+const SUBAGENT_TOOL_NAMES = new Set(['explore', 'task'])
 
 const MAX_RESULT_LENGTH = 5000
 
@@ -92,6 +113,7 @@ const toolIcon = computed(() => {
       return Monitor
     case 'read':
     case 'write':
+    case 'list':
       return Document
     case 'edit':
       return Edit
@@ -104,6 +126,8 @@ const toolIcon = computed(() => {
       return VideoPlay
     case 'image_generation':
       return Picture
+    case 'question':
+      return ChatLineSquare
     default:
       return Monitor
   }
@@ -198,7 +222,7 @@ const formattedInput = computed(() => {
 
 const truncatedResult = computed(() => {
   const text = normalizedResult.value.text || ''
-  if (props.toolName === 'task') {
+  if (SUBAGENT_TOOL_NAMES.has(props.toolName)) {
     return text
   }
   if (text.length > MAX_RESULT_LENGTH) {
@@ -240,10 +264,35 @@ const bashMeta = computed(() => {
 })
 
 const taskTrace = computed<Record<string, unknown>[]>(() => {
-  if (props.toolName !== 'task') return []
+  if (!SUBAGENT_TOOL_NAMES.has(props.toolName)) return []
   const trace = normalizedResult.value.data?.trace
   if (!Array.isArray(trace)) return []
   return trace.filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null)
+})
+
+type QuestionAnswerView = {
+  id: string
+  question: string
+  selected_options: string[]
+  free_text: string
+  notes: string
+}
+
+const questionAnswers = computed<QuestionAnswerView[]>(() => {
+  if (props.toolName !== 'question') return []
+  const answers = normalizedResult.value.data?.answers
+  if (!Array.isArray(answers)) return []
+  return answers
+    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    .map((item) => ({
+      id: typeof item.id === 'string' ? item.id : '',
+      question: typeof item.question === 'string' ? item.question : '',
+      selected_options: Array.isArray(item.selected_options)
+        ? item.selected_options.map(x => String(x))
+        : [],
+      free_text: typeof item.free_text === 'string' ? item.free_text : '',
+      notes: typeof item.notes === 'string' ? item.notes : '',
+    }))
 })
 
 function handleTaskTraceToggle(event: Event): void {
@@ -392,6 +441,32 @@ function traceBlockContent(block: Record<string, unknown>): string {
 }
 .tool-media-audio {
   width: 100%;
+}
+
+.question-answers {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0;
+}
+
+.question-answer-item {
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  background: var(--bg-user-message);
+}
+
+.question-answer-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.question-answer-line {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 3px;
 }
 
 .task-trace {

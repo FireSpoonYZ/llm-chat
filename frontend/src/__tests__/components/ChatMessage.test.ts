@@ -107,6 +107,14 @@ describe('ChatMessage', () => {
     })
     expect(wrapper.find('.regenerate-btn').exists()).toBe(false)
   })
+
+  it('does not show edit button for pending user messages', () => {
+    const wrapper = mount(ChatMessage, {
+      props: { message: makeMessage({ id: 'pending-1', role: 'user' }) },
+      global: globalConfig,
+    })
+    expect(wrapper.find('.edit-btn').exists()).toBe(false)
+  })
 })
 
 describe('ChatMessage - contentBlocks parsing', () => {

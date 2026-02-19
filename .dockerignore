@@ -1,0 +1,25 @@
+# Ignore everything by default, then opt in only required build inputs.
+**
+
+# Keep Docker config needed by Dockerfiles.
+!docker/
+!docker/**
+
+# Backend image inputs.
+!backend/
+!backend/**
+!migrations/
+!migrations/**
+
+# Frontend image inputs.
+!frontend/
+!frontend/**
+
+# Exclude heavy local artifacts within included directories.
+backend/target/
+backend/data/
+frontend/node_modules/
+frontend/dist/
+
+# Keep this file.
+!.dockerignore

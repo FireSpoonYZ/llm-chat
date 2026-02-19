@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.tools.image_gen import (
+    ImageGenerationInput,
     ImageGenerationTool,
     _DATA_URI_RE,
     _GOOGLE_SUPPORTED_RATIOS,
@@ -16,8 +17,9 @@ from src.tools.image_gen import (
     _compute_google_aspect_ratio,
     _compute_google_image_size,
     _parse_size,
+    _strip_data_uri_images,
 )
-from .result_helpers import _rerror, _rsuccess, _rtext
+from .result_helpers import _rdata, _rerror, _rllm, _rsuccess, _rtext
 
 
 FAKE_IMAGE_DATA = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
@@ -81,6 +83,9 @@ class TestImageGenerationTool:
 
         assert _rsuccess(result) is True
         assert "sandbox://" in _rtext(result)
+        llm_content = _rllm(result)
+        assert isinstance(llm_content, str)
+        assert llm_content == _rtext(result)
         gen_dir = os.path.join(workspace, "generated_images")
         assert os.path.isdir(gen_dir)
         assert len(os.listdir(gen_dir)) == 1
@@ -131,6 +136,9 @@ class TestImageGenerationTool:
 
         assert _rsuccess(result) is True
         assert _rtext(result).count("sandbox://") == 2
+        llm_content = _rllm(result)
+        assert isinstance(llm_content, str)
+        assert llm_content == _rtext(result)
         assert len(os.listdir(os.path.join(workspace, "generated_images"))) == 2
         assert mock_client.chat.completions.create.call_count == 2
 
@@ -166,6 +174,52 @@ class TestImageGenerationTool:
 
         assert _rsuccess(result) is False
         assert "No images were generated" in _rtext(result)
+        assert "I cannot generate images." in _rtext(result)
+        assert _rdata(result).get("model_output") == "I cannot generate images."
+        assert _rdata(result).get("raw_output") == "I cannot generate images."
+        assert _rllm(result) == "I cannot generate images."
+
+    @pytest.mark.asyncio
+    async def test_openai_string_response_with_data_uri(self, workspace):
+        """OpenAI-compatible proxies may return plain string responses."""
+        tool = ImageGenerationTool(
+            workspace=workspace, provider="openai", api_key="sk-test", model="gpt-4o",
+        )
+        response_text = f"Here is your image: data:image/png;base64,{FAKE_B64}"
+        with patch("src.tools.image_gen.openai.AsyncOpenAI") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create = AsyncMock(return_value=response_text)
+            mock_cls.return_value = mock_client
+
+            result = await tool._arun(prompt="test")
+
+        assert _rsuccess(result) is True
+        assert "sandbox://" in _rtext(result)
+        llm_content = _rllm(result)
+        assert isinstance(llm_content, str)
+        assert llm_content == _rtext(result)
+
+    @pytest.mark.asyncio
+    async def test_openai_string_response_without_data_uri(self, workspace):
+        """Plain string responses without image payload should fail gracefully."""
+        tool = ImageGenerationTool(
+            workspace=workspace, provider="openai", api_key="sk-test", model="gpt-4o",
+        )
+        response_text = "I can only describe the scene in words."
+        with patch("src.tools.image_gen.openai.AsyncOpenAI") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create = AsyncMock(return_value=response_text)
+            mock_cls.return_value = mock_client
+
+            result = await tool._arun(prompt="test")
+
+        assert _rsuccess(result) is False
+        assert "No images were generated" in _rtext(result)
+        assert "I can only describe the scene in words." in _rtext(result)
+        assert "str' object has no attribute 'choices" not in _rtext(result)
+        assert _rdata(result).get("model_output") == "I can only describe the scene in words."
+        assert _rdata(result).get("raw_output") == "I can only describe the scene in words."
+        assert _rllm(result) == "I can only describe the scene in words."
 
     @pytest.mark.asyncio
     async def test_openai_jpeg_format(self, workspace):
@@ -185,6 +239,9 @@ class TestImageGenerationTool:
         assert _rsuccess(result) is True
         assert "sandbox://" in _rtext(result)
         assert ".jpg" in _rtext(result)
+        llm_content = _rllm(result)
+        assert isinstance(llm_content, str)
+        assert llm_content == _rtext(result)
 
     @pytest.mark.asyncio
     async def test_openai_prompt_includes_size_hint(self, workspace):
@@ -301,6 +358,9 @@ class TestImageGenerationTool:
         assert _rsuccess(result) is True
         assert "sandbox://" in _rtext(result)
         assert ".png" in _rtext(result)
+        llm_content = _rllm(result)
+        assert isinstance(llm_content, str)
+        assert llm_content == _rtext(result)
 
     @pytest.mark.asyncio
     async def test_google_passes_model_and_config(self, workspace):
@@ -364,7 +424,43 @@ class TestImageGenerationTool:
 
         assert _rsuccess(result) is True
         assert _rtext(result).count("sandbox://") == 3
+        llm_content = _rllm(result)
+        assert isinstance(llm_content, str)
+        assert llm_content == _rtext(result)
         assert mock_client.aio.models.generate_content.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_google_model_text_included_in_result(self, workspace):
+        """When Google returns text alongside images, text and llm_content include it."""
+        tool = ImageGenerationTool(
+            workspace=workspace, provider="google", api_key="google-key",
+            model="gemini-2.0-flash",
+        )
+        resp = MagicMock()
+        img_part = MagicMock()
+        img_part.inline_data = MagicMock()
+        img_part.inline_data.data = FAKE_IMAGE_DATA
+        text_part = MagicMock()
+        text_part.inline_data = None
+        text_part.text = "Here is the generated cat image."
+        resp.candidates = [MagicMock()]
+        resp.candidates[0].content.parts = [img_part, text_part]
+
+        with patch("src.tools.image_gen.genai") as mock_genai, \
+             patch("src.tools.image_gen.types"):
+            mock_client = MagicMock()
+            mock_client.aio.models.generate_content = AsyncMock(return_value=resp)
+            mock_genai.Client.return_value = mock_client
+
+            result = await tool._arun(prompt="a cat")
+
+        assert _rsuccess(result) is True
+        assert "Here is the generated cat image." in _rtext(result)
+        assert "sandbox://" in _rtext(result)
+        llm_content = _rllm(result)
+        assert isinstance(llm_content, str)
+        assert "Here is the generated cat image." in llm_content
+        assert "sandbox://" in llm_content
 
     @pytest.mark.asyncio
     async def test_google_aspect_ratio_computed(self, workspace):
@@ -463,6 +559,23 @@ class TestImageGenerationTool:
     def test_parse_size(self):
         assert _parse_size("1024x1536") == (1024, 1536)
         assert _parse_size("800x800") == (800, 800)
+
+    def test_input_schema_descriptions_clarify_provider_behavior(self):
+        if hasattr(ImageGenerationInput, "model_json_schema"):
+            schema = ImageGenerationInput.model_json_schema()
+        else:
+            schema = ImageGenerationInput.schema()
+
+        size_desc = schema["properties"]["size"]["description"].lower()
+        quality_desc = schema["properties"]["quality"]["description"].lower()
+
+        assert "wxh" in size_desc
+        assert "best-effort" in size_desc
+        assert "openai" in size_desc
+        assert "google" in size_desc
+        assert "1k/2k/4k" in size_desc
+        assert "openai only" in quality_desc
+        assert "ignored by google" in quality_desc
 
     def test_parse_size_invalid(self):
         with pytest.raises((ValueError, IndexError)):
@@ -732,6 +845,20 @@ class TestImageGenerationTool:
             ".webp": "image/webp",
         }
 
+    # --- _strip_data_uri_images tests ---
+
+    def test_strip_data_uri_images_removes_data_uri_markdown(self):
+        text = f"Here is your image: ![cat](data:image/png;base64,{FAKE_B64})"
+        assert _strip_data_uri_images(text) == "Here is your image:"
+
+    def test_strip_data_uri_images_preserves_non_data_uri(self):
+        text = "![cat](https://example.com/cat.png) and some text"
+        assert _strip_data_uri_images(text) == text
+
+    def test_strip_data_uri_images_empty_after_strip(self):
+        text = f"![img](data:image/jpeg;base64,{FAKE_B64})"
+        assert _strip_data_uri_images(text) == ""
+
     # --- Google null/empty response tests ---
 
     @pytest.mark.asyncio
@@ -744,6 +871,7 @@ class TestImageGenerationTool:
         resp = MagicMock()
         text_part = MagicMock()
         text_part.inline_data = None
+        text_part.text = "Image generation is blocked by policy."
         resp.candidates = [MagicMock()]
         resp.candidates[0].content.parts = [text_part]
 
@@ -757,6 +885,10 @@ class TestImageGenerationTool:
 
         assert _rsuccess(result) is False
         assert "No images were generated" in _rtext(result)
+        assert "Image generation is blocked by policy." in _rtext(result)
+        assert _rdata(result).get("model_output") == "Image generation is blocked by policy."
+        assert _rdata(result).get("raw_output") == "Image generation is blocked by policy."
+        assert _rllm(result) == "Image generation is blocked by policy."
 
     @pytest.mark.asyncio
     async def test_google_null_parts_returns_no_images(self, workspace):
@@ -779,6 +911,10 @@ class TestImageGenerationTool:
 
         assert _rsuccess(result) is False
         assert "No images were generated" in _rtext(result)
+        raw_output = _rdata(result).get("raw_output")
+        assert isinstance(raw_output, str)
+        assert raw_output
+        assert _rllm(result) == raw_output
 
     @pytest.mark.asyncio
     async def test_google_empty_candidates_returns_no_images(self, workspace):
@@ -800,3 +936,7 @@ class TestImageGenerationTool:
 
         assert _rsuccess(result) is False
         assert "No images were generated" in _rtext(result)
+        raw_output = _rdata(result).get("raw_output")
+        assert isinstance(raw_output, str)
+        assert raw_output
+        assert _rllm(result) == raw_output

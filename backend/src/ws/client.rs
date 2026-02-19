@@ -17,6 +17,25 @@ use crate::auth::middleware::AppState;
 use crate::db;
 use crate::docker::manager::DockerManager;
 
+fn ws_parts_from_db_parts(parts: &[db::messages_v2::MessagePart]) -> Vec<serde_json::Value> {
+    parts
+        .iter()
+        .map(|part| {
+            let json_payload = part
+                .json_payload
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            serde_json::json!({
+                "type": part.part_type,
+                "text": part.text,
+                "json_payload": json_payload,
+                "tool_call_id": part.tool_call_id,
+                "seq": part.seq,
+            })
+        })
+        .collect()
+}
+
 fn extract_ws_access_token(headers: &HeaderMap) -> Option<String> {
     if let Some(auth_header) = headers.get("authorization").and_then(|v| v.to_str().ok())
         && let Some(token) = auth_header.strip_prefix("Bearer ")
@@ -60,6 +79,19 @@ fn should_touch_after_regenerate(deleted_messages: bool, deleted_messages_v2: bo
     deleted_messages && deleted_messages_v2
 }
 
+fn validate_question_answer_payload(
+    questionnaire_id: &str,
+    answers: &serde_json::Value,
+) -> Result<(), &'static str> {
+    if questionnaire_id.trim().is_empty() {
+        return Err("Missing questionnaire_id");
+    }
+    if !answers.is_array() {
+        return Err("answers must be an array");
+    }
+    Ok(())
+}
+
 async fn send_to_container_or_start(
     ws_state: &Arc<WsState>,
     docker_manager: &Arc<DockerManager>,
@@ -84,6 +116,7 @@ async fn send_to_container_or_start(
                 "type": "container_status",
                 "conversation_id": conv_id,
                 "status": "starting",
+                "reason": "auto_restart",
                 "message": "Container not connected. Starting..."
             })
             .to_string(),
@@ -338,13 +371,76 @@ async fn handle_client_ws(
                 )
                 .await;
             }
+            ClientMessage::QuestionAnswer {
+                questionnaire_id,
+                answers,
+            } => {
+                let conv_id = match &current_conversation_id {
+                    Some(id) => id.clone(),
+                    None => {
+                        let _ = tx.send(
+                            serde_json::json!({
+                                "type": "error",
+                                "code": "no_conversation",
+                                "message": "Join a conversation first"
+                            })
+                            .to_string(),
+                        );
+                        continue;
+                    }
+                };
+
+                if let Err(message) = validate_question_answer_payload(&questionnaire_id, &answers)
+                {
+                    let _ = tx.send(
+                        serde_json::json!({
+                            "type": "error",
+                            "code": "invalid_question_answer",
+                            "message": message
+                        })
+                        .to_string(),
+                    );
+                    continue;
+                }
+
+                let forwarded = serde_json::json!({
+                    "type": "question_answer",
+                    "questionnaire_id": questionnaire_id,
+                    "answers": answers,
+                })
+                .to_string();
+
+                let sent = ws_state.send_to_container(&conv_id, &forwarded).await;
+                if sent {
+                    docker_manager.touch_activity(&conv_id).await;
+                } else {
+                    let _ = tx.send(
+                        serde_json::json!({
+                            "type": "error",
+                            "code": "container_not_connected",
+                            "message": "Container is not connected for question answers"
+                        })
+                        .to_string(),
+                    );
+                }
+            }
             ClientMessage::EditMessage {
                 message_id,
                 content,
             } => {
                 let conv_id = match &current_conversation_id {
                     Some(id) => id.clone(),
-                    None => continue,
+                    None => {
+                        let _ = tx.send(
+                            serde_json::json!({
+                                "type": "error",
+                                "code": "no_conversation",
+                                "message": "Join a conversation first"
+                            })
+                            .to_string(),
+                        );
+                        continue;
+                    }
                 };
 
                 if content.is_empty() {
@@ -398,18 +494,22 @@ async fn handle_client_ws(
                         false
                     }
                 };
-                if let Err(e) = db::messages_v2::upsert_message_text_part(
+                let message_parts_updated = match db::messages_v2::upsert_message_text_part(
                     &state.db, &msg.id, &conv_id, "user", &content,
                 )
                 .await
                 {
-                    tracing::error!(
-                        conversation_id = %conv_id,
-                        message_id = %msg.id,
-                        error = %e,
-                        "Failed to update user message parts in messages_v2"
-                    );
-                }
+                    Ok(_) => true,
+                    Err(e) => {
+                        tracing::error!(
+                            conversation_id = %conv_id,
+                            message_id = %msg.id,
+                            error = %e,
+                            "Failed to update user message parts in messages_v2"
+                        );
+                        false
+                    }
+                };
                 let deleted_messages =
                     match db::messages::delete_messages_after(&state.db, &conv_id, &msg.id).await {
                         Ok(_) => true,
@@ -438,37 +538,66 @@ async fn handle_client_ws(
                             false
                         }
                     };
-                if should_touch_after_edit(message_updated, deleted_messages, deleted_messages_v2) {
-                    if let Err(e) = db::conversations::touch_conversation_activity(
-                        &state.db, &conv_id, &user_id,
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            conversation_id = %conv_id,
-                            error = %e,
-                            "Failed to touch conversation activity after edit_message"
-                        );
-                    }
-                } else {
+
+                let mutation_succeeded =
+                    should_touch_after_edit(message_updated, deleted_messages, deleted_messages_v2)
+                        && message_parts_updated;
+                if !mutation_succeeded {
                     tracing::warn!(
                         conversation_id = %conv_id,
                         message_id = %msg.id,
                         message_updated,
+                        message_parts_updated,
                         deleted_messages,
                         deleted_messages_v2,
-                        "Skipping activity touch after edit due to failed message mutation"
+                        "Edit mutation incomplete; notifying client"
+                    );
+                    let _ = tx.send(
+                        serde_json::json!({
+                            "type": "error",
+                            "code": "edit_failed",
+                            "message": "Failed to apply edit. Please try again."
+                        })
+                        .to_string(),
+                    );
+                    continue;
+                }
+
+                if let Err(e) =
+                    db::conversations::touch_conversation_activity(&state.db, &conv_id, &user_id)
+                        .await
+                {
+                    tracing::error!(
+                        conversation_id = %conv_id,
+                        error = %e,
+                        "Failed to touch conversation activity after edit_message"
                     );
                 }
 
-                let _ = tx.send(
-                    serde_json::json!({
-                        "type": "messages_truncated",
-                        "after_message_id": msg.id,
-                        "updated_content": content,
-                    })
-                    .to_string(),
-                );
+                let updated_parts =
+                    match db::messages_v2::list_message_parts(&state.db, &msg.id).await {
+                        Ok(parts) => Some(ws_parts_from_db_parts(&parts)),
+                        Err(e) => {
+                            tracing::error!(
+                                conversation_id = %conv_id,
+                                message_id = %msg.id,
+                                error = %e,
+                                "Failed to fetch updated message parts after edit_message"
+                            );
+                            None
+                        }
+                    };
+                let mut payload = serde_json::json!({
+                    "type": "messages_truncated",
+                    "after_message_id": msg.id,
+                    "updated_content": content,
+                });
+                if let Some(parts) = updated_parts
+                    && let Some(obj) = payload.as_object_mut()
+                {
+                    obj.insert("updated_parts".to_string(), serde_json::Value::Array(parts));
+                }
+                let _ = tx.send(payload.to_string());
 
                 let edit_conv = db::conversations::get_conversation(&state.db, &conv_id, &user_id)
                     .await
@@ -512,7 +641,17 @@ async fn handle_client_ws(
             ClientMessage::Regenerate { message_id } => {
                 let conv_id = match &current_conversation_id {
                     Some(id) => id.clone(),
-                    None => continue,
+                    None => {
+                        let _ = tx.send(
+                            serde_json::json!({
+                                "type": "error",
+                                "code": "no_conversation",
+                                "message": "Join a conversation first"
+                            })
+                            .to_string(),
+                        );
+                        continue;
+                    }
                 };
 
                 // Validate message exists and is an assistant message
@@ -546,7 +685,17 @@ async fn handle_client_ws(
 
                 let user_msg = match last_user_msg {
                     Some(m) => m.clone(),
-                    None => continue,
+                    None => {
+                        let _ = tx.send(
+                            serde_json::json!({
+                                "type": "error",
+                                "code": "invalid_message",
+                                "message": "No preceding user message found for regenerate"
+                            })
+                            .to_string(),
+                        );
+                        continue;
+                    }
                 };
 
                 // Delete the assistant message and everything after the user message
@@ -589,25 +738,35 @@ async fn handle_client_ws(
                         false
                     }
                 };
-                if should_touch_after_regenerate(deleted_messages, deleted_messages_v2) {
-                    if let Err(e) = db::conversations::touch_conversation_activity(
-                        &state.db, &conv_id, &user_id,
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            conversation_id = %conv_id,
-                            error = %e,
-                            "Failed to touch conversation activity after regenerate"
-                        );
-                    }
-                } else {
+                let mutation_succeeded =
+                    should_touch_after_regenerate(deleted_messages, deleted_messages_v2);
+                if !mutation_succeeded {
                     tracing::warn!(
                         conversation_id = %conv_id,
                         message_id = %user_msg.id,
                         deleted_messages,
                         deleted_messages_v2,
-                        "Skipping activity touch after regenerate due to failed message mutation"
+                        "Regenerate mutation incomplete; notifying client"
+                    );
+                    let _ = tx.send(
+                        serde_json::json!({
+                            "type": "error",
+                            "code": "regenerate_failed",
+                            "message": "Failed to regenerate response. Please try again."
+                        })
+                        .to_string(),
+                    );
+                    continue;
+                }
+
+                if let Err(e) =
+                    db::conversations::touch_conversation_activity(&state.db, &conv_id, &user_id)
+                        .await
+                {
+                    tracing::error!(
+                        conversation_id = %conv_id,
+                        error = %e,
+                        "Failed to touch conversation activity after regenerate"
                     );
                 }
 
@@ -687,7 +846,7 @@ async fn handle_client_ws(
 mod tests {
     use super::{
         extract_ws_access_token, should_touch_after_edit, should_touch_after_regenerate,
-        ws_origin_allowed,
+        validate_question_answer_payload, ws_origin_allowed,
     };
     use axum::http::{HeaderMap, HeaderValue, header};
 
@@ -775,5 +934,25 @@ mod tests {
         assert!(should_touch_after_regenerate(true, true));
         assert!(!should_touch_after_regenerate(false, true));
         assert!(!should_touch_after_regenerate(true, false));
+    }
+
+    #[test]
+    fn validate_question_answer_rejects_empty_questionnaire_id() {
+        let answers = serde_json::json!([{"id":"q1"}]);
+        let err = validate_question_answer_payload(" ", &answers).unwrap_err();
+        assert_eq!(err, "Missing questionnaire_id");
+    }
+
+    #[test]
+    fn validate_question_answer_rejects_non_array_answers() {
+        let answers = serde_json::json!({"id":"q1"});
+        let err = validate_question_answer_payload("qq-1", &answers).unwrap_err();
+        assert_eq!(err, "answers must be an array");
+    }
+
+    #[test]
+    fn validate_question_answer_accepts_valid_payload() {
+        let answers = serde_json::json!([{"id":"q1","selected_options":["A"]}]);
+        assert!(validate_question_answer_payload("qq-1", &answers).is_ok());
     }
 }

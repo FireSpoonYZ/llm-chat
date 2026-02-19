@@ -65,6 +65,7 @@ async fn handle_container_ws(
                 "type": "container_status",
                 "conversation_id": conversation_id,
                 "status": "connected",
+                "reason": "ready",
                 "message": "Container connected"
             })
             .to_string(),
@@ -457,6 +458,7 @@ async fn handle_container_ws(
                     "type": "container_status",
                     "conversation_id": conversation_id,
                     "status": "disconnected",
+                    "reason": "unexpected_disconnect",
                     "message": "Container disconnected"
                 })
                 .to_string(),
@@ -725,6 +727,84 @@ mod tests {
         assert_eq!(parsed["tool_call_id"], "tc-task-1");
         assert_eq!(parsed["event_type"], "tool_result");
         assert_eq!(parsed["payload"]["tool_call_id"], "sub-tc-1");
+        assert_eq!(parsed["payload"]["result"]["kind"], "read");
+        assert_eq!(
+            parsed["payload"]["result"]["data"]["trace"][0]["content"],
+            "Investigating"
+        );
+        assert_eq!(parsed["conversation_id"], "conv-123");
+    }
+
+    #[test]
+    fn with_conversation_id_preserves_subagent_trace_delta_payload() {
+        let event = serde_json::json!({
+            "type": "subagent_trace_delta",
+            "tool_call_id": "tc-explore-1",
+            "event_type": "tool_result",
+            "payload": {
+                "tool_call_id": "sub-tc-2",
+                "result": {
+                    "kind": "read",
+                    "text": "ok",
+                    "success": true,
+                    "error": null,
+                    "data": {"trace": [{"type":"text","content":"Investigating"}]},
+                    "meta": {}
+                },
+                "is_error": false
+            }
+        });
+
+        let forwarded = with_conversation_id(&event, "conv-123");
+
+        assert_eq!(forwarded["type"], "subagent_trace_delta");
+        assert_eq!(forwarded["tool_call_id"], "tc-explore-1");
+        assert_eq!(forwarded["event_type"], "tool_result");
+        assert_eq!(forwarded["payload"]["tool_call_id"], "sub-tc-2");
+        assert_eq!(forwarded["payload"]["result"]["kind"], "read");
+        assert_eq!(
+            forwarded["payload"]["result"]["data"]["trace"][0]["content"],
+            "Investigating"
+        );
+        assert_eq!(forwarded["conversation_id"], "conv-123");
+    }
+
+    #[tokio::test]
+    async fn forward_subagent_trace_delta_roundtrip_preserves_payload_over_ws_state() {
+        let ws_state = crate::ws::WsState::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        ws_state.add_client("user-1", "conv-123", tx).await;
+
+        let event = serde_json::json!({
+            "type": "subagent_trace_delta",
+            "tool_call_id": "tc-explore-1",
+            "event_type": "tool_result",
+            "payload": {
+                "tool_call_id": "sub-tc-2",
+                "result": {
+                    "kind": "read",
+                    "text": "ok",
+                    "success": true,
+                    "error": null,
+                    "data": {"trace": [{"type":"text","content":"Investigating"}]},
+                    "meta": {}
+                },
+                "is_error": false
+            }
+        });
+        let forwarded = with_conversation_id(&event, "conv-123");
+
+        ws_state
+            .send_to_client("user-1", "conv-123", &forwarded.to_string())
+            .await;
+
+        let raw = rx.recv().await.expect("forwarded message");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+
+        assert_eq!(parsed["type"], "subagent_trace_delta");
+        assert_eq!(parsed["tool_call_id"], "tc-explore-1");
+        assert_eq!(parsed["event_type"], "tool_result");
+        assert_eq!(parsed["payload"]["tool_call_id"], "sub-tc-2");
         assert_eq!(parsed["payload"]["result"]["kind"], "read");
         assert_eq!(
             parsed["payload"]["result"]["data"]["trace"][0]["content"],

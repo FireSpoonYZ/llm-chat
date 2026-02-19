@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -14,6 +15,8 @@ import pytest
 from src.tools.bash import BashTool
 from src.tools.file_ops import EditTool, ReadTool, WriteTool
 from src.tools._paths import resolve_workspace_path as _resolve_path
+from src.tools.list_tool import ListTool
+from src.tools.question import QuestionInput, QuestionTool
 from src.tools.search import GlobTool, GrepTool, _expand_braces
 from src.tools.web import WebFetchTool, WebSearchTool
 from src.tools.code_interpreter import CodeInterpreterTool
@@ -494,6 +497,204 @@ class TestGlobTool:
         result = tool._run("*.py", path="nonexistent")
         assert "error" in _rtext(result).lower() or "not exist" in _rtext(result).lower()
 
+
+# ---------------------------------------------------------------------------
+# ListTool
+# ---------------------------------------------------------------------------
+
+class TestListTool:
+    def test_list_files_and_dirs(self, workspace):
+        os.makedirs(os.path.join(workspace, "src"), exist_ok=True)
+        with open(os.path.join(workspace, "src", "a.py"), "w", encoding="utf-8") as f:
+            f.write("print('ok')\n")
+        tool = ListTool(workspace=workspace)
+        result = tool._run(path=".", depth=2)
+        assert result["kind"] == "list"
+        assert result["success"] is True
+        assert "src/" in _rtext(result)
+        assert "a.py" in _rtext(result)
+
+    def test_list_respects_ignore(self, workspace):
+        os.makedirs(os.path.join(workspace, "node_modules"), exist_ok=True)
+        with open(os.path.join(workspace, "node_modules", "ignored.txt"), "w", encoding="utf-8") as f:
+            f.write("x")
+        tool = ListTool(workspace=workspace)
+        result = tool._run(path=".", depth=3, ignore=["node_modules"])
+        assert "ignored.txt" not in _rtext(result)
+
+    def test_list_rejects_path_traversal(self, workspace):
+        tool = ListTool(workspace=workspace)
+        result = tool._run(path="../../etc", depth=1)
+        assert result["success"] is False
+        assert "outside the workspace" in _rtext(result).lower()
+
+    def test_list_depth_zero_returns_root_only(self, workspace):
+        os.makedirs(os.path.join(workspace, "nested"), exist_ok=True)
+        tool = ListTool(workspace=workspace)
+        result = tool._run(path=".", depth=0)
+        assert result["success"] is True
+        assert _rmeta(result)["entry_count"] == 0
+        assert _rtext(result).strip().endswith("/")
+
+    def test_list_marks_truncation(self, workspace):
+        for i in range(5):
+            with open(os.path.join(workspace, f"f{i}.txt"), "w", encoding="utf-8") as f:
+                f.write("x")
+        tool = ListTool(workspace=workspace)
+        with patch("src.tools.list_tool.MAX_ENTRIES", 2):
+            result = tool._run(path=".", depth=2)
+        assert result["success"] is True
+        assert _rmeta(result)["truncated"] is True
+        assert _rmeta(result)["entry_count"] == 2
+        assert "truncated" in _rtext(result).lower()
+
+
+# ---------------------------------------------------------------------------
+# QuestionTool
+# ---------------------------------------------------------------------------
+
+class TestQuestionTool:
+    @pytest.mark.asyncio
+    async def test_question_collects_answers_and_returns_payload(self):
+        tool = QuestionTool()
+        emitted: list[dict[str, Any]] = []
+
+        async def sink(event: dict[str, Any]) -> None:
+            emitted.append(event)
+            questionnaire_id = event.get("data", {}).get("questionnaire_id")
+            assert isinstance(questionnaire_id, str)
+            tool.submit_answer(
+                questionnaire_id,
+                [{
+                    "id": "q1",
+                    "question": "Pick one",
+                    "selected_options": ["A"],
+                    "free_text": "",
+                    "notes": "note",
+                }],
+            )
+
+        tool.set_event_sink(sink)
+        result = await tool._arun(
+            question="Pick one",
+            options=["A", "B"],
+            required=True,
+        )
+        assert result["kind"] == "question"
+        assert result["success"] is True
+        data = _rdata(result)
+        assert data["answers"][0]["selected_options"] == ["A"]
+        assert data["answers"][0]["notes"] == "note"
+        assert emitted and emitted[0]["type"] == "question"
+
+    def test_submit_answer_unknown_questionnaire_returns_false(self):
+        tool = QuestionTool()
+        assert tool.submit_answer("missing", []) is False
+
+    def test_question_input_accepts_claude_style_multiselect_alias(self):
+        parsed = QuestionInput.model_validate({
+            "questions": [{
+                "id": "q1",
+                "question": "Pick options",
+                "options": ["A", "B"],
+                "multiSelect": True,
+            }]
+        })
+        assert parsed.questions[0].multiple is True
+
+    def test_question_input_accepts_body_alias_for_title(self):
+        parsed = QuestionInput.model_validate({
+            "body": "Need your choices",
+            "questions": [{
+                "id": "q1",
+                "question": "Pick one",
+            }],
+        })
+        assert parsed.title == "Need your choices"
+
+    def test_question_input_accepts_multiselect_alias_in_single_question_mode(self):
+        parsed = QuestionInput.model_validate({
+            "question": "Pick one or more",
+            "options": ["A", "B"],
+            "multiSelect": True,
+        })
+        assert parsed.multiple is True
+
+    def test_question_input_rejects_mixed_single_and_multi_modes(self):
+        with pytest.raises(ValueError, match="only one of `question` or `questions`"):
+            QuestionInput.model_validate({
+                "question": "Single",
+                "questions": [{"id": "q1", "question": "Multi"}],
+            })
+
+    def test_question_normalizes_option_objects_to_labels(self):
+        tool = QuestionTool()
+        parsed = QuestionInput.model_validate({
+            "questions": [{
+                "id": "q1",
+                "question": "Pick one",
+                "options": [
+                    {"label": "A (Recommended)"},
+                    {"value": "B"},
+                    {"title": "C"},
+                ],
+            }],
+        })
+
+        normalized = tool._normalize_questions(questions=parsed.questions)
+        assert normalized[0]["options"] == ["A (Recommended)", "B", "C"]
+
+    def test_question_normalizes_option_objects_in_single_question_mode(self):
+        tool = QuestionTool()
+        normalized = tool._normalize_questions(
+            question="Pick one",
+            options=[{"label": "A (Recommended)"}, {"value": "B"}],
+            multiple=False,
+        )
+        assert normalized[0]["options"] == ["A (Recommended)", "B"]
+
+    @pytest.mark.asyncio
+    async def test_question_normalizes_none_fields_to_empty_string(self):
+        tool = QuestionTool()
+
+        async def sink(event: dict[str, Any]) -> None:
+            questionnaire_id = event.get("data", {}).get("questionnaire_id")
+            assert isinstance(questionnaire_id, str)
+            tool.submit_answer(
+                questionnaire_id,
+                [{
+                    "id": None,
+                    "question": None,
+                    "selected_options": [None, "A"],
+                    "free_text": None,
+                    "notes": None,
+                }],
+            )
+
+        tool.set_event_sink(sink)
+        result = await tool._arun(question="Pick one", options=["A"])
+        answers = _rdata(result)["answers"]
+        assert answers[0]["id"] == ""
+        assert answers[0]["question"] == ""
+        assert answers[0]["selected_options"] == ["A"]
+        assert answers[0]["free_text"] == ""
+        assert answers[0]["notes"] == ""
+
+    @pytest.mark.asyncio
+    async def test_question_sink_failure_returns_error_and_cleans_state(self):
+        tool = QuestionTool()
+
+        async def sink(_: dict[str, Any]) -> None:
+            raise RuntimeError("ws unavailable")
+
+        tool.set_event_sink(sink)
+        result = await tool._arun(question="Pick one")
+        assert result["success"] is False
+        assert "question flow failed" in _rtext(result).lower()
+        assert not tool._known_questionnaires
+        assert not tool._pending_answers
+        assert not tool._early_answers
+
     @pytest.mark.asyncio
     async def test_arun(self, workspace):
         with open(os.path.join(workspace, "test.py"), "w") as f:
@@ -783,6 +984,94 @@ class TestWebFetchTool:
         with pytest.raises(NotImplementedError):
             tool._run("https://example.com")
 
+    @pytest.mark.asyncio
+    @patch("src.tools.web.httpx.AsyncClient")
+    async def test_html_format_returns_raw_html(self, mock_client_cls):
+        response = MagicMock()
+        response.content = b"<h1>Title</h1><p>Hello</p>"
+        response.text = "<h1>Title</h1><p>Hello</p>"
+        response.headers = {"content-type": "text/html; charset=utf-8"}
+        response.url = "https://example.com"
+        response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        tool = WebFetchTool()
+        result = await tool._arun("https://example.com", format="html")
+        assert result["success"] is True
+        assert _rtext(result) == "<h1>Title</h1><p>Hello</p>"
+        assert _rdata(result)["format"] == "html"
+
+    @pytest.mark.asyncio
+    @patch("src.tools.web.httpx.AsyncClient")
+    async def test_html_text_format_strips_tags(self, mock_client_cls):
+        response = MagicMock()
+        response.content = b"<h1>Title</h1><p>Hello</p>"
+        response.text = "<h1>Title</h1><p>Hello</p>"
+        response.headers = {"content-type": "text/html"}
+        response.url = "https://example.com"
+        response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        tool = WebFetchTool()
+        result = await tool._arun("https://example.com", format="text")
+        assert result["success"] is True
+        assert "<h1>" not in _rtext(result)
+        assert "Title" in _rtext(result)
+
+    @pytest.mark.asyncio
+    @patch("src.tools.web.httpx.AsyncClient")
+    async def test_json_markdown_format_wraps_code_fence(self, mock_client_cls):
+        response = MagicMock()
+        response.content = b'{"ok": true, "n": 1}'
+        response.text = '{"ok": true, "n": 1}'
+        response.headers = {"content-type": "application/json"}
+        response.url = "https://example.com/api"
+        response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        tool = WebFetchTool()
+        result = await tool._arun("https://example.com/api", format="markdown")
+        assert result["success"] is True
+        assert _rtext(result).startswith("```json")
+        assert '"ok": true' in _rtext(result)
+
+    @pytest.mark.asyncio
+    @patch("src.tools.web.httpx.AsyncClient")
+    async def test_rejects_response_too_large(self, mock_client_cls):
+        big_bytes = b"x" * ((5 * 1024 * 1024) + 1)
+        response = MagicMock()
+        response.content = big_bytes
+        response.text = "x"
+        response.headers = {"content-type": "text/plain"}
+        response.url = "https://example.com/large"
+        response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        tool = WebFetchTool()
+        result = await tool._arun("https://example.com/large")
+        assert result["success"] is False
+        assert "response too large" in _rtext(result).lower()
+
 
 # ---------------------------------------------------------------------------
 # WebSearchTool (async only, tested with mock)
@@ -903,27 +1192,33 @@ class TestCreateAllTools:
         assert "read" in names
         assert "write" in names
         assert "edit" in names
+        assert "list" in names
         assert "glob" in names
         assert "grep" in names
         assert "web_fetch" in names
         assert "web_search" in names
+        assert "question" in names
         assert "code_interpreter" in names
         assert "image_generation" in names
-        assert len(tools) == 10
+        assert len(tools) == 12
 
     def test_creates_tools_without_image_config(self, workspace):
         from src.tools import create_all_tools
         tools = create_all_tools(workspace=workspace, provider="openai", api_key="test-key")
         names = {t.name for t in tools}
         assert "image_generation" not in names
-        assert len(tools) == 9
+        assert "list" in names
+        assert "question" in names
+        assert len(tools) == 11
 
     def test_creates_tools_without_provider(self, workspace):
         from src.tools import create_all_tools
         tools = create_all_tools(workspace=workspace)
         names = {t.name for t in tools}
         assert "image_generation" not in names
-        assert len(tools) == 9
+        assert "list" in names
+        assert "question" in names
+        assert len(tools) == 11
 
     def test_image_tool_uses_image_config(self, workspace):
         from src.tools import create_all_tools

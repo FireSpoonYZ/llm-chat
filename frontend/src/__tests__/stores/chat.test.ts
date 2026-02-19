@@ -4,6 +4,7 @@ import { mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { useChatStore } from '../../stores/chat'
 import ChatMessage from '../../components/ChatMessage.vue'
+import type { ContentBlock } from '../../types'
 
 // Mock the conversations API
 vi.mock('../../api/conversations', () => ({
@@ -145,9 +146,10 @@ describe('chat store - editMessage', () => {
     mockWsInstances.length = 0
   })
 
-  it('should update content and truncate messages after the edited one', () => {
+  it('waits for backend confirmation instead of optimistic update', () => {
     const store = useChatStore()
     store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
     store.currentConversationId = 'conv-1'
     store.messages = [
       makeMessage({ id: 'msg-1', role: 'user', content: 'Hello' }),
@@ -157,10 +159,15 @@ describe('chat store - editMessage', () => {
 
     store.editMessage('msg-1', 'Updated hello')
 
-    expect(store.messages).toHaveLength(1)
-    expect(store.messages[0].content).toBe('Updated hello')
-    expect(store.messages[0].id).toBe('msg-1')
-    expect(store.isStreaming).toBe(true)
+    expect(store.messages).toHaveLength(3)
+    expect(store.messages[0].content).toBe('Hello')
+    expect(store.isWaiting).toBe(true)
+    expect(store.isStreaming).toBe(false)
+    expect(mockWs.send).toHaveBeenCalledWith({
+      type: 'edit_message',
+      message_id: 'msg-1',
+      content: 'Updated hello',
+    })
   })
 
   it('should not allow editing assistant messages', () => {
@@ -188,6 +195,26 @@ describe('chat store - editMessage', () => {
 
     expect(store.messages[0].content).toBe('Hello')
   })
+
+  it('should not edit pending user messages', () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    store.currentConversationId = 'conv-1'
+    store.messages = [
+      makeMessage({ id: 'pending-123', role: 'user', content: 'Hello' }),
+    ]
+
+    store.editMessage('pending-123', 'Updated')
+
+    expect(mockWs.send).not.toHaveBeenCalledWith({
+      type: 'edit_message',
+      message_id: 'pending-123',
+      content: 'Updated',
+    })
+    expect(store.messages[0].content).toBe('Hello')
+    expect(store.isWaiting).toBe(false)
+  })
 })
 
 describe('chat store - regenerateMessage', () => {
@@ -196,9 +223,10 @@ describe('chat store - regenerateMessage', () => {
     mockWsInstances.length = 0
   })
 
-  it('should delete assistant message and subsequent messages', () => {
+  it('waits for backend confirmation instead of optimistic delete', () => {
     const store = useChatStore()
     store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
     store.currentConversationId = 'conv-1'
     store.messages = [
       makeMessage({ id: 'msg-1', role: 'user', content: 'Hello' }),
@@ -208,9 +236,13 @@ describe('chat store - regenerateMessage', () => {
 
     store.regenerateMessage('msg-2')
 
-    expect(store.messages).toHaveLength(1)
-    expect(store.messages[0].id).toBe('msg-1')
-    expect(store.isStreaming).toBe(true)
+    expect(store.messages).toHaveLength(3)
+    expect(store.isWaiting).toBe(true)
+    expect(store.isStreaming).toBe(false)
+    expect(mockWs.send).toHaveBeenCalledWith({
+      type: 'regenerate',
+      message_id: 'msg-2',
+    })
   })
 
   it('should not allow regenerating user messages', () => {
@@ -238,13 +270,15 @@ describe('chat store - regenerateMessage', () => {
 
     store.regenerateMessage('msg-2')
 
-    expect(store.isStreaming).toBe(true)
+    expect(store.isStreaming).toBe(false)
+    expect(store.isWaiting).toBe(true)
   })
 })
 
 describe('chat store - handleMessagesTruncated', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    vi.clearAllMocks()
   })
 
   it('should truncate messages after the given message id', () => {
@@ -272,6 +306,136 @@ describe('chat store - handleMessagesTruncated', () => {
 
     expect(store.messages).toHaveLength(1)
     expect(store.messages[0].content).toBe('Hello')
+  })
+
+  it('should update parts and content together when updated_parts is provided', () => {
+    const store = useChatStore()
+    store.messages = [
+      makeMessage({
+        id: 'msg-1',
+        role: 'user',
+        content: 'Old content',
+        parts: [
+          { seq: 0, type: 'text', text: 'Old content', json_payload: null, tool_call_id: null },
+        ],
+      }),
+      makeMessage({ id: 'msg-2', role: 'assistant', content: 'Hi' }),
+    ]
+
+    store.handleMessagesTruncated(
+      'msg-1',
+      'Updated via parts',
+      [
+        { seq: 0, type: 'text', text: 'Updated via parts', json_payload: null, tool_call_id: null },
+      ],
+    )
+
+    expect(store.messages).toHaveLength(1)
+    expect(store.messages[0].content).toBe('Updated via parts')
+    expect(store.messages[0].parts).toEqual([
+      { seq: 0, type: 'text', text: 'Updated via parts', json_payload: null, tool_call_id: null },
+    ])
+  })
+
+  it('reloads server messages when local truncate target is missing', async () => {
+    const store = useChatStore()
+    store.currentConversationId = 'conv-1'
+    store.messages = [makeMessage({ id: 'msg-1', role: 'user', content: 'Hello' })]
+    vi.mocked(convApi.listMessages).mockResolvedValueOnce({ messages: [], total: 0 })
+
+    store.handleMessagesTruncated('missing-id', 'Updated')
+    await Promise.resolve()
+
+    expect(convApi.listMessages).toHaveBeenCalledWith('conv-1')
+  })
+})
+
+describe('chat store - mutation confirmation flow', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockWsInstances.length = 0
+    vi.clearAllMocks()
+  })
+
+  it('applies edit only after messages_truncated confirmation', () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const truncateHandler = getWsHandler(mockWs, 'messages_truncated')!
+    store.currentConversationId = 'conv-1'
+    store.messages = [
+      makeMessage({ id: 'msg-1', role: 'user', content: 'Hello' }),
+      makeMessage({ id: 'msg-2', role: 'assistant', content: 'Hi there' }),
+      makeMessage({ id: 'msg-3', role: 'user', content: 'Follow up' }),
+    ]
+
+    store.editMessage('msg-1', 'Updated hello')
+    expect(store.messages).toHaveLength(3)
+    expect(store.isWaiting).toBe(true)
+
+    truncateHandler({
+      type: 'messages_truncated',
+      after_message_id: 'msg-1',
+      updated_content: 'Updated hello',
+    })
+
+    expect(store.messages).toHaveLength(1)
+    expect(store.messages[0].content).toBe('Updated hello')
+    expect(store.isWaiting).toBe(true)
+  })
+
+  it('applies regenerate only after messages_truncated confirmation', () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const truncateHandler = getWsHandler(mockWs, 'messages_truncated')!
+    store.currentConversationId = 'conv-1'
+    store.messages = [
+      makeMessage({ id: 'msg-1', role: 'user', content: 'Hello' }),
+      makeMessage({ id: 'msg-2', role: 'assistant', content: 'Hi there' }),
+      makeMessage({ id: 'msg-3', role: 'user', content: 'Follow up' }),
+    ]
+
+    store.regenerateMessage('msg-2')
+    expect(store.messages).toHaveLength(3)
+    expect(store.isWaiting).toBe(true)
+
+    truncateHandler({
+      type: 'messages_truncated',
+      after_message_id: 'msg-1',
+    })
+
+    expect(store.messages).toHaveLength(1)
+    expect(store.messages[0].id).toBe('msg-1')
+    expect(store.isWaiting).toBe(true)
+  })
+
+  it('clears waiting and reloads messages on mutation error', async () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const errorHandler = getWsHandler(mockWs, 'error')!
+    const reloaded = [makeMessage({ id: 'server-1', role: 'user', content: 'Server state' })]
+    vi.mocked(convApi.listMessages).mockResolvedValueOnce({ messages: reloaded, total: 1 })
+    store.currentConversationId = 'conv-1'
+    store.messages = [
+      makeMessage({ id: 'msg-1', role: 'user', content: 'Hello' }),
+      makeMessage({ id: 'msg-2', role: 'assistant', content: 'Hi there' }),
+    ]
+
+    store.editMessage('msg-1', 'Updated')
+    expect(store.isWaiting).toBe(true)
+
+    errorHandler({
+      type: 'error',
+      code: 'invalid_message',
+      message: 'Message not found',
+    })
+    await Promise.resolve()
+
+    expect(store.isWaiting).toBe(false)
+    expect(store.messages).toEqual(reloaded)
+    expect(convApi.listMessages).toHaveBeenCalledWith('conv-1')
   })
 })
 
@@ -535,10 +699,11 @@ describe('chat store - sendMessage failure', () => {
     expect(store.messages).toHaveLength(2)
     expect(store.messages[0].content).toBe('Hello')
     expect(store.isStreaming).toBe(false)
+    expect(store.isWaiting).toBe(false)
     expect(store.sendFailed).toBe(true)
   })
 
-  it('should rollback regenerateMessage when send fails', () => {
+  it('should keep regenerate state unchanged when send fails', () => {
     const store = useChatStore()
     store.connectWs()
     const mockWs = mockWsInstances[mockWsInstances.length - 1]
@@ -555,6 +720,7 @@ describe('chat store - sendMessage failure', () => {
     expect(store.messages).toHaveLength(2)
     expect(store.messages[1].content).toBe('Hi there')
     expect(store.isStreaming).toBe(false)
+    expect(store.isWaiting).toBe(false)
     expect(store.sendFailed).toBe(true)
   })
 })
@@ -729,36 +895,135 @@ describe('chat store - tool_call / tool_result handlers', () => {
   })
 })
 
-describe('chat store - task_trace_delta handler', () => {
+describe('chat store - questionnaire submit flow', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     mockWsInstances.length = 0
   })
 
-  it('merges streamed subagent trace into the task tool block', () => {
+  it('keeps questionnaire during submit and clears it after matching question tool_result', () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const questionHandler = getWsHandler(mockWs, 'question')!
+    const toolResultHandler = getWsHandler(mockWs, 'tool_result')!
+
+    questionHandler({
+      type: 'question',
+      questionnaire_id: 'qq-1',
+      title: 'Clarify',
+      questions: [{ id: 'q1', question: 'Pick one', options: ['A'] }],
+    })
+    expect(store.activeQuestionnaire?.questionnaire_id).toBe('qq-1')
+    expect(store.questionnaireSubmitting).toBe(false)
+
+    store.submitQuestionnaireAnswers([{
+      id: 'q1',
+      question: 'Pick one',
+      selected_options: ['A'],
+      free_text: '',
+      notes: 'note-1',
+    }])
+    expect(mockWs.send).toHaveBeenCalledWith({
+      type: 'question_answer',
+      questionnaire_id: 'qq-1',
+      answers: [{
+        id: 'q1',
+        question: 'Pick one',
+        selected_options: ['A'],
+        free_text: '',
+        notes: 'note-1',
+      }],
+    })
+    expect(store.activeQuestionnaire?.questionnaire_id).toBe('qq-1')
+    expect(store.questionnaireSubmitting).toBe(true)
+    expect(store.isWaiting).toBe(true)
+
+    toolResultHandler({
+      type: 'tool_result',
+      tool_call_id: 'tc-question-1',
+      is_error: false,
+      result: {
+        kind: 'question',
+        text: '{"ok":true}',
+        success: true,
+        error: null,
+        data: {
+          questionnaire_id: 'qq-1',
+          answers: [{ id: 'q1', selected_options: ['A'], free_text: '', notes: 'note-1' }],
+        },
+        meta: {},
+      },
+    })
+    expect(store.activeQuestionnaire).toBeNull()
+    expect(store.questionnaireSubmitting).toBe(false)
+    expect(store.isWaiting).toBe(false)
+  })
+
+  it('keeps questionnaire open for retry on recoverable question submit errors', () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const questionHandler = getWsHandler(mockWs, 'question')!
+    const errorHandler = getWsHandler(mockWs, 'error')!
+
+    questionHandler({
+      type: 'question',
+      questionnaire_id: 'qq-2',
+      title: 'Clarify',
+      questions: [{ id: 'q1', question: 'Pick one', options: ['A'] }],
+    })
+    store.submitQuestionnaireAnswers([{
+      id: 'q1',
+      question: 'Pick one',
+      selected_options: ['A'],
+      free_text: '',
+      notes: 'note-2',
+    }])
+    expect(store.questionnaireSubmitting).toBe(true)
+
+    errorHandler({
+      type: 'error',
+      code: 'container_not_connected',
+      message: 'Container is not connected for question answers',
+    })
+
+    expect(store.activeQuestionnaire?.questionnaire_id).toBe('qq-2')
+    expect(store.questionnaireSubmitting).toBe(false)
+    expect(store.isWaiting).toBe(false)
+  })
+})
+
+describe('chat store - subagent trace handlers', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockWsInstances.length = 0
+  })
+
+  it('merges streamed subagent trace into the explore tool block', () => {
     const store = useChatStore()
     store.connectWs()
     const mockWs = mockWsInstances[mockWsInstances.length - 1]
     const tcHandler = getWsHandler(mockWs, 'tool_call')!
-    const traceHandler = getWsHandler(mockWs, 'task_trace_delta')!
+    const traceHandler = getWsHandler(mockWs, 'subagent_trace_delta')!
 
-    tcHandler({ type: 'tool_call', tool_call_id: 'tc-task-1', tool_name: 'task' })
+    tcHandler({ type: 'tool_call', tool_call_id: 'tc-explore-1', tool_name: 'explore' })
 
     traceHandler({
-      type: 'task_trace_delta',
-      tool_call_id: 'tc-task-1',
+      type: 'subagent_trace_delta',
+      tool_call_id: 'tc-explore-1',
       event_type: 'assistant_delta',
       payload: { delta: 'Investigating ' },
     })
     traceHandler({
-      type: 'task_trace_delta',
-      tool_call_id: 'tc-task-1',
+      type: 'subagent_trace_delta',
+      tool_call_id: 'tc-explore-1',
       event_type: 'assistant_delta',
       payload: { delta: 'repo' },
     })
     traceHandler({
-      type: 'task_trace_delta',
-      tool_call_id: 'tc-task-1',
+      type: 'subagent_trace_delta',
+      tool_call_id: 'tc-explore-1',
       event_type: 'tool_call',
       payload: {
         tool_call_id: 'sub-tc-1',
@@ -767,8 +1032,8 @@ describe('chat store - task_trace_delta handler', () => {
       },
     })
     traceHandler({
-      type: 'task_trace_delta',
-      tool_call_id: 'tc-task-1',
+      type: 'subagent_trace_delta',
+      tool_call_id: 'tc-explore-1',
       event_type: 'tool_result',
       payload: {
         tool_call_id: 'sub-tc-1',
@@ -783,7 +1048,7 @@ describe('chat store - task_trace_delta handler', () => {
     if (block.type === 'tool_call') {
       expect(typeof block.result).toBe('object')
       const result = block.result as { kind: string; data?: Record<string, unknown> }
-      expect(result.kind).toBe('task')
+      expect(result.kind).toBe('explore')
       const trace = (result.data?.trace ?? []) as Array<Record<string, unknown>>
       expect(trace).toHaveLength(2)
       expect(trace[0].type).toBe('text')
@@ -795,7 +1060,7 @@ describe('chat store - task_trace_delta handler', () => {
     }
   })
 
-  it('buffers trace deltas that arrive before task tool_call and replays them', () => {
+  it('keeps backward compatibility for legacy task_trace_delta buffering', () => {
     const store = useChatStore()
     store.connectWs()
     const mockWs = mockWsInstances[mockWsInstances.length - 1]
@@ -852,6 +1117,122 @@ describe('chat store - task_trace_delta handler', () => {
       expect(trace[1].id).toBe('sub-tc-buf-1')
       expect((trace[1].result as Record<string, unknown>).kind).toBe('read')
     }
+  })
+
+  it('does not apply task_trace_delta to an active explore block', () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const tcHandler = getWsHandler(mockWs, 'tool_call')!
+    const subagentTraceHandler = getWsHandler(mockWs, 'subagent_trace_delta')!
+    const legacyTraceHandler = getWsHandler(mockWs, 'task_trace_delta')!
+
+    tcHandler({ type: 'tool_call', tool_call_id: 'tc-mixed-1', tool_name: 'explore' })
+
+    legacyTraceHandler({
+      type: 'task_trace_delta',
+      tool_call_id: 'tc-mixed-1',
+      event_type: 'assistant_delta',
+      payload: { delta: 'legacy-trace' },
+    })
+    subagentTraceHandler({
+      type: 'subagent_trace_delta',
+      tool_call_id: 'tc-mixed-1',
+      event_type: 'assistant_delta',
+      payload: { delta: 'explore-trace' },
+    })
+
+    const block = store.streamingBlocks[0]
+    expect(block.type).toBe('tool_call')
+    if (block.type === 'tool_call') {
+      const result = block.result as { kind: string; data?: Record<string, unknown> }
+      expect(result.kind).toBe('explore')
+      const trace = (result.data?.trace ?? []) as Array<Record<string, unknown>>
+      expect(trace).toHaveLength(1)
+      expect(trace[0].type).toBe('text')
+      expect(trace[0].content).toBe('explore-trace')
+    }
+  })
+
+  it('does not apply subagent_trace_delta to an active legacy task block', () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const tcHandler = getWsHandler(mockWs, 'tool_call')!
+    const subagentTraceHandler = getWsHandler(mockWs, 'subagent_trace_delta')!
+    const legacyTraceHandler = getWsHandler(mockWs, 'task_trace_delta')!
+
+    tcHandler({ type: 'tool_call', tool_call_id: 'tc-mixed-2', tool_name: 'task' })
+
+    subagentTraceHandler({
+      type: 'subagent_trace_delta',
+      tool_call_id: 'tc-mixed-2',
+      event_type: 'assistant_delta',
+      payload: { delta: 'explore-trace' },
+    })
+    legacyTraceHandler({
+      type: 'task_trace_delta',
+      tool_call_id: 'tc-mixed-2',
+      event_type: 'assistant_delta',
+      payload: { delta: 'legacy-trace' },
+    })
+
+    const block = store.streamingBlocks[0]
+    expect(block.type).toBe('tool_call')
+    if (block.type === 'tool_call') {
+      const result = block.result as { kind: string; data?: Record<string, unknown> }
+      expect(result.kind).toBe('task')
+      const trace = (result.data?.trace ?? []) as Array<Record<string, unknown>>
+      expect(trace).toHaveLength(1)
+      expect(trace[0].type).toBe('text')
+      expect(trace[0].content).toBe('legacy-trace')
+    }
+  })
+
+  it('keeps subagent and legacy trace buffers isolated during replay', () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const tcHandler = getWsHandler(mockWs, 'tool_call')!
+    const subagentTraceHandler = getWsHandler(mockWs, 'subagent_trace_delta')!
+    const legacyTraceHandler = getWsHandler(mockWs, 'task_trace_delta')!
+
+    subagentTraceHandler({
+      type: 'subagent_trace_delta',
+      tool_call_id: 'tc-shared',
+      event_type: 'assistant_delta',
+      payload: { delta: 'explore-buffered' },
+    })
+    legacyTraceHandler({
+      type: 'task_trace_delta',
+      tool_call_id: 'tc-shared',
+      event_type: 'assistant_delta',
+      payload: { delta: 'task-buffered' },
+    })
+
+    tcHandler({ type: 'tool_call', tool_call_id: 'tc-shared', tool_name: 'explore' })
+    tcHandler({ type: 'tool_call', tool_call_id: 'tc-shared', tool_name: 'task' })
+
+    const exploreBlock = store.streamingBlocks.find(
+      (b): b is Extract<ContentBlock, { type: 'tool_call' }> =>
+        b.type === 'tool_call' && b.name === 'explore' && b.id === 'tc-shared'
+    )!
+    const taskBlock = store.streamingBlocks.find(
+      (b): b is Extract<ContentBlock, { type: 'tool_call' }> =>
+        b.type === 'tool_call' && b.name === 'task' && b.id === 'tc-shared'
+    )!
+
+    const exploreTrace = (
+      (exploreBlock.result as { data?: Record<string, unknown> }).data?.trace ?? []
+    ) as Array<Record<string, unknown>>
+    const taskTrace = (
+      (taskBlock.result as { data?: Record<string, unknown> }).data?.trace ?? []
+    ) as Array<Record<string, unknown>>
+
+    expect(exploreTrace).toHaveLength(1)
+    expect(exploreTrace[0].content).toBe('explore-buffered')
+    expect(taskTrace).toHaveLength(1)
+    expect(taskTrace[0].content).toBe('task-buffered')
   })
 })
 
@@ -1127,6 +1508,21 @@ describe('chat store - container_status disconnect handler', () => {
     statusHandler({ type: 'container_status', status: 'connected', message: 'Container connected' })
 
     expect(store.isStreaming).toBe(true)
+    expect(store.messages).toHaveLength(0)
+  })
+
+  it('ignores expected disconnected right after restart/start signal', () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const statusHandler = getWsHandler(mockWs, 'container_status')!
+
+    store.isWaiting = true
+    statusHandler({ type: 'container_status', status: 'restarting', reason: 'model_switch' })
+    statusHandler({ type: 'container_status', status: 'disconnected', reason: 'unexpected_disconnect' })
+
+    expect(store.isWaiting).toBe(true)
+    expect(store.isStreaming).toBe(false)
     expect(store.messages).toHaveLength(0)
   })
 })

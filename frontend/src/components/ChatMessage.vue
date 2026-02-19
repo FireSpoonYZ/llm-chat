@@ -44,7 +44,7 @@
         </template>
         <div v-if="!props.readOnly" class="message-footer">
           <el-button
-            v-if="message.role === 'user' && !isStreaming"
+            v-if="message.role === 'user' && !isStreaming && !message.id.startsWith('pending-')"
             class="action-btn edit-btn"
             text
             size="small"

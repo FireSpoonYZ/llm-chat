@@ -38,6 +38,38 @@
       <template v-if="chatStore.currentConversationId && currentConversation">
         <div class="chat-toolbar">
           <div class="chat-toolbar-frame">
+            <div class="toolbar-side">
+              <div class="toolbar-actions">
+                <el-button class="toolbar-btn" text @click="showFilesDrawer = true">{{ t('chat.files') }}</el-button>
+                <el-button class="toolbar-btn" text @click="showShareDialog = true">{{ t('chat.share') }}</el-button>
+              </div>
+              <LocaleToggle variant="toolbar" class="toolbar-locale" />
+            </div>
+          </div>
+        </div>
+        <div class="chat-messages">
+          <div class="messages-inner">
+            <ChatMessage
+              v-for="msg in chatStore.messages"
+              :key="msg.id"
+              :message="msg"
+              :conversation-id="chatStore.currentConversationId || undefined"
+              :is-streaming="chatStore.isStreaming || chatStore.isWaiting"
+              @edit="handleEditMessage"
+              @regenerate="handleRegenerateMessage"
+            />
+            <div v-if="chatStore.isWaiting && !chatStore.isStreaming" v-loading="true" class="waiting-indicator" element-loading-background="transparent" />
+            <ChatMessage
+              v-if="chatStore.isStreaming"
+              :message="{ id: 'streaming', role: 'assistant', content: chatStore.streamingContent, tool_calls: null, tool_call_id: null, token_count: null, created_at: '' }"
+              :conversation-id="chatStore.currentConversationId || undefined"
+              :is-streaming="true"
+              :streaming-blocks="chatStore.streamingBlocks"
+            />
+          </div>
+        </div>
+        <div class="chat-models">
+          <div class="chat-models-inner">
             <div class="toolbar-main">
               <div class="toolbar-control">
                 <span class="toolbar-label">{{ t('chat.model') }}</span>
@@ -79,37 +111,16 @@
                 />
               </div>
             </div>
-            <div class="toolbar-side">
-              <div class="toolbar-actions">
-                <el-button class="toolbar-btn" text @click="showFilesDrawer = true">{{ t('chat.files') }}</el-button>
-                <el-button class="toolbar-btn" text @click="showShareDialog = true">{{ t('chat.share') }}</el-button>
-              </div>
-              <LocaleToggle variant="toolbar" class="toolbar-locale" />
-            </div>
           </div>
         </div>
-        <div class="chat-messages">
-          <div class="messages-inner">
-            <ChatMessage
-              v-for="msg in chatStore.messages"
-              :key="msg.id"
-              :message="msg"
-              :conversation-id="chatStore.currentConversationId || undefined"
-              :is-streaming="chatStore.isStreaming"
-              @edit="handleEditMessage"
-              @regenerate="handleRegenerateMessage"
-            />
-            <div v-if="chatStore.isWaiting && !chatStore.isStreaming" v-loading="true" class="waiting-indicator" element-loading-background="transparent" />
-            <ChatMessage
-              v-if="chatStore.isStreaming"
-              :message="{ id: 'streaming', role: 'assistant', content: chatStore.streamingContent, tool_calls: null, tool_call_id: null, token_count: null, created_at: '' }"
-              :conversation-id="chatStore.currentConversationId || undefined"
-              :is-streaming="true"
-              :streaming-blocks="chatStore.streamingBlocks"
-            />
-          </div>
-        </div>
+        <QuestionFlow
+          v-if="chatStore.activeQuestionnaire"
+          :questionnaire="chatStore.activeQuestionnaire"
+          :disabled="chatStore.questionnaireSubmitting"
+          @submit="handleSubmitQuestionnaire"
+        />
         <ChatInput
+          v-else
           @send="handleSend"
           @stop="chatStore.cancelGeneration"
           :disabled="chatStore.isStreaming || chatStore.isWaiting"
@@ -202,6 +213,7 @@ import { useSettingsStore } from '../stores/settings'
 import ConversationList from '../components/ConversationList.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
+import QuestionFlow from '../components/QuestionFlow.vue'
 import FileBrowser from '../components/FileBrowser.vue'
 import LocaleToggle from '../components/LocaleToggle.vue'
 import { uploadFiles } from '../api/conversations'
@@ -320,6 +332,16 @@ async function handleDeleteConversation(id: string) {
 
 function handleSend(content: string) {
   chatStore.sendMessage(content)
+}
+
+function handleSubmitQuestionnaire(answers: Array<{
+  id: string
+  question: string
+  selected_options: string[]
+  free_text: string
+  notes: string
+}>) {
+  chatStore.submitQuestionnaireAnswers(answers)
 }
 
 async function handleAttachFiles(files: File[]) {
@@ -600,10 +622,20 @@ async function handleImageCascaderChange(val: string[] | null) {
 .chat-toolbar-frame {
   max-width: var(--max-width-chat);
   margin: 0 auto;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 14px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding-left: 40px;
+}
+
+.chat-models {
+  padding: 8px 16px 0;
+  flex-shrink: 0;
+}
+
+.chat-models-inner {
+  max-width: var(--max-width-chat);
+  margin: 0 auto;
   min-width: 0;
 }
 
@@ -611,7 +643,6 @@ async function handleImageCascaderChange(val: string[] | null) {
   display: grid;
   grid-template-columns: repeat(3, minmax(180px, 1fr));
   gap: 10px;
-  padding-left: 40px;
   min-width: 0;
 }
 
@@ -724,20 +755,21 @@ async function handleImageCascaderChange(val: string[] | null) {
   }
 
   .chat-toolbar-frame {
-    grid-template-columns: 1fr;
-    gap: 10px;
-    align-items: stretch;
+    padding-left: 30px;
+  }
+
+  .chat-models {
+    padding: 8px 10px 0;
   }
 
   .toolbar-main {
     grid-template-columns: 1fr;
-    padding-left: 30px;
     gap: 8px;
   }
 
   .toolbar-side {
     justify-content: space-between;
-    padding-left: 30px;
+    width: 100%;
   }
 
   .toolbar-actions {
@@ -746,18 +778,8 @@ async function handleImageCascaderChange(val: string[] | null) {
 }
 
 @media (max-width: 1024px) and (min-width: 769px) {
-  .chat-toolbar-frame {
-    grid-template-columns: 1fr;
-    gap: 10px;
-  }
-
   .toolbar-main {
     grid-template-columns: repeat(3, minmax(150px, 1fr));
-  }
-
-  .toolbar-side {
-    justify-content: space-between;
-    padding-left: 40px;
   }
 }
 </style>

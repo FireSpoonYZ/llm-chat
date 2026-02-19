@@ -8,11 +8,13 @@ from langchain_core.tools import BaseTool
 
 from .bash import BashTool
 from .file_ops import ReadTool, WriteTool, EditTool
+from .list_tool import ListTool
 from .search import GlobTool, GrepTool
 from .web import WebFetchTool, WebSearchTool
 from .code_interpreter import CodeInterpreterTool
 from .image_gen import ImageGenerationTool
-from .task import TaskTool
+from .explore import ExploreTool
+from .question import QuestionTool
 from .capabilities import annotate_builtin_tools, set_tool_capabilities
 
 ALL_TOOLS = [
@@ -20,13 +22,15 @@ ALL_TOOLS = [
     ReadTool,
     WriteTool,
     EditTool,
+    ListTool,
     GlobTool,
     GrepTool,
     WebFetchTool,
     WebSearchTool,
+    QuestionTool,
     CodeInterpreterTool,
     ImageGenerationTool,
-    TaskTool,
+    ExploreTool,
 ]
 
 
@@ -48,10 +52,12 @@ def create_all_tools(
         ReadTool(workspace=workspace),
         WriteTool(workspace=workspace),
         EditTool(workspace=workspace),
+        ListTool(workspace=workspace),
         GlobTool(workspace=workspace),
         GrepTool(workspace=workspace),
         WebFetchTool(),
         WebSearchTool(),
+        QuestionTool(),
         CodeInterpreterTool(workspace=workspace),
     ]
     # Use dedicated image config if provided, otherwise skip image tool
@@ -67,7 +73,7 @@ def create_all_tools(
     return tools
 
 
-def create_task_tool(runner: object) -> BaseTool:
-    tool = TaskTool(runner=runner)
+def create_explore_tool(runner: object) -> BaseTool:
+    tool = ExploreTool(runner=runner)
     set_tool_capabilities(tool, source="builtin", read_only=False)
     return tool

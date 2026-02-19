@@ -244,6 +244,21 @@ async fn update_conversation(
         || image_provider_changed
         || image_model_changed
     {
+        state
+            .ws_state
+            .send_to_client(
+                &auth.user_id,
+                &id,
+                &serde_json::json!({
+                    "type": "container_status",
+                    "conversation_id": &id,
+                    "status": "restarting",
+                    "reason": "model_switch",
+                    "message": "Switching model. Restarting container..."
+                })
+                .to_string(),
+            )
+            .await;
         let _ = state.docker_manager.stop_container(&id).await;
         state.ws_state.remove_container(&id).await;
     }

@@ -99,6 +99,7 @@ function mountView() {
         },
         ChatMessage: true,
         ChatInput: true,
+        QuestionFlow: true,
         FileBrowser: true,
         LocaleToggle: true,
         'el-button': true,

@@ -4,9 +4,9 @@ import ElementPlus from 'element-plus'
 import { nextTick } from 'vue'
 import ToolCallDisplay from '../../components/ToolCallDisplay.vue'
 
-function taskResult(traceSize = 2) {
+function subagentResult(traceSize = 2, kind = 'explore') {
   return {
-    kind: 'task',
+    kind,
     text: 'done',
     success: true,
     error: null,
@@ -26,12 +26,12 @@ function taskResult(traceSize = 2) {
 }
 
 describe('ToolCallDisplay', () => {
-  it('renders task trace blocks only after trace details is opened', async () => {
+  it('renders explore trace blocks only after trace details is opened', async () => {
     const wrapper = mount(ToolCallDisplay, {
       props: {
-        toolName: 'task',
+        toolName: 'explore',
         toolCallId: 'tc-1',
-        toolResult: taskResult(3),
+        toolResult: subagentResult(3),
       },
       global: { plugins: [ElementPlus] },
     })
@@ -53,7 +53,7 @@ describe('ToolCallDisplay', () => {
       props: {
         toolName: 'task',
         toolCallId: 'tc-2',
-        toolResult: taskResult(2),
+        toolResult: subagentResult(2, 'task'),
       },
       global: { plugins: [ElementPlus] },
     })
@@ -70,14 +70,14 @@ describe('ToolCallDisplay', () => {
     expect(wrapper.findAll('.task-trace-item')).toHaveLength(0)
   })
 
-  it('does not truncate long task result text', async () => {
+  it('does not truncate long subagent result text for explore', async () => {
     const longText = 'x'.repeat(7000)
     const wrapper = mount(ToolCallDisplay, {
       props: {
-        toolName: 'task',
-        toolCallId: 'tc-long-task',
+        toolName: 'explore',
+        toolCallId: 'tc-long-explore',
         toolResult: {
-          kind: 'task',
+          kind: 'explore',
           text: longText,
           success: true,
           error: null,
@@ -105,6 +105,30 @@ describe('ToolCallDisplay', () => {
           text: longText,
           success: true,
           error: null,
+          data: {},
+          meta: {},
+        },
+      },
+      global: { plugins: [ElementPlus] },
+    })
+
+    await wrapper.find('.tool-header').trigger('click')
+    const content = wrapper.find('.tool-content').text()
+    expect(content).toContain('[truncated]')
+  })
+
+  it('keeps truncation for long failed image_generation output', async () => {
+    const longText = 'z'.repeat(7000)
+    const wrapper = mount(ToolCallDisplay, {
+      props: {
+        toolName: 'image_generation',
+        toolCallId: 'tc-image-error',
+        isError: true,
+        toolResult: {
+          kind: 'image_generation',
+          text: longText,
+          success: false,
+          error: 'No images were generated',
           data: {},
           meta: {},
         },

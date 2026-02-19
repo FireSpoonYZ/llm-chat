@@ -23,7 +23,19 @@ class TestBasePrompt:
 
 class TestToolDescriptions:
     def test_all_tools_have_descriptions(self):
-        expected = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "code_interpreter"]
+        expected = [
+            "bash",
+            "read",
+            "write",
+            "edit",
+            "list",
+            "glob",
+            "grep",
+            "web_fetch",
+            "web_search",
+            "question",
+            "code_interpreter",
+        ]
         for name in expected:
             assert name in TOOL_DESCRIPTIONS
 
@@ -73,12 +85,31 @@ class TestToolDescriptions:
         result = format_tool_descriptions(["unknown_tool"])
         assert "unknown_tool" in result
 
-    def test_task_description_matches_delegate_boundaries(self):
-        desc = TOOL_DESCRIPTIONS["task"].lower()
-        assert "subagent_type" in desc
-        assert "`explore`" in desc
+    def test_explore_description_matches_delegate_boundaries(self):
+        desc = TOOL_DESCRIPTIONS["explore"].lower()
+        assert "description" in desc
+        assert "prompt" in desc
         assert "deep or wide investigation" in desc
         assert "do not use for simple targeted lookups" in desc
+
+    def test_question_description_prefers_tool_over_chat_followups(self):
+        desc = TOOL_DESCRIPTIONS["question"].lower()
+        assert "requirements, preferences" in desc
+        assert "(recommended)" in desc
+        assert "final approval checks" in desc
+        assert "batch related questions in one call" in desc
+
+    def test_image_generation_description_clarifies_provider_specific_behavior(self):
+        desc = TOOL_DESCRIPTIONS["image_generation"].lower()
+        assert "wxh format" in desc
+        assert "best-effort" in desc
+        assert "openai" in desc
+        assert "google" in desc
+        assert "1k/2k/4k" in desc
+        assert "ignored by google" in desc
+        assert "tool call results display markdown" in desc
+        assert "model also receives multimodal tool context" in desc
+        assert "if no image is produced but the provider returns text" in desc
 
 
 class TestBehaviorFragments:
@@ -91,13 +122,25 @@ class TestBehaviorFragments:
         assert "glob" in TOOL_USAGE_POLICY
         assert "grep" in TOOL_USAGE_POLICY
 
-    def test_tool_usage_policy_task_delegate_conditions(self):
+    def test_tool_usage_policy_explore_delegate_conditions(self):
         policy = TOOL_USAGE_POLICY.lower()
-        assert "subagent_type=\"explore\"" in policy
+        assert "use `explore`" in policy
         assert "broader codebase exploration" in policy
         assert "slower than direct" in policy
-        assert "prefer calling `task` early" in policy
-        assert "before delegating to `task`" not in policy
+        assert "prefer calling `explore` early" in policy
+        assert "before delegating to `explore`" not in policy
+
+    def test_tool_usage_policy_prefers_tools_for_confirmation(self):
+        policy = TOOL_USAGE_POLICY.lower()
+        assert "prefer tool calls over conversational confirmation" in policy
+        assert "progress depends on user preferences" in policy
+        assert "batch requirement and approach clarifications" in policy
+        assert "(recommended)" in policy
+
+    def test_tool_usage_policy_separates_question_from_approval_gates(self):
+        policy = TOOL_USAGE_POLICY.lower()
+        assert "do not use `question` for final approval prompts" in policy
+        assert "use assistant text for explicit approval gates" in policy
 
     def test_safety_instructions_exist(self):
         assert len(SAFETY_INSTRUCTIONS) > 100

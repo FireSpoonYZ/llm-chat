@@ -102,6 +102,17 @@ class TestAgentSession:
         await session._handle_message(json.dumps(msg))
         session._handle_cancel.assert_called_once()
 
+    async def test_handle_message_dispatches_question_answer(self):
+        session = AgentSession("ws://test", "tok")
+        session._handle_question_answer = AsyncMock()
+        msg = {
+            "type": "question_answer",
+            "questionnaire_id": "qq-1",
+            "answers": [{"id": "q1", "selected_options": ["A"]}],
+        }
+        await session._handle_message(json.dumps(msg))
+        session._handle_question_answer.assert_called_once()
+
     async def test_handle_message_dispatches_truncate_history(self):
         session = AgentSession("ws://test", "tok")
         session._handle_truncate_history = MagicMock()
@@ -141,6 +152,80 @@ class TestAgentSession:
         assert sent["type"] == "error"
         assert sent["code"] == "test_code"
         assert sent["message"] == "test message"
+
+    async def test_handle_question_answer_without_init(self):
+        session = AgentSession("ws://test", "tok")
+        session.ws = AsyncMock()
+        session.agent = None
+
+        await session._handle_question_answer({
+            "questionnaire_id": "qq-1",
+            "answers": [{"id": "q1"}],
+        })
+
+        sent = json.loads(session.ws.send.call_args[0][0])
+        assert sent["type"] == "error"
+        assert sent["code"] == "not_initialized"
+
+    async def test_handle_question_answer_missing_questionnaire_id(self):
+        session = AgentSession("ws://test", "tok")
+        session.ws = AsyncMock()
+        session.agent = MagicMock()
+
+        await session._handle_question_answer({
+            "questionnaire_id": "",
+            "answers": [{"id": "q1"}],
+        })
+
+        sent = json.loads(session.ws.send.call_args[0][0])
+        assert sent["type"] == "error"
+        assert sent["code"] == "invalid_question_answer"
+
+    async def test_handle_question_answer_requires_list_answers(self):
+        session = AgentSession("ws://test", "tok")
+        session.ws = AsyncMock()
+        session.agent = MagicMock()
+
+        await session._handle_question_answer({
+            "questionnaire_id": "qq-1",
+            "answers": "invalid",
+        })
+
+        sent = json.loads(session.ws.send.call_args[0][0])
+        assert sent["type"] == "error"
+        assert sent["code"] == "invalid_question_answer"
+
+    async def test_handle_question_answer_unknown_pending(self):
+        session = AgentSession("ws://test", "tok")
+        session.ws = AsyncMock()
+        session.agent = MagicMock()
+        session.agent.submit_question_answer.return_value = False
+
+        await session._handle_question_answer({
+            "questionnaire_id": "qq-1",
+            "answers": [{"id": "q1"}],
+        })
+
+        sent = json.loads(session.ws.send.call_args[0][0])
+        assert sent["type"] == "error"
+        assert sent["code"] == "question_not_pending"
+
+    async def test_handle_question_answer_submits_filtered_answers(self):
+        session = AgentSession("ws://test", "tok")
+        session.ws = AsyncMock()
+        session.agent = MagicMock()
+        session.agent.submit_question_answer.return_value = True
+
+        await session._handle_question_answer({
+            "questionnaire_id": "qq-1",
+            "answers": [{"id": "q1"}, "skip-me", {"id": "q2"}],
+        })
+
+        session.agent.submit_question_answer.assert_called_once_with(
+            "qq-1",
+            [{"id": "q1"}, {"id": "q2"}],
+        )
+        session.ws.send.assert_not_called()
 
     async def test_handle_init_calls_assembler_when_tools_enabled(self):
         session = AgentSession("ws://test", "tok")
@@ -235,7 +320,7 @@ class TestAgentSession:
             assert kwargs["image_api_key"] == ""
             assert kwargs["image_endpoint_url"] is None
 
-    async def test_task_tool_works_when_init_omits_subagent_fields(self):
+    async def test_explore_tool_works_when_init_omits_subagent_fields(self):
         session = AgentSession("ws://test", "tok")
         session.ws = AsyncMock()
 
@@ -268,12 +353,12 @@ class TestAgentSession:
                 "tools_enabled": True,
             })
 
-            task_tool = next(t for t in session.agent.tools if t.name == "task")
-            result = await task_tool._arun(
-                subagent_type="explore",
+            explore_tool = next(t for t in session.agent.tools if t.name == "explore")
+            result = await explore_tool._arun(
                 description="investigate repo",
                 prompt="check architecture docs",
             )
             assert result["success"] is True
+            assert result["kind"] == "explore"
             assert result["data"]["subagent_type"] == "explore"
             assert "subagent done" in result["text"]

@@ -5,7 +5,7 @@ from typing import Any
 
 from langchain_core.tools import BaseTool
 
-READ_ONLY_BUILTINS = {"read", "glob", "grep", "web_fetch", "web_search"}
+READ_ONLY_BUILTINS = {"read", "list", "glob", "grep", "web_fetch", "web_search"}
 
 
 def _as_bool(value: Any) -> bool | None:
