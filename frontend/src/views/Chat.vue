@@ -109,6 +109,9 @@
                 />
               </div>
             </div>
+            <p v-if="modelDraftWarningMessage" class="model-warning">
+              {{ modelDraftWarningMessage }}
+            </p>
           </div>
         </div>
         <QuestionFlow
@@ -202,12 +205,13 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, computed, ref } from 'vue'
+import { onMounted, onUnmounted, computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Fold, Expand, Setting, SwitchButton } from '@element-plus/icons-vue'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import { useSettingsStore } from '../stores/settings'
+import type { Conversation, ProviderConfig } from '../types'
 import ConversationList from '../components/ConversationList.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
@@ -230,12 +234,191 @@ const showFilesDrawer = ref(false)
 const fileBrowserRef = ref<InstanceType<typeof FileBrowser> | null>(null)
 const showShareDialog = ref(false)
 const shareLoading = ref(false)
+const currentConversation = computed(() =>
+  chatStore.conversations.find(c => c.id === chatStore.currentConversationId)
+)
 
 const deepThinking = computed(() => currentConversation.value?.deep_thinking ?? false)
 const thinkingBudget = computed(() => currentConversation.value?.thinking_budget ?? null)
 const subagentThinkingBudget = computed(() => currentConversation.value?.subagent_thinking_budget ?? null)
 
 const presets = computed(() => settingsStore.presets)
+type ModelRole = 'chat' | 'subagent' | 'image'
+type ModelDraft = {
+  providerId: string | null
+  modelName: string | null
+}
+
+const chatModelDraft = ref<ModelDraft>({ providerId: null, modelName: null })
+const subagentModelDraft = ref<ModelDraft>({ providerId: null, modelName: null })
+const imageModelDraft = ref<ModelDraft>({ providerId: null, modelName: null })
+const modelDraftSubmitting = ref(false)
+let modelDraftResubmitRequested = false
+
+function toModelDraft(providerId: string | null | undefined, modelName: string | null | undefined): ModelDraft {
+  return {
+    providerId: providerId || null,
+    modelName: modelName || null,
+  }
+}
+
+function resetModelDrafts(conversation?: Conversation) {
+  chatModelDraft.value = toModelDraft(conversation?.provider_id, conversation?.model_name)
+  subagentModelDraft.value = toModelDraft(conversation?.subagent_provider_id, conversation?.subagent_model)
+  imageModelDraft.value = toModelDraft(conversation?.image_provider_id, conversation?.image_model)
+}
+
+function getApiErrorMessage(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null) return null
+  const maybeError = error as {
+    response?: { data?: { message?: unknown } }
+    message?: unknown
+  }
+  const serverMessage = maybeError.response?.data?.message
+  if (typeof serverMessage === 'string' && serverMessage.trim().length > 0) {
+    return serverMessage
+  }
+  if (typeof maybeError.message === 'string' && maybeError.message.trim().length > 0) {
+    return maybeError.message
+  }
+  return null
+}
+
+function findProvider(providerId: string | null): ProviderConfig | undefined {
+  if (!providerId) return undefined
+  return settingsStore.providers.find(p => p.id === providerId)
+}
+
+function providerHasModel(providerId: string | null, modelName: string | null, useImageModels: boolean): boolean {
+  if (!providerId || !modelName) return false
+  const provider = findProvider(providerId)
+  if (!provider) return false
+  const models = useImageModels ? provider.image_models : provider.models
+  return models.includes(modelName)
+}
+
+function collectInvalidModelRoles(): ModelRole[] {
+  const invalid = new Set<ModelRole>()
+  const { providerId: chatProviderId, modelName: chatModelName } = chatModelDraft.value
+  const { providerId: subagentProviderId, modelName: subagentModelName } = subagentModelDraft.value
+  const { providerId: imageProviderId, modelName: imageModelName } = imageModelDraft.value
+
+  if (!providerHasModel(chatProviderId, chatModelName, false)) {
+    invalid.add('chat')
+  }
+  if (!providerHasModel(subagentProviderId, subagentModelName, false)) {
+    invalid.add('subagent')
+  }
+  if (Boolean(imageProviderId) !== Boolean(imageModelName)) {
+    invalid.add('image')
+  } else if ((imageProviderId || imageModelName) && !providerHasModel(imageProviderId, imageModelName, true)) {
+    invalid.add('image')
+  }
+
+  return Array.from(invalid)
+}
+
+const modelDraftWarningMessage = computed(() => {
+  const invalidRoles = collectInvalidModelRoles()
+  if (invalidRoles.length === 0) return ''
+  const roleLabels = invalidRoles.map((role) => {
+    if (role === 'chat') return t('chat.model')
+    if (role === 'subagent') return t('chat.subagent')
+    return t('chat.image')
+  })
+  return t('chat.messages.invalidConversationModelConfigRoles', {
+    roles: roleLabels.join(', '),
+  })
+})
+
+function getModelValidationMessageKey(): string | null {
+  const { providerId: chatProviderId, modelName: chatModelName } = chatModelDraft.value
+  if (!providerHasModel(chatProviderId, chatModelName, false)) {
+    return 'chat.messages.invalidMainModelSelection'
+  }
+
+  const { providerId: subagentProviderId, modelName: subagentModelName } = subagentModelDraft.value
+  if (!providerHasModel(subagentProviderId, subagentModelName, false)) {
+    return 'chat.messages.invalidSubagentModelSelection'
+  }
+
+  const { providerId: imageProviderId, modelName: imageModelName } = imageModelDraft.value
+  if (Boolean(imageProviderId) !== Boolean(imageModelName)) {
+    return 'chat.messages.invalidImageModelPair'
+  }
+  if ((imageProviderId || imageModelName) && !providerHasModel(imageProviderId, imageModelName, true)) {
+    return 'chat.messages.invalidImageModelSelection'
+  }
+
+  return null
+}
+
+async function updateConversationWithErrorHandling(
+  updates: Partial<Conversation>,
+  fallbackMessageKey = 'chat.messages.failedUpdateConversation',
+): Promise<{ success: boolean, statusCode: number | null, didRequest: boolean }> {
+  if (!chatStore.currentConversationId) return { success: false, statusCode: null, didRequest: false }
+  try {
+    await chatStore.updateConversation(chatStore.currentConversationId, updates)
+    return { success: true, statusCode: null, didRequest: true }
+  } catch (error) {
+    const statusCode = (
+      typeof error === 'object'
+      && error !== null
+      && 'response' in error
+      && typeof (error as { response?: { status?: unknown } }).response?.status === 'number'
+    )
+      ? (error as { response: { status: number } }).response.status
+      : null
+    ElMessage.error(getApiErrorMessage(error) || t(fallbackMessageKey))
+    return { success: false, statusCode, didRequest: true }
+  }
+}
+
+async function submitModelDraftAttempt(): Promise<{ success: boolean, statusCode: number | null, didRequest: boolean }> {
+  const messageKey = getModelValidationMessageKey()
+  if (messageKey) {
+    ElMessage.error(t(messageKey))
+    return { success: false, statusCode: null, didRequest: false }
+  }
+  const { providerId: imageProviderId, modelName: imageModelName } = imageModelDraft.value
+  return await updateConversationWithErrorHandling(
+    {
+      provider_id: chatModelDraft.value.providerId,
+      model_name: chatModelDraft.value.modelName,
+      subagent_provider_id: subagentModelDraft.value.providerId,
+      subagent_model: subagentModelDraft.value.modelName,
+      image_provider_id: imageProviderId || '',
+      image_model: imageModelName || '',
+    },
+    'chat.messages.modelUpdateFailed',
+  )
+}
+
+async function submitModelDraft() {
+  if (modelDraftSubmitting.value) {
+    modelDraftResubmitRequested = true
+    return
+  }
+
+  modelDraftSubmitting.value = true
+  try {
+    do {
+      modelDraftResubmitRequested = false
+      const result = await submitModelDraftAttempt()
+      if (!result.success) {
+        if (result.didRequest && result.statusCode === 400) {
+          await settingsStore.loadProviders().catch(() => {})
+        }
+        if (result.didRequest && !modelDraftResubmitRequested) {
+          resetModelDrafts(currentConversation.value)
+        }
+      }
+    } while (modelDraftResubmitRequested)
+  } finally {
+    modelDraftSubmitting.value = false
+  }
+}
 
 onMounted(async () => {
   const [convResult, providersResult, presetsResult, modelDefaultsResult] = await Promise.allSettled([
@@ -270,6 +453,14 @@ onMounted(async () => {
 onUnmounted(() => {
   chatStore.disconnectWs()
 })
+
+watch(
+  currentConversation,
+  (conversation) => {
+    resetModelDrafts(conversation)
+  },
+  { immediate: true },
+)
 
 function handlePresetSelect(presetId: string) {
   if (presetId === '__custom__') {
@@ -377,30 +568,26 @@ function handleRegenerateMessage(messageId: string) {
   chatStore.regenerateMessage(messageId)
 }
 
-function toggleDeepThinking() {
+async function toggleDeepThinking() {
   if (!chatStore.currentConversationId) return
-  chatStore.updateConversation(chatStore.currentConversationId, {
+  await updateConversationWithErrorHandling({
     deep_thinking: !deepThinking.value,
   })
 }
 
-function updateThinkingBudget(value: number | null) {
+async function updateThinkingBudget(value: number | null) {
   if (!chatStore.currentConversationId) return
-  chatStore.updateConversation(chatStore.currentConversationId, {
+  await updateConversationWithErrorHandling({
     thinking_budget: value,
   })
 }
 
-function updateSubagentThinkingBudget(value: number | null) {
+async function updateSubagentThinkingBudget(value: number | null) {
   if (!chatStore.currentConversationId) return
-  chatStore.updateConversation(chatStore.currentConversationId, {
+  await updateConversationWithErrorHandling({
     subagent_thinking_budget: value,
   })
 }
-
-const currentConversation = computed(() =>
-  chatStore.conversations.find(c => c.id === chatStore.currentConversationId)
-)
 
 const shareUrl = computed(() => {
   const token = currentConversation.value?.share_token
@@ -458,9 +645,8 @@ const cascaderOptions = computed(() => {
 })
 
 const cascaderValue = computed(() => {
-  const conv = currentConversation.value
-  if (conv?.provider_id && conv?.model_name) {
-    return [conv.provider_id, conv.model_name]
+  if (chatModelDraft.value.providerId && chatModelDraft.value.modelName) {
+    return [chatModelDraft.value.providerId, chatModelDraft.value.modelName]
   }
   return []
 })
@@ -468,10 +654,11 @@ const cascaderValue = computed(() => {
 async function handleCascaderChange(val: string[] | null) {
   if (!chatStore.currentConversationId) return
   if (val && val.length === 2) {
-    await chatStore.updateConversation(chatStore.currentConversationId, {
-      provider_id: val[0],
-      model_name: val[1],
-    })
+    chatModelDraft.value = {
+      providerId: val[0],
+      modelName: val[1],
+    }
+    await submitModelDraft()
   }
 }
 
@@ -500,9 +687,8 @@ const subagentCascaderOptions = computed(() => {
 })
 
 const subagentCascaderValue = computed(() => {
-  const conv = currentConversation.value
-  if (conv?.subagent_provider_id && conv?.subagent_model) {
-    return [conv.subagent_provider_id, conv.subagent_model]
+  if (subagentModelDraft.value.providerId && subagentModelDraft.value.modelName) {
+    return [subagentModelDraft.value.providerId, subagentModelDraft.value.modelName]
   }
   return []
 })
@@ -510,17 +696,17 @@ const subagentCascaderValue = computed(() => {
 async function handleSubagentCascaderChange(val: string[] | null) {
   if (!chatStore.currentConversationId) return
   if (val && val.length === 2) {
-    await chatStore.updateConversation(chatStore.currentConversationId, {
-      subagent_provider_id: val[0],
-      subagent_model: val[1],
-    })
+    subagentModelDraft.value = {
+      providerId: val[0],
+      modelName: val[1],
+    }
+    await submitModelDraft()
   }
 }
 
 const imageCascaderValue = computed(() => {
-  const conv = currentConversation.value
-  if (conv?.image_provider_id && conv?.image_model) {
-    return [conv.image_provider_id, conv.image_model]
+  if (imageModelDraft.value.providerId && imageModelDraft.value.modelName) {
+    return [imageModelDraft.value.providerId, imageModelDraft.value.modelName]
   }
   return []
 })
@@ -528,16 +714,17 @@ const imageCascaderValue = computed(() => {
 async function handleImageCascaderChange(val: string[] | null) {
   if (!chatStore.currentConversationId) return
   if (val && val.length === 2) {
-    await chatStore.updateConversation(chatStore.currentConversationId, {
-      image_provider_id: val[0],
-      image_model: val[1],
-    })
+    imageModelDraft.value = {
+      providerId: val[0],
+      modelName: val[1],
+    }
   } else {
-    await chatStore.updateConversation(chatStore.currentConversationId, {
-      image_provider_id: '',
-      image_model: '',
-    })
+    imageModelDraft.value = {
+      providerId: null,
+      modelName: null,
+    }
   }
+  await submitModelDraft()
 }
 </script>
 
@@ -666,6 +853,12 @@ async function handleImageCascaderChange(val: string[] | null) {
 
 .model-cascader {
   width: 100%;
+}
+
+.model-warning {
+  margin: 8px 0 0;
+  color: #B45309;
+  font-size: 12px;
 }
 
 .toolbar-side {
