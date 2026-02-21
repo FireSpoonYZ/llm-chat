@@ -86,6 +86,7 @@ const messages = {
         failedLoadConversations: 'Failed to load conversations',
         failedLoadProviders: 'Failed to load providers',
         failedLoadPromptPresets: 'Failed to load prompt presets',
+        failedLoadModelDefaults: 'Failed to load default model settings',
         failedCreateChat: 'Failed to create chat',
         failedLoadConversation: 'Failed to load conversation',
         failedDeleteConversation: 'Failed to delete conversation',
@@ -99,6 +100,7 @@ const messages = {
         editNotApplied: 'Edit was not applied. Please try again.',
         regenerateNotApplied: 'Regenerate request was not applied. Please try again.',
         operationTimeout: 'Operation timed out before confirmation. Synced with latest server state.',
+        missingRequiredDefaults: 'Please configure default main/subagent models in Settings first.',
       },
     },
     settings: {
@@ -123,6 +125,7 @@ const messages = {
         apiType: 'API Type',
         apiKey: 'API Key',
         models: 'Models',
+        modelsOptional: 'Models (optional)',
         imageModelsOptional: 'Image Models (optional)',
         customEndpointOptional: 'Custom Endpoint (optional)',
         setDefault: 'Set as default',
@@ -140,6 +143,7 @@ const messages = {
           apiTypeRequired: 'API type is required',
           apiKeyRequired: 'API key is required',
           modelRequired: 'Add at least one model',
+          atLeastOneModelRequired: 'Add at least one chat model or image model',
         },
         messages: {
           updated: 'Provider updated',
@@ -149,6 +153,23 @@ const messages = {
           deleteFailed: 'Failed to delete provider',
         },
         confirmDelete: 'Delete this provider? This cannot be undone.',
+      },
+      defaults: {
+        title: 'Default Models',
+        description: 'Defaults apply to newly created conversations only. Existing conversations are unchanged.',
+        missingRequired: 'Main model and subagent model defaults are required.',
+        chatModel: 'Main Model (required)',
+        subagentModel: 'Subagent Model (required)',
+        imageModelOptional: 'Image Model (optional)',
+        validation: {
+          chatRequired: 'Please select a default main model',
+          subagentRequired: 'Please select a default subagent model',
+          imagePairRequired: 'Image provider and image model must be selected together',
+        },
+        messages: {
+          saved: 'Default models saved',
+          saveFailed: 'Failed to save default models',
+        },
       },
       preset: {
         addTitle: 'Add Preset',
@@ -335,6 +356,7 @@ const messages = {
         failedLoadConversations: '加载会话失败',
         failedLoadProviders: '加载提供商失败',
         failedLoadPromptPresets: '加载提示词预设失败',
+        failedLoadModelDefaults: '加载默认模型配置失败',
         failedCreateChat: '创建会话失败',
         failedLoadConversation: '加载会话失败',
         failedDeleteConversation: '删除会话失败',
@@ -348,6 +370,7 @@ const messages = {
         editNotApplied: '编辑未生效，请重试。',
         regenerateNotApplied: '重新生成请求未生效，请重试。',
         operationTimeout: '操作确认超时，已同步为服务器最新状态。',
+        missingRequiredDefaults: '请先在设置中配置默认主模型和子代理模型。',
       },
     },
     settings: {
@@ -372,6 +395,7 @@ const messages = {
         apiType: 'API 类型',
         apiKey: 'API Key',
         models: '模型',
+        modelsOptional: '模型（可选）',
         imageModelsOptional: '图像模型（可选）',
         customEndpointOptional: '自定义地址（可选）',
         setDefault: '设为默认',
@@ -389,6 +413,7 @@ const messages = {
           apiTypeRequired: '请选择 API 类型',
           apiKeyRequired: '请输入 API Key',
           modelRequired: '请至少添加一个模型',
+          atLeastOneModelRequired: '请至少添加一个对话模型或图像模型',
         },
         messages: {
           updated: '提供商已更新',
@@ -398,6 +423,23 @@ const messages = {
           deleteFailed: '删除提供商失败',
         },
         confirmDelete: '确定删除这个提供商吗？此操作不可撤销。',
+      },
+      defaults: {
+        title: '默认模型',
+        description: '默认值仅作用于新建会话，已有会话不会被改写。',
+        missingRequired: '默认主模型和默认子代理模型为必填。',
+        chatModel: '主模型（必填）',
+        subagentModel: '子代理模型（必填）',
+        imageModelOptional: '图像模型（可选）',
+        validation: {
+          chatRequired: '请选择默认主模型',
+          subagentRequired: '请选择默认子代理模型',
+          imagePairRequired: '图像提供商和图像模型需要同时设置',
+        },
+        messages: {
+          saved: '默认模型已保存',
+          saveFailed: '保存默认模型失败',
+        },
       },
       preset: {
         addTitle: '添加预设',

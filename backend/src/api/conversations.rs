@@ -31,6 +31,101 @@ fn validate_optional_budget(field_name: &str, budget: Option<i64>) -> Result<(),
     Ok(())
 }
 
+fn normalize_optional_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string)
+}
+
+fn parse_models_json(json_str: Option<&str>) -> Vec<String> {
+    json_str
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .unwrap_or_default()
+}
+
+fn ensure_provider_has_model(
+    providers: &[db::providers::UserProvider],
+    provider_id: &str,
+    model_name: &str,
+    use_image_models: bool,
+) -> Result<(), AppError> {
+    let provider = providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .ok_or_else(|| {
+            AppError::BadRequest(format!("Provider id '{provider_id}' does not exist"))
+        })?;
+
+    let models = if use_image_models {
+        parse_models_json(provider.image_models.as_deref())
+    } else {
+        parse_models_json(provider.models.as_deref())
+    };
+    if models.iter().any(|m| m == model_name) {
+        return Ok(());
+    }
+    let kind = if use_image_models {
+        "image model"
+    } else {
+        "model"
+    };
+    Err(AppError::BadRequest(format!(
+        "{kind} '{model_name}' is not available for provider id '{provider_id}'"
+    )))
+}
+
+struct ValidatedConversationModels {
+    provider_id: String,
+    model_name: String,
+    subagent_provider_id: String,
+    subagent_model: String,
+    image_provider_id: Option<String>,
+    image_model: Option<String>,
+}
+
+fn validate_conversation_models(
+    providers: &[db::providers::UserProvider],
+    provider_id: Option<String>,
+    model_name: Option<String>,
+    subagent_provider_id: Option<String>,
+    subagent_model: Option<String>,
+    image_provider_id: Option<String>,
+    image_model: Option<String>,
+) -> Result<ValidatedConversationModels, AppError> {
+    let provider_id =
+        provider_id.ok_or_else(|| AppError::BadRequest("provider_id is required".into()))?;
+    let model_name =
+        model_name.ok_or_else(|| AppError::BadRequest("model_name is required".into()))?;
+    let subagent_provider_id = subagent_provider_id
+        .ok_or_else(|| AppError::BadRequest("subagent_provider_id is required".into()))?;
+    let subagent_model =
+        subagent_model.ok_or_else(|| AppError::BadRequest("subagent_model is required".into()))?;
+
+    if image_provider_id.is_some() ^ image_model.is_some() {
+        return Err(AppError::BadRequest(
+            "image_provider_id and image_model must both be set or both be empty".into(),
+        ));
+    }
+
+    ensure_provider_has_model(providers, &provider_id, &model_name, false)?;
+    ensure_provider_has_model(providers, &subagent_provider_id, &subagent_model, false)?;
+    if let (Some(provider_id), Some(model_name)) =
+        (image_provider_id.as_deref(), image_model.as_deref())
+    {
+        ensure_provider_has_model(providers, provider_id, model_name, true)?;
+    }
+
+    Ok(ValidatedConversationModels {
+        provider_id,
+        model_name,
+        subagent_provider_id,
+        subagent_model,
+        image_provider_id,
+        image_model,
+    })
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_conversations).post(create_conversation))
@@ -51,15 +146,15 @@ pub fn router() -> Router<Arc<AppState>> {
 pub struct ConversationResponse {
     pub id: String,
     pub title: String,
-    pub provider: Option<String>,
+    pub provider_id: Option<String>,
     pub model_name: Option<String>,
-    pub subagent_provider: Option<String>,
+    pub subagent_provider_id: Option<String>,
     pub subagent_model: Option<String>,
     pub system_prompt_override: Option<String>,
     pub deep_thinking: bool,
     pub created_at: String,
     pub updated_at: String,
-    pub image_provider: Option<String>,
+    pub image_provider_id: Option<String>,
     pub image_model: Option<String>,
     pub share_token: Option<String>,
     pub thinking_budget: Option<i64>,
@@ -71,15 +166,15 @@ impl From<db::conversations::Conversation> for ConversationResponse {
         Self {
             id: c.id,
             title: c.title,
-            provider: c.provider,
+            provider_id: c.provider_id,
             model_name: c.model_name,
-            subagent_provider: c.subagent_provider,
+            subagent_provider_id: c.subagent_provider_id,
             subagent_model: c.subagent_model,
             system_prompt_override: c.system_prompt_override,
             deep_thinking: c.deep_thinking,
             created_at: c.created_at,
             updated_at: c.updated_at,
-            image_provider: c.image_provider,
+            image_provider_id: c.image_provider_id,
             image_model: c.image_model,
             share_token: c.share_token,
             thinking_budget: c.thinking_budget,
@@ -100,12 +195,12 @@ async fn list_conversations(
 pub struct CreateConversationRequest {
     pub title: Option<String>,
     pub system_prompt_override: Option<String>,
-    pub provider: Option<String>,
+    pub provider_id: Option<String>,
     pub model_name: Option<String>,
-    pub subagent_provider: Option<String>,
+    pub subagent_provider_id: Option<String>,
     pub subagent_model: Option<String>,
     pub deep_thinking: Option<bool>,
-    pub image_provider: Option<String>,
+    pub image_provider_id: Option<String>,
     pub image_model: Option<String>,
     pub thinking_budget: Option<i64>,
     pub subagent_thinking_budget: Option<i64>,
@@ -120,8 +215,17 @@ async fn create_conversation(
     validate_optional_budget("subagent_thinking_budget", req.subagent_thinking_budget)?;
 
     let title = req.title.unwrap_or_else(|| "New Conversation".into());
-    let subagent_provider = req.subagent_provider.as_deref().or(req.provider.as_deref());
-    let subagent_model = req.subagent_model.as_deref().or(req.model_name.as_deref());
+    let providers = db::providers::list_providers(&state.db, &auth.user_id).await?;
+    let validated_models = validate_conversation_models(
+        &providers,
+        normalize_optional_string(req.provider_id.as_deref()),
+        normalize_optional_string(req.model_name.as_deref()),
+        normalize_optional_string(req.subagent_provider_id.as_deref()),
+        normalize_optional_string(req.subagent_model.as_deref()),
+        normalize_optional_string(req.image_provider_id.as_deref()),
+        normalize_optional_string(req.image_model.as_deref()),
+    )?;
+
     let thinking_budget = req.thinking_budget.unwrap_or(DEFAULT_THINKING_BUDGET);
     let subagent_thinking_budget = req.subagent_thinking_budget.unwrap_or(thinking_budget);
     let conv = db::conversations::create_conversation_with_subagent(
@@ -129,13 +233,13 @@ async fn create_conversation(
         &auth.user_id,
         &title,
         req.system_prompt_override.as_deref(),
-        req.provider.as_deref(),
-        req.model_name.as_deref(),
-        subagent_provider,
-        subagent_model,
+        Some(validated_models.provider_id.as_str()),
+        Some(validated_models.model_name.as_str()),
+        Some(validated_models.subagent_provider_id.as_str()),
+        Some(validated_models.subagent_model.as_str()),
         req.deep_thinking.unwrap_or(true),
-        req.image_provider.as_deref(),
-        req.image_model.as_deref(),
+        validated_models.image_provider_id.as_deref(),
+        validated_models.image_model.as_deref(),
         Some(thinking_budget),
         Some(subagent_thinking_budget),
     )
@@ -162,13 +266,13 @@ async fn get_conversation(
 #[derive(Deserialize)]
 pub struct UpdateConversationRequest {
     pub title: Option<String>,
-    pub provider: Option<String>,
+    pub provider_id: Option<String>,
     pub model_name: Option<String>,
-    pub subagent_provider: Option<String>,
+    pub subagent_provider_id: Option<String>,
     pub subagent_model: Option<String>,
     pub system_prompt_override: Option<String>,
     pub deep_thinking: Option<bool>,
-    pub image_provider: Option<String>,
+    pub image_provider_id: Option<String>,
     pub image_model: Option<String>,
     pub thinking_budget: Option<i64>,
     pub subagent_thinking_budget: Option<i64>,
@@ -188,25 +292,21 @@ async fn update_conversation(
         .ok_or(AppError::NotFound)?;
 
     let title = req.title.as_deref().unwrap_or(&existing.title);
-    let provider = match req.provider.as_deref() {
-        Some("") => None,
-        Some(v) => Some(v),
-        None => existing.provider.as_deref(),
+    let provider_id = match req.provider_id.as_deref() {
+        Some(value) => normalize_optional_string(Some(value)),
+        None => normalize_optional_string(existing.provider_id.as_deref()),
     };
     let model_name = match req.model_name.as_deref() {
-        Some("") => None,
-        Some(v) => Some(v),
-        None => existing.model_name.as_deref(),
+        Some(value) => normalize_optional_string(Some(value)),
+        None => normalize_optional_string(existing.model_name.as_deref()),
     };
-    let subagent_provider = match req.subagent_provider.as_deref() {
-        Some("") => None,
-        Some(v) => Some(v),
-        None => existing.subagent_provider.as_deref(),
+    let subagent_provider_id = match req.subagent_provider_id.as_deref() {
+        Some(value) => normalize_optional_string(Some(value)),
+        None => normalize_optional_string(existing.subagent_provider_id.as_deref()),
     };
     let subagent_model = match req.subagent_model.as_deref() {
-        Some("") => None,
-        Some(v) => Some(v),
-        None => existing.subagent_model.as_deref(),
+        Some(value) => normalize_optional_string(Some(value)),
+        None => normalize_optional_string(existing.subagent_model.as_deref()),
     };
     let system_prompt = match req.system_prompt_override.as_deref() {
         Some("") => None,
@@ -218,25 +318,39 @@ async fn update_conversation(
     let subagent_thinking_budget = req
         .subagent_thinking_budget
         .or(existing.subagent_thinking_budget);
-    let image_provider = match req.image_provider.as_deref() {
-        Some("") => None,
-        Some(v) => Some(v),
-        None => existing.image_provider.as_deref(),
+    let image_provider_id = match req.image_provider_id.as_deref() {
+        Some(value) => normalize_optional_string(Some(value)),
+        None => normalize_optional_string(existing.image_provider_id.as_deref()),
     };
     let image_model = match req.image_model.as_deref() {
-        Some("") => None,
-        Some(v) => Some(v),
-        None => existing.image_model.as_deref(),
+        Some(value) => normalize_optional_string(Some(value)),
+        None => normalize_optional_string(existing.image_model.as_deref()),
     };
+    let providers = db::providers::list_providers(&state.db, &auth.user_id).await?;
+    let validated_models = validate_conversation_models(
+        &providers,
+        provider_id,
+        model_name,
+        subagent_provider_id,
+        subagent_model,
+        image_provider_id,
+        image_model,
+    )?;
 
-    // If provider or model changed, stop the running container so it
+    // If provider_id or model changed, stop the running container so it
     // re-initialises with the new config on the next message.
-    let provider_changed = provider != existing.provider.as_deref();
-    let model_changed = model_name != existing.model_name.as_deref();
-    let subagent_provider_changed = subagent_provider != existing.subagent_provider.as_deref();
-    let subagent_model_changed = subagent_model != existing.subagent_model.as_deref();
-    let image_provider_changed = image_provider != existing.image_provider.as_deref();
-    let image_model_changed = image_model != existing.image_model.as_deref();
+    let provider_changed =
+        Some(validated_models.provider_id.as_str()) != existing.provider_id.as_deref();
+    let model_changed =
+        Some(validated_models.model_name.as_str()) != existing.model_name.as_deref();
+    let subagent_provider_changed = Some(validated_models.subagent_provider_id.as_str())
+        != existing.subagent_provider_id.as_deref();
+    let subagent_model_changed =
+        Some(validated_models.subagent_model.as_str()) != existing.subagent_model.as_deref();
+    let image_provider_changed =
+        validated_models.image_provider_id.as_deref() != existing.image_provider_id.as_deref();
+    let image_model_changed =
+        validated_models.image_model.as_deref() != existing.image_model.as_deref();
     if provider_changed
         || model_changed
         || subagent_provider_changed
@@ -268,14 +382,14 @@ async fn update_conversation(
         &id,
         &auth.user_id,
         title,
-        provider,
-        model_name,
-        subagent_provider,
-        subagent_model,
+        Some(validated_models.provider_id.as_str()),
+        Some(validated_models.model_name.as_str()),
+        Some(validated_models.subagent_provider_id.as_str()),
+        Some(validated_models.subagent_model.as_str()),
         system_prompt,
         deep_thinking,
-        image_provider,
-        image_model,
+        validated_models.image_provider_id.as_deref(),
+        validated_models.image_model.as_deref(),
         thinking_budget,
         subagent_thinking_budget,
     )

@@ -9,11 +9,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.agent import StreamEvent
-from src.main import AgentSession
+from src.main import (
+    AgentSession,
+    DEFAULT_MAX_WS_MESSAGE_BYTES,
+    MAX_WS_MESSAGE_BYTES,
+    _read_max_ws_message_bytes,
+)
 from src.prompts.tools import TOOL_DESCRIPTIONS
 
 
 class TestAgentSession:
+    def test_read_max_ws_message_bytes_defaults_when_missing(self, monkeypatch):
+        monkeypatch.delenv("MAX_WS_MESSAGE_BYTES", raising=False)
+        assert _read_max_ws_message_bytes() == DEFAULT_MAX_WS_MESSAGE_BYTES
+
+    def test_read_max_ws_message_bytes_falls_back_on_invalid_value(self, monkeypatch):
+        monkeypatch.setenv("MAX_WS_MESSAGE_BYTES", "invalid-number")
+        assert _read_max_ws_message_bytes() == DEFAULT_MAX_WS_MESSAGE_BYTES
+
     def test_init(self):
         session = AgentSession("ws://localhost:3001/internal/ws", "token123")
         assert session.ws_url == "ws://localhost:3001/internal/ws"
@@ -34,6 +47,43 @@ class TestAgentSession:
                 "api_key": "key",
             })
             assert session.agent is not None
+
+    async def test_run_uses_explicit_ws_max_size_and_sends_ready(self):
+        session = AgentSession("ws://localhost:3001/internal/ws", "token123")
+
+        class _FakeWs:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            async def send(self, payload: str) -> None:
+                self.sent.append(payload)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+        class _FakeConnectCtx:
+            def __init__(self, ws: _FakeWs) -> None:
+                self.ws = ws
+
+            async def __aenter__(self) -> _FakeWs:
+                return self.ws
+
+            async def __aexit__(self, _exc_type, _exc, _tb) -> bool:
+                return False
+
+        fake_ws = _FakeWs()
+        with patch("src.main.websockets.connect", return_value=_FakeConnectCtx(fake_ws)) as mock_connect, \
+             patch.object(session.mcp_manager, "shutdown", new_callable=AsyncMock) as mock_shutdown:
+            await session.run()
+
+        called_url = mock_connect.call_args.args[0]
+        assert called_url == "ws://localhost:3001/internal/ws?token=token123"
+        assert mock_connect.call_args.kwargs["max_size"] == MAX_WS_MESSAGE_BYTES
+        assert json.loads(fake_ws.sent[0]) == {"type": "ready"}
+        mock_shutdown.assert_awaited_once()
 
     async def test_handle_user_message_without_init(self):
         session = AgentSession("ws://test", "tok")

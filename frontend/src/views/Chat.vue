@@ -78,7 +78,6 @@
                   :options="cascaderOptions"
                   :props="{ expandTrigger: 'hover' }"
                   :placeholder="t('chat.selectProviderModel')"
-                  clearable
                   size="small"
                   class="model-cascader"
                   @change="handleCascaderChange"
@@ -91,7 +90,6 @@
                   :options="subagentCascaderOptions"
                   :props="{ expandTrigger: 'hover' }"
                   :placeholder="t('chat.selectSubagentModel')"
-                  clearable
                   size="small"
                   class="model-cascader"
                   @change="handleSubagentCascaderChange"
@@ -240,10 +238,11 @@ const subagentThinkingBudget = computed(() => currentConversation.value?.subagen
 const presets = computed(() => settingsStore.presets)
 
 onMounted(async () => {
-  const [convResult, providersResult, presetsResult] = await Promise.allSettled([
+  const [convResult, providersResult, presetsResult, modelDefaultsResult] = await Promise.allSettled([
     chatStore.loadConversations(),
     settingsStore.loadProviders(),
     settingsStore.loadPresets(),
+    settingsStore.loadModelDefaults(),
   ])
 
   if (convResult.status === 'rejected') {
@@ -254,6 +253,9 @@ onMounted(async () => {
   }
   if (presetsResult.status === 'rejected') {
     ElMessage.error(t('chat.messages.failedLoadPromptPresets'))
+  }
+  if (modelDefaultsResult.status === 'rejected') {
+    ElMessage.error(t('chat.messages.failedLoadModelDefaults'))
   }
 
   if (auth.isAuthenticated) {
@@ -281,18 +283,28 @@ function handlePresetSelect(presetId: string) {
 async function handleCreateChat() {
   try {
     const prompt = newChatPrompt.value.trim() || undefined
-    const defaultProvider = settingsStore.providers.find(p => p.is_default)
-    const provider = defaultProvider?.name
-    const modelName = defaultProvider?.models[0]
+    const defaults = settingsStore.modelDefaults
+    const provider = defaults?.chat_provider_id || undefined
+    const modelName = defaults?.chat_model || undefined
+    const subagentProvider = defaults?.subagent_provider_id || undefined
+    const subagentModel = defaults?.subagent_model || undefined
+    const imageProvider = defaults?.image_provider_id || undefined
+    const imageModel = defaults?.image_model || undefined
+
+    if (!provider || !modelName || !subagentProvider || !subagentModel) {
+      ElMessage.error(t('chat.messages.missingRequiredDefaults'))
+      return
+    }
+
     const conv = await chatStore.createConversation(
       undefined,
       prompt,
       provider,
       modelName,
-      undefined,
-      undefined,
-      provider,
-      modelName,
+      imageProvider,
+      imageModel,
+      subagentProvider,
+      subagentModel,
     )
     await chatStore.selectConversation(conv.id)
     showNewChatDialog.value = false
@@ -436,7 +448,7 @@ async function copyShareUrl() {
 
 const cascaderOptions = computed(() => {
   return settingsStore.providers.map(p => ({
-    value: p.name,
+    value: p.id,
     label: p.name || p.provider,
     children: p.models.map(m => ({
       value: m,
@@ -447,8 +459,8 @@ const cascaderOptions = computed(() => {
 
 const cascaderValue = computed(() => {
   const conv = currentConversation.value
-  if (conv?.provider && conv?.model_name) {
-    return [conv.provider, conv.model_name]
+  if (conv?.provider_id && conv?.model_name) {
+    return [conv.provider_id, conv.model_name]
   }
   return []
 })
@@ -457,13 +469,8 @@ async function handleCascaderChange(val: string[] | null) {
   if (!chatStore.currentConversationId) return
   if (val && val.length === 2) {
     await chatStore.updateConversation(chatStore.currentConversationId, {
-      provider: val[0],
+      provider_id: val[0],
       model_name: val[1],
-    })
-  } else {
-    await chatStore.updateConversation(chatStore.currentConversationId, {
-      provider: '',
-      model_name: '',
     })
   }
 }
@@ -472,7 +479,7 @@ const imageCascaderOptions = computed(() => {
   return settingsStore.providers
     .filter(p => p.image_models.length > 0)
     .map(p => ({
-      value: p.name,
+      value: p.id,
       label: p.name || p.provider,
       children: p.image_models.map(m => ({
         value: m,
@@ -483,7 +490,7 @@ const imageCascaderOptions = computed(() => {
 
 const subagentCascaderOptions = computed(() => {
   return settingsStore.providers.map(p => ({
-    value: p.name,
+    value: p.id,
     label: p.name || p.provider,
     children: p.models.map(m => ({
       value: m,
@@ -494,8 +501,8 @@ const subagentCascaderOptions = computed(() => {
 
 const subagentCascaderValue = computed(() => {
   const conv = currentConversation.value
-  if (conv?.subagent_provider && conv?.subagent_model) {
-    return [conv.subagent_provider, conv.subagent_model]
+  if (conv?.subagent_provider_id && conv?.subagent_model) {
+    return [conv.subagent_provider_id, conv.subagent_model]
   }
   return []
 })
@@ -504,21 +511,16 @@ async function handleSubagentCascaderChange(val: string[] | null) {
   if (!chatStore.currentConversationId) return
   if (val && val.length === 2) {
     await chatStore.updateConversation(chatStore.currentConversationId, {
-      subagent_provider: val[0],
+      subagent_provider_id: val[0],
       subagent_model: val[1],
-    })
-  } else {
-    await chatStore.updateConversation(chatStore.currentConversationId, {
-      subagent_provider: '',
-      subagent_model: '',
     })
   }
 }
 
 const imageCascaderValue = computed(() => {
   const conv = currentConversation.value
-  if (conv?.image_provider && conv?.image_model) {
-    return [conv.image_provider, conv.image_model]
+  if (conv?.image_provider_id && conv?.image_model) {
+    return [conv.image_provider_id, conv.image_model]
   }
   return []
 })
@@ -527,12 +529,12 @@ async function handleImageCascaderChange(val: string[] | null) {
   if (!chatStore.currentConversationId) return
   if (val && val.length === 2) {
     await chatStore.updateConversation(chatStore.currentConversationId, {
-      image_provider: val[0],
+      image_provider_id: val[0],
       image_model: val[1],
     })
   } else {
     await chatStore.updateConversation(chatStore.currentConversationId, {
-      image_provider: '',
+      image_provider_id: '',
       image_model: '',
     })
   }

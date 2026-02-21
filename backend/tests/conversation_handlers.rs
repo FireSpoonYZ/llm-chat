@@ -16,6 +16,10 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::sync::mpsc;
 use tower::ServiceExt;
 
+fn serialize_models(models: &[&str]) -> String {
+    serde_json::to_string(models).unwrap()
+}
+
 fn test_config() -> Config {
     Config {
         database_url: "sqlite::memory:".into(),
@@ -118,8 +122,76 @@ async fn register_user(state: &Arc<AppState>) -> String {
     body["access_token"].as_str().unwrap().to_string()
 }
 
+fn token_user_id(state: &Arc<AppState>, token: &str) -> String {
+    claude_chat_backend::auth::verify_access_token(token, &state.config.jwt_secret)
+        .unwrap()
+        .sub
+}
+
+async fn seed_provider(
+    state: &Arc<AppState>,
+    user_id: &str,
+    id: &str,
+    provider_type: &str,
+    models: &[&str],
+    image_models: &[&str],
+) {
+    let encrypted =
+        claude_chat_backend::crypto::encrypt("seed-key", &state.config.encryption_key).unwrap();
+    let models_json = serialize_models(models);
+    let image_models_json = serialize_models(image_models);
+    let first_model = models.first().copied();
+    db::providers::upsert_provider(
+        &state.db,
+        Some(id),
+        user_id,
+        provider_type,
+        &encrypted,
+        None,
+        first_model,
+        false,
+        Some(models_json.as_str()),
+        Some(id),
+        Some(image_models_json.as_str()),
+    )
+    .await
+    .unwrap();
+}
+
+async fn seed_standard_providers(state: &Arc<AppState>, token: &str) {
+    let user_id = token_user_id(state, token);
+    seed_provider(
+        state,
+        &user_id,
+        "openai",
+        "openai",
+        &["gpt-4o", "gpt-4.1-mini", "gpt-5.3-codex"],
+        &[],
+    )
+    .await;
+    seed_provider(
+        state,
+        &user_id,
+        "anthropic",
+        "anthropic",
+        &["claude-3"],
+        &[],
+    )
+    .await;
+    seed_provider(
+        state,
+        &user_id,
+        "My Google",
+        "google",
+        &["gemini-2.5-pro"],
+        &["gemini-img", "gemini-img-v2"],
+    )
+    .await;
+}
+
 /// Create a conversation and return its id.
-async fn create_conv(state: &Arc<AppState>, token: &str, provider: &str, model: &str) -> String {
+async fn create_conv(state: &Arc<AppState>, token: &str, provider_id: &str, model: &str) -> String {
+    seed_standard_providers(state, token).await;
     let resp = app(state.clone())
         .oneshot(
             Request::builder()
@@ -128,8 +200,8 @@ async fn create_conv(state: &Arc<AppState>, token: &str, provider: &str, model: 
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {}", token))
                 .body(Body::from(format!(
-                    r#"{{"provider":"{}","model_name":"{}"}}"#,
-                    provider, model
+                    r#"{{"provider_id":"{}","model_name":"{}","subagent_provider_id":"{}","subagent_model":"{}"}}"#,
+                    provider_id, model, provider_id, model
                 )))
                 .unwrap(),
         )
@@ -149,15 +221,15 @@ async fn update_provider_removes_container_connection() {
     let conv_id = create_conv(&state, &token, "anthropic", "claude-3").await;
 
     // Simulate a running container by adding a WS connection
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(claude_chat_backend::ws::WS_CHANNEL_CAPACITY);
     state.ws_state.add_container(&conv_id, tx).await;
     assert!(state.ws_state.send_to_container(&conv_id, "ping").await);
 
-    // Switch provider from anthropic → openai
+    // Switch provider_id from anthropic → openai
     let resp = app(state.clone())
         .oneshot(put_json(
             &format!("/api/conversations/{}", conv_id),
-            r#"{"provider":"openai","model_name":"gpt-4o"}"#,
+            r#"{"provider_id":"openai","model_name":"gpt-4o"}"#,
             &token,
         ))
         .await
@@ -174,11 +246,11 @@ async fn update_model_only_removes_container_connection() {
     let token = register_user(&state).await;
     let conv_id = create_conv(&state, &token, "openai", "gpt-4o").await;
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(claude_chat_backend::ws::WS_CHANNEL_CAPACITY);
     state.ws_state.add_container(&conv_id, tx).await;
     assert!(state.ws_state.send_to_container(&conv_id, "ping").await);
 
-    // Change model only (same provider)
+    // Change model only (same provider_id)
     let resp = app(state.clone())
         .oneshot(put_json(
             &format!("/api/conversations/{}", conv_id),
@@ -199,11 +271,11 @@ async fn update_title_keeps_container_connection() {
     let token = register_user(&state).await;
     let conv_id = create_conv(&state, &token, "openai", "gpt-4o").await;
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(claude_chat_backend::ws::WS_CHANNEL_CAPACITY);
     state.ws_state.add_container(&conv_id, tx).await;
     assert!(state.ws_state.send_to_container(&conv_id, "ping").await);
 
-    // Update only the title — no provider/model change
+    // Update only the title — no provider_id/model change
     let resp = app(state.clone())
         .oneshot(put_json(
             &format!("/api/conversations/{}", conv_id),
@@ -224,7 +296,7 @@ async fn update_system_prompt_keeps_container_connection() {
     let token = register_user(&state).await;
     let conv_id = create_conv(&state, &token, "openai", "gpt-4o").await;
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(claude_chat_backend::ws::WS_CHANNEL_CAPACITY);
     state.ws_state.add_container(&conv_id, tx).await;
 
     // Update only system prompt
@@ -248,14 +320,14 @@ async fn update_same_provider_keeps_container_connection() {
     let token = register_user(&state).await;
     let conv_id = create_conv(&state, &token, "openai", "gpt-4o").await;
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(claude_chat_backend::ws::WS_CHANNEL_CAPACITY);
     state.ws_state.add_container(&conv_id, tx).await;
 
-    // "Update" with the same provider and model — no actual change
+    // "Update" with the same provider_id and model — no actual change
     let resp = app(state.clone())
         .oneshot(put_json(
             &format!("/api/conversations/{}", conv_id),
-            r#"{"provider":"openai","model_name":"gpt-4o"}"#,
+            r#"{"provider_id":"openai","model_name":"gpt-4o"}"#,
             &token,
         ))
         .await
@@ -272,15 +344,15 @@ async fn update_image_provider_removes_container_connection() {
     let token = register_user(&state).await;
     let conv_id = create_conv(&state, &token, "openai", "gpt-4o").await;
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(claude_chat_backend::ws::WS_CHANNEL_CAPACITY);
     state.ws_state.add_container(&conv_id, tx).await;
     assert!(state.ws_state.send_to_container(&conv_id, "ping").await);
 
-    // Set image_provider — should restart container
+    // Set image_provider_id — should restart container
     let resp = app(state.clone())
         .oneshot(put_json(
             &format!("/api/conversations/{}", conv_id),
-            r#"{"image_provider":"My Google","image_model":"gemini-img"}"#,
+            r#"{"image_provider_id":"My Google","image_model":"gemini-img"}"#,
             &token,
         ))
         .await
@@ -297,11 +369,11 @@ async fn update_image_model_only_removes_container_connection() {
     let token = register_user(&state).await;
     let conv_id = create_conv(&state, &token, "openai", "gpt-4o").await;
 
-    // First set an image provider
+    // First set an image provider_id
     let resp = app(state.clone())
         .oneshot(put_json(
             &format!("/api/conversations/{}", conv_id),
-            r#"{"image_provider":"My Google","image_model":"gemini-img"}"#,
+            r#"{"image_provider_id":"My Google","image_model":"gemini-img"}"#,
             &token,
         ))
         .await
@@ -309,7 +381,7 @@ async fn update_image_model_only_removes_container_connection() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Re-add container connection
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(claude_chat_backend::ws::WS_CHANNEL_CAPACITY);
     state.ws_state.add_container(&conv_id, tx).await;
     assert!(state.ws_state.send_to_container(&conv_id, "ping").await);
 
@@ -317,7 +389,7 @@ async fn update_image_model_only_removes_container_connection() {
     let resp = app(state.clone())
         .oneshot(put_json(
             &format!("/api/conversations/{}", conv_id),
-            r#"{"image_provider":"My Google","image_model":"gemini-img-v2"}"#,
+            r#"{"image_provider_id":"My Google","image_model":"gemini-img-v2"}"#,
             &token,
         ))
         .await
@@ -333,24 +405,24 @@ async fn clear_image_provider_removes_container_connection() {
     let token = register_user(&state).await;
     let conv_id = create_conv(&state, &token, "openai", "gpt-4o").await;
 
-    // Set image provider first
+    // Set image provider_id first
     app(state.clone())
         .oneshot(put_json(
             &format!("/api/conversations/{}", conv_id),
-            r#"{"image_provider":"My Google","image_model":"gemini-img"}"#,
+            r#"{"image_provider_id":"My Google","image_model":"gemini-img"}"#,
             &token,
         ))
         .await
         .unwrap();
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(claude_chat_backend::ws::WS_CHANNEL_CAPACITY);
     state.ws_state.add_container(&conv_id, tx).await;
 
-    // Clear image provider — should restart container
+    // Clear image provider_id — should restart container
     let resp = app(state.clone())
         .oneshot(put_json(
             &format!("/api/conversations/{}", conv_id),
-            r#"{"image_provider":"","image_model":""}"#,
+            r#"{"image_provider_id":"","image_model":""}"#,
             &token,
         ))
         .await
@@ -361,9 +433,10 @@ async fn clear_image_provider_removes_container_connection() {
 }
 
 #[tokio::test]
-async fn create_conversation_defaults_subagent_to_main_model() {
+async fn create_conversation_requires_explicit_subagent_model() {
     let state = test_state().await;
     let token = register_user(&state).await;
+    seed_standard_providers(&state, &token).await;
 
     let resp = app(state.clone())
         .oneshot(
@@ -373,26 +446,58 @@ async fn create_conversation_defaults_subagent_to_main_model() {
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {}", token))
                 .body(Body::from(
-                    r#"{"provider":"openai","model_name":"gpt-4o"}"#.to_string(),
+                    r#"{"provider_id":"openai","model_name":"gpt-4o"}"#.to_string(),
                 ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = json_body(resp).await;
-    assert_eq!(body["provider"], "openai");
-    assert_eq!(body["model_name"], "gpt-4o");
-    assert_eq!(body["subagent_provider"], "openai");
-    assert_eq!(body["subagent_model"], "gpt-4o");
-    assert_eq!(body["thinking_budget"], 128000);
-    assert_eq!(body["subagent_thinking_budget"], 128000);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("subagent_provider_id")
+    );
+}
+
+#[tokio::test]
+async fn create_conversation_rejects_unknown_provider_id() {
+    let state = test_state().await;
+    let token = register_user(&state).await;
+    seed_standard_providers(&state, &token).await;
+
+    let resp = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/conversations")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", token))
+                .body(Body::from(
+                    r#"{"provider_id":"missing-provider","model_name":"gpt-4o","subagent_provider_id":"openai","subagent_model":"gpt-4o"}"#
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(resp).await;
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing-provider")
+    );
 }
 
 #[tokio::test]
 async fn create_conversation_subagent_budget_defaults_to_main_budget() {
     let state = test_state().await;
     let token = register_user(&state).await;
+    seed_standard_providers(&state, &token).await;
 
     let resp = app(state.clone())
         .oneshot(
@@ -402,7 +507,7 @@ async fn create_conversation_subagent_budget_defaults_to_main_budget() {
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {}", token))
                 .body(Body::from(
-                    r#"{"provider":"openai","model_name":"gpt-4o","thinking_budget":200000}"#
+                    r#"{"provider_id":"openai","model_name":"gpt-4o","subagent_provider_id":"openai","subagent_model":"gpt-4o","thinking_budget":200000}"#
                         .to_string(),
                 ))
                 .unwrap(),
@@ -416,9 +521,34 @@ async fn create_conversation_subagent_budget_defaults_to_main_budget() {
 }
 
 #[tokio::test]
+async fn update_conversation_rejects_clearing_main_model_selection() {
+    let state = test_state().await;
+    let token = register_user(&state).await;
+    let conv_id = create_conv(&state, &token, "openai", "gpt-4o").await;
+
+    let resp = app(state.clone())
+        .oneshot(put_json(
+            &format!("/api/conversations/{}", conv_id),
+            r#"{"provider_id":"","model_name":""}"#,
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(resp).await;
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("provider_id")
+    );
+}
+
+#[tokio::test]
 async fn create_conversation_rejects_invalid_thinking_budget() {
     let state = test_state().await;
     let token = register_user(&state).await;
+    seed_standard_providers(&state, &token).await;
 
     let resp = app(state.clone())
         .oneshot(
@@ -428,7 +558,7 @@ async fn create_conversation_rejects_invalid_thinking_budget() {
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {}", token))
                 .body(Body::from(
-                    r#"{"provider":"openai","model_name":"gpt-4o","thinking_budget":1000}"#
+                    r#"{"provider_id":"openai","model_name":"gpt-4o","subagent_provider_id":"openai","subagent_model":"gpt-4o","thinking_budget":1000}"#
                         .to_string(),
                 ))
                 .unwrap(),
@@ -450,6 +580,7 @@ async fn create_conversation_rejects_invalid_thinking_budget() {
 async fn create_conversation_rejects_negative_subagent_budget() {
     let state = test_state().await;
     let token = register_user(&state).await;
+    seed_standard_providers(&state, &token).await;
 
     let resp = app(state.clone())
         .oneshot(
@@ -459,7 +590,7 @@ async fn create_conversation_rejects_negative_subagent_budget() {
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {}", token))
                 .body(Body::from(
-                    r#"{"provider":"openai","model_name":"gpt-4o","subagent_thinking_budget":-1}"#
+                    r#"{"provider_id":"openai","model_name":"gpt-4o","subagent_provider_id":"openai","subagent_model":"gpt-4o","subagent_thinking_budget":-1}"#
                         .to_string(),
                 ))
                 .unwrap(),
@@ -481,6 +612,7 @@ async fn create_conversation_rejects_negative_subagent_budget() {
 async fn create_conversation_rejects_budget_above_max() {
     let state = test_state().await;
     let token = register_user(&state).await;
+    seed_standard_providers(&state, &token).await;
 
     let resp = app(state.clone())
         .oneshot(
@@ -490,7 +622,7 @@ async fn create_conversation_rejects_budget_above_max() {
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {}", token))
                 .body(Body::from(
-                    r#"{"provider":"openai","model_name":"gpt-4o","thinking_budget":1000001}"#
+                    r#"{"provider_id":"openai","model_name":"gpt-4o","subagent_provider_id":"openai","subagent_model":"gpt-4o","thinking_budget":1000001}"#
                         .to_string(),
                 ))
                 .unwrap(),
@@ -512,6 +644,7 @@ async fn create_conversation_rejects_budget_above_max() {
 async fn create_conversation_accepts_budget_boundaries() {
     let state = test_state().await;
     let token = register_user(&state).await;
+    seed_standard_providers(&state, &token).await;
 
     let resp = app(state.clone())
         .oneshot(
@@ -521,7 +654,7 @@ async fn create_conversation_accepts_budget_boundaries() {
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {}", token))
                 .body(Body::from(
-                    r#"{"provider":"openai","model_name":"gpt-4o","thinking_budget":1024,"subagent_thinking_budget":1000000}"#
+                    r#"{"provider_id":"openai","model_name":"gpt-4o","subagent_provider_id":"openai","subagent_model":"gpt-4o","thinking_budget":1024,"subagent_thinking_budget":1000000}"#
                         .to_string(),
                 ))
                 .unwrap(),
@@ -694,7 +827,7 @@ async fn update_subagent_model_only_removes_container_connection() {
     let token = register_user(&state).await;
     let conv_id = create_conv(&state, &token, "openai", "gpt-4o").await;
 
-    let (tx, _rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::channel(claude_chat_backend::ws::WS_CHANNEL_CAPACITY);
     state.ws_state.add_container(&conv_id, tx).await;
     assert!(state.ws_state.send_to_container(&conv_id, "ping").await);
 

@@ -24,7 +24,6 @@ async fn list_presets(
     State(state): State<Arc<AppState>>,
     auth: AuthUser,
 ) -> Result<Json<Vec<db::presets::UserPreset>>, AppError> {
-    db::presets::seed_builtin_presets(&state.db, &auth.user_id).await?;
     let presets = db::presets::list_presets(&state.db, &auth.user_id).await?;
     Ok(Json(presets))
 }

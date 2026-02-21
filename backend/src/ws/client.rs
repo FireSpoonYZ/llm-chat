@@ -75,6 +75,10 @@ fn should_touch_after_edit(
     message_updated && deleted_messages && deleted_messages_v2
 }
 
+fn should_update_message_content(existing_content: &str, requested_content: &str) -> bool {
+    existing_content != requested_content
+}
+
 fn should_touch_after_regenerate(deleted_messages: bool, deleted_messages_v2: bool) -> bool {
     deleted_messages && deleted_messages_v2
 }
@@ -95,7 +99,7 @@ fn validate_question_answer_payload(
 async fn send_to_container_or_start(
     ws_state: &Arc<WsState>,
     docker_manager: &Arc<DockerManager>,
-    tx: &mpsc::UnboundedSender<String>,
+    tx: &mpsc::Sender<String>,
     conv_id: &str,
     user_id: &str,
     message: &str,
@@ -111,7 +115,7 @@ async fn send_to_container_or_start(
             .set_pending_message(conv_id, message.to_string())
             .await;
 
-        let _ = tx.send(
+        let _ = tx.try_send(
             serde_json::json!({
                 "type": "container_status",
                 "conversation_id": conv_id,
@@ -133,7 +137,7 @@ async fn send_to_container_or_start(
                 }
                 Err(e) => {
                     tracing::error!("Failed to start container for {cid}: {e}");
-                    let _ = tx2.send(
+                    let _ = tx2.try_send(
                         serde_json::json!({
                             "type": "error",
                             "code": "container_start_failed",
@@ -182,7 +186,7 @@ async fn handle_client_ws(
     docker_manager: Arc<DockerManager>,
 ) {
     let (mut ws_sink, mut ws_stream) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::channel::<String>(super::WS_CHANNEL_CAPACITY);
 
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -216,7 +220,7 @@ async fn handle_client_ws(
 
                 match db::conversations::get_conversation(&state.db, &conv_id, &user_id).await {
                     Ok(None) | Err(_) => {
-                        let _ = tx.send(
+                        let _ = tx.try_send(
                             serde_json::json!({
                                 "type": "error",
                                 "code": "not_found",
@@ -236,7 +240,7 @@ async fn handle_client_ws(
                 current_conversation_id = Some(conv_id.to_string());
                 ws_state.add_client(&user_id, &conv_id, tx.clone()).await;
 
-                let _ = tx.send(
+                let _ = tx.try_send(
                     serde_json::json!({
                         "type": "conversation_joined",
                         "conversation_id": conv_id,
@@ -251,7 +255,7 @@ async fn handle_client_ws(
                 let conv_id = match &current_conversation_id {
                     Some(id) => id.clone(),
                     None => {
-                        let _ = tx.send(
+                        let _ = tx.try_send(
                             serde_json::json!({
                                 "type": "error",
                                 "code": "no_conversation",
@@ -326,13 +330,13 @@ async fn handle_client_ws(
                             &conv_id,
                             &user_id,
                             &title,
-                            c.provider.as_deref(),
+                            c.provider_id.as_deref(),
                             c.model_name.as_deref(),
-                            c.subagent_provider.as_deref(),
+                            c.subagent_provider_id.as_deref(),
                             c.subagent_model.as_deref(),
                             c.system_prompt_override.as_deref(),
                             c.deep_thinking,
-                            c.image_provider.as_deref(),
+                            c.image_provider_id.as_deref(),
                             c.image_model.as_deref(),
                             c.thinking_budget,
                             c.subagent_thinking_budget,
@@ -341,7 +345,7 @@ async fn handle_client_ws(
                     }
                 }
 
-                let _ = tx.send(
+                let _ = tx.try_send(
                     serde_json::json!({
                         "type": "message_saved",
                         "conversation_id": conv_id,
@@ -378,7 +382,7 @@ async fn handle_client_ws(
                 let conv_id = match &current_conversation_id {
                     Some(id) => id.clone(),
                     None => {
-                        let _ = tx.send(
+                        let _ = tx.try_send(
                             serde_json::json!({
                                 "type": "error",
                                 "code": "no_conversation",
@@ -392,7 +396,7 @@ async fn handle_client_ws(
 
                 if let Err(message) = validate_question_answer_payload(&questionnaire_id, &answers)
                 {
-                    let _ = tx.send(
+                    let _ = tx.try_send(
                         serde_json::json!({
                             "type": "error",
                             "code": "invalid_question_answer",
@@ -414,7 +418,7 @@ async fn handle_client_ws(
                 if sent {
                     docker_manager.touch_activity(&conv_id).await;
                 } else {
-                    let _ = tx.send(
+                    let _ = tx.try_send(
                         serde_json::json!({
                             "type": "error",
                             "code": "container_not_connected",
@@ -431,7 +435,7 @@ async fn handle_client_ws(
                 let conv_id = match &current_conversation_id {
                     Some(id) => id.clone(),
                     None => {
-                        let _ = tx.send(
+                        let _ = tx.try_send(
                             serde_json::json!({
                                 "type": "error",
                                 "code": "no_conversation",
@@ -451,7 +455,7 @@ async fn handle_client_ws(
                 let msg = match db::messages::get_message(&state.db, &message_id).await {
                     Ok(Some(m)) if m.role == "user" && m.conversation_id == conv_id => m,
                     _ => {
-                        let _ = tx.send(
+                        let _ = tx.try_send(
                             serde_json::json!({
                                 "type": "error",
                                 "code": "invalid_message",
@@ -478,21 +482,22 @@ async fn handle_client_ws(
                     .filter(|m| m.role == "user")
                     .count();
 
-                let message_updated = match db::messages::update_message_content(
-                    &state.db, &msg.id, &content,
-                )
-                .await
-                {
-                    Ok(updated) => updated,
-                    Err(e) => {
-                        tracing::error!(
-                            conversation_id = %conv_id,
-                            message_id = %msg.id,
-                            error = %e,
-                            "Failed to update user message"
-                        );
-                        false
+                let message_updated = if should_update_message_content(&msg.content, &content) {
+                    match db::messages::update_message_content(&state.db, &msg.id, &content).await {
+                        Ok(updated) => updated,
+                        Err(e) => {
+                            tracing::error!(
+                                conversation_id = %conv_id,
+                                message_id = %msg.id,
+                                error = %e,
+                                "Failed to update user message"
+                            );
+                            false
+                        }
                     }
+                } else {
+                    // Same-content edits are valid submits; no DB content write is needed.
+                    true
                 };
                 let message_parts_updated = match db::messages_v2::upsert_message_text_part(
                     &state.db, &msg.id, &conv_id, "user", &content,
@@ -552,7 +557,7 @@ async fn handle_client_ws(
                         deleted_messages_v2,
                         "Edit mutation incomplete; notifying client"
                     );
-                    let _ = tx.send(
+                    let _ = tx.try_send(
                         serde_json::json!({
                             "type": "error",
                             "code": "edit_failed",
@@ -597,7 +602,7 @@ async fn handle_client_ws(
                 {
                     obj.insert("updated_parts".to_string(), serde_json::Value::Array(parts));
                 }
-                let _ = tx.send(payload.to_string());
+                let _ = tx.try_send(payload.to_string());
 
                 let edit_conv = db::conversations::get_conversation(&state.db, &conv_id, &user_id)
                     .await
@@ -642,7 +647,7 @@ async fn handle_client_ws(
                 let conv_id = match &current_conversation_id {
                     Some(id) => id.clone(),
                     None => {
-                        let _ = tx.send(
+                        let _ = tx.try_send(
                             serde_json::json!({
                                 "type": "error",
                                 "code": "no_conversation",
@@ -658,7 +663,7 @@ async fn handle_client_ws(
                 let msg = match db::messages::get_message(&state.db, &message_id).await {
                     Ok(Some(m)) if m.role == "assistant" && m.conversation_id == conv_id => m,
                     _ => {
-                        let _ = tx.send(
+                        let _ = tx.try_send(
                             serde_json::json!({
                                 "type": "error",
                                 "code": "invalid_message",
@@ -686,7 +691,7 @@ async fn handle_client_ws(
                 let user_msg = match last_user_msg {
                     Some(m) => m.clone(),
                     None => {
-                        let _ = tx.send(
+                        let _ = tx.try_send(
                             serde_json::json!({
                                 "type": "error",
                                 "code": "invalid_message",
@@ -748,7 +753,7 @@ async fn handle_client_ws(
                         deleted_messages_v2,
                         "Regenerate mutation incomplete; notifying client"
                     );
-                    let _ = tx.send(
+                    let _ = tx.try_send(
                         serde_json::json!({
                             "type": "error",
                             "code": "regenerate_failed",
@@ -770,7 +775,7 @@ async fn handle_client_ws(
                     );
                 }
 
-                let _ = tx.send(
+                let _ = tx.try_send(
                     serde_json::json!({
                         "type": "messages_truncated",
                         "after_message_id": user_msg.id,
@@ -831,7 +836,7 @@ async fn handle_client_ws(
                 }
             }
             ClientMessage::Ping => {
-                let _ = tx.send(serde_json::json!({"type": "pong"}).to_string());
+                let _ = tx.try_send(serde_json::json!({"type": "pong"}).to_string());
             }
         }
     }
@@ -846,7 +851,7 @@ async fn handle_client_ws(
 mod tests {
     use super::{
         extract_ws_access_token, should_touch_after_edit, should_touch_after_regenerate,
-        validate_question_answer_payload, ws_origin_allowed,
+        should_update_message_content, validate_question_answer_payload, ws_origin_allowed,
     };
     use axum::http::{HeaderMap, HeaderValue, header};
 
@@ -927,6 +932,16 @@ mod tests {
         assert!(!should_touch_after_edit(false, true, true));
         assert!(!should_touch_after_edit(true, false, true));
         assert!(!should_touch_after_edit(true, true, false));
+    }
+
+    #[test]
+    fn unchanged_edit_skips_legacy_message_update() {
+        assert!(!should_update_message_content("same", "same"));
+    }
+
+    #[test]
+    fn changed_edit_requires_legacy_message_update() {
+        assert!(should_update_message_content("before", "after"));
     }
 
     #[test]

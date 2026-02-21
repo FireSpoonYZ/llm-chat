@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from .claude_ai import CLAUDE_AI_PRESET_CONTENT
 from .claude_code import CLAUDE_CODE_PRESET_CONTENT
+from .claude_cowork import CLAUDE_COWORK_PRESET_CONTENT
 from .default import DEFAULT_PRESET_CONTENT
 
 
@@ -44,6 +45,12 @@ BUILTIN_PRESETS: dict[str, PromptPreset] = {
         name="Claude Code",
         description="Software engineering focused prompt based on Claude Code CLI.",
         content=CLAUDE_CODE_PRESET_CONTENT,
+    ),
+    "claude-cowork": PromptPreset(
+        id="claude-cowork",
+        name="Claude Cowork",
+        description="Task-execution focused prompt inspired by Claude Cowork style.",
+        content=CLAUDE_COWORK_PRESET_CONTENT,
     ),
 }
 

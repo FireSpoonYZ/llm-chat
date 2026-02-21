@@ -7,15 +7,15 @@ pub struct Conversation {
     pub id: String,
     pub user_id: String,
     pub title: String,
-    pub provider: Option<String>,
+    pub provider_id: Option<String>,
     pub model_name: Option<String>,
-    pub subagent_provider: Option<String>,
+    pub subagent_provider_id: Option<String>,
     pub subagent_model: Option<String>,
     pub system_prompt_override: Option<String>,
     pub deep_thinking: bool,
     pub created_at: String,
     pub updated_at: String,
-    pub image_provider: Option<String>,
+    pub image_provider_id: Option<String>,
     pub image_model: Option<String>,
     pub share_token: Option<String>,
     pub thinking_budget: Option<i64>,
@@ -29,10 +29,10 @@ pub async fn create_conversation(
     user_id: &str,
     title: &str,
     system_prompt_override: Option<&str>,
-    provider: Option<&str>,
+    provider_id: Option<&str>,
     model_name: Option<&str>,
     deep_thinking: bool,
-    image_provider: Option<&str>,
+    image_provider_id: Option<&str>,
     image_model: Option<&str>,
     thinking_budget: Option<i64>,
 ) -> Result<Conversation, sqlx::Error> {
@@ -41,12 +41,12 @@ pub async fn create_conversation(
         user_id,
         title,
         system_prompt_override,
-        provider,
+        provider_id,
         model_name,
-        provider,
+        provider_id,
         model_name,
         deep_thinking,
-        image_provider,
+        image_provider_id,
         image_model,
         thinking_budget,
         thinking_budget,
@@ -60,12 +60,12 @@ pub async fn create_conversation_with_subagent(
     user_id: &str,
     title: &str,
     system_prompt_override: Option<&str>,
-    provider: Option<&str>,
+    provider_id: Option<&str>,
     model_name: Option<&str>,
-    subagent_provider: Option<&str>,
+    subagent_provider_id: Option<&str>,
     subagent_model: Option<&str>,
     deep_thinking: bool,
-    image_provider: Option<&str>,
+    image_provider_id: Option<&str>,
     image_model: Option<&str>,
     thinking_budget: Option<i64>,
     subagent_thinking_budget: Option<i64>,
@@ -73,22 +73,22 @@ pub async fn create_conversation_with_subagent(
     let id = uuid::Uuid::new_v4().to_string();
 
     sqlx::query_as::<_, Conversation>(
-        "INSERT INTO conversations (id, user_id, title, system_prompt_override, provider, model_name, subagent_provider, subagent_model, deep_thinking, image_provider, image_model, thinking_budget, subagent_thinking_budget)
+        "INSERT INTO conversations (id, user_id, title, system_prompt_override, provider_id, model_name, subagent_provider_id, subagent_model, deep_thinking, image_provider_id, image_model, thinking_budget, subagent_thinking_budget)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         RETURNING id, user_id, title, provider, model_name, subagent_provider, subagent_model,
+         RETURNING id, user_id, title, provider_id, model_name, subagent_provider_id, subagent_model,
                    system_prompt_override, deep_thinking, created_at, updated_at,
-                   image_provider, image_model, share_token, thinking_budget, subagent_thinking_budget",
+                   image_provider_id, image_model, share_token, thinking_budget, subagent_thinking_budget",
     )
     .bind(&id)
     .bind(user_id)
     .bind(title)
     .bind(system_prompt_override)
-    .bind(provider)
+    .bind(provider_id)
     .bind(model_name)
-    .bind(subagent_provider)
+    .bind(subagent_provider_id)
     .bind(subagent_model)
     .bind(deep_thinking)
-    .bind(image_provider)
+    .bind(image_provider_id)
     .bind(image_model)
     .bind(thinking_budget)
     .bind(subagent_thinking_budget)
@@ -101,9 +101,9 @@ pub async fn list_conversations(
     user_id: &str,
 ) -> Result<Vec<Conversation>, sqlx::Error> {
     sqlx::query_as::<_, Conversation>(
-        "SELECT id, user_id, title, provider, model_name, subagent_provider, subagent_model,
+        "SELECT id, user_id, title, provider_id, model_name, subagent_provider_id, subagent_model,
                 system_prompt_override, deep_thinking, created_at, updated_at,
-                image_provider, image_model, share_token, thinking_budget, subagent_thinking_budget
+                image_provider_id, image_model, share_token, thinking_budget, subagent_thinking_budget
          FROM conversations
          WHERE user_id = ?
          ORDER BY updated_at DESC, created_at DESC, id DESC",
@@ -119,9 +119,9 @@ pub async fn get_conversation(
     user_id: &str,
 ) -> Result<Option<Conversation>, sqlx::Error> {
     sqlx::query_as::<_, Conversation>(
-        "SELECT id, user_id, title, provider, model_name, subagent_provider, subagent_model,
+        "SELECT id, user_id, title, provider_id, model_name, subagent_provider_id, subagent_model,
                 system_prompt_override, deep_thinking, created_at, updated_at,
-                image_provider, image_model, share_token, thinking_budget, subagent_thinking_budget
+                image_provider_id, image_model, share_token, thinking_budget, subagent_thinking_budget
          FROM conversations
          WHERE id = ? AND user_id = ?",
     )
@@ -138,11 +138,11 @@ pub async fn update_conversation(
     id: &str,
     user_id: &str,
     title: &str,
-    provider: Option<&str>,
+    provider_id: Option<&str>,
     model_name: Option<&str>,
     system_prompt_override: Option<&str>,
     deep_thinking: bool,
-    image_provider: Option<&str>,
+    image_provider_id: Option<&str>,
     image_model: Option<&str>,
     thinking_budget: Option<i64>,
 ) -> Result<Option<Conversation>, sqlx::Error> {
@@ -151,13 +151,13 @@ pub async fn update_conversation(
         id,
         user_id,
         title,
-        provider,
+        provider_id,
         model_name,
-        provider,
+        provider_id,
         model_name,
         system_prompt_override,
         deep_thinking,
-        image_provider,
+        image_provider_id,
         image_model,
         thinking_budget,
         thinking_budget,
@@ -171,39 +171,39 @@ pub async fn update_conversation_with_subagent(
     id: &str,
     user_id: &str,
     title: &str,
-    provider: Option<&str>,
+    provider_id: Option<&str>,
     model_name: Option<&str>,
-    subagent_provider: Option<&str>,
+    subagent_provider_id: Option<&str>,
     subagent_model: Option<&str>,
     system_prompt_override: Option<&str>,
     deep_thinking: bool,
-    image_provider: Option<&str>,
+    image_provider_id: Option<&str>,
     image_model: Option<&str>,
     thinking_budget: Option<i64>,
     subagent_thinking_budget: Option<i64>,
 ) -> Result<Option<Conversation>, sqlx::Error> {
     sqlx::query_as::<_, Conversation>(
         "UPDATE conversations
-         SET title = ?, provider = ?, model_name = ?,
-             subagent_provider = ?, subagent_model = ?,
+         SET title = ?, provider_id = ?, model_name = ?,
+             subagent_provider_id = ?, subagent_model = ?,
              system_prompt_override = ?, deep_thinking = ?,
-             image_provider = ?, image_model = ?,
+             image_provider_id = ?, image_model = ?,
              thinking_budget = ?,
              subagent_thinking_budget = ?,
              updated_at = datetime('now')
          WHERE id = ? AND user_id = ?
-         RETURNING id, user_id, title, provider, model_name, subagent_provider, subagent_model,
+         RETURNING id, user_id, title, provider_id, model_name, subagent_provider_id, subagent_model,
                    system_prompt_override, deep_thinking, created_at, updated_at,
-                   image_provider, image_model, share_token, thinking_budget, subagent_thinking_budget",
+                   image_provider_id, image_model, share_token, thinking_budget, subagent_thinking_budget",
     )
     .bind(title)
-    .bind(provider)
+    .bind(provider_id)
     .bind(model_name)
-    .bind(subagent_provider)
+    .bind(subagent_provider_id)
     .bind(subagent_model)
     .bind(system_prompt_override)
     .bind(deep_thinking)
-    .bind(image_provider)
+    .bind(image_provider_id)
     .bind(image_model)
     .bind(thinking_budget)
     .bind(subagent_thinking_budget)
@@ -256,9 +256,9 @@ pub async fn set_share_token(
         "UPDATE conversations
          SET share_token = ?, updated_at = datetime('now')
          WHERE id = ? AND user_id = ? AND share_token IS NULL
-         RETURNING id, user_id, title, provider, model_name, subagent_provider, subagent_model,
+         RETURNING id, user_id, title, provider_id, model_name, subagent_provider_id, subagent_model,
                    system_prompt_override, deep_thinking, created_at, updated_at,
-                   image_provider, image_model, share_token, thinking_budget, subagent_thinking_budget",
+                   image_provider_id, image_model, share_token, thinking_budget, subagent_thinking_budget",
     )
     .bind(share_token)
     .bind(id)
@@ -288,9 +288,9 @@ pub async fn get_conversation_by_share_token(
     share_token: &str,
 ) -> Result<Option<Conversation>, sqlx::Error> {
     sqlx::query_as::<_, Conversation>(
-        "SELECT id, user_id, title, provider, model_name, subagent_provider, subagent_model,
+        "SELECT id, user_id, title, provider_id, model_name, subagent_provider_id, subagent_model,
                 system_prompt_override, deep_thinking, created_at, updated_at,
-                image_provider, image_model, share_token, thinking_budget, subagent_thinking_budget
+                image_provider_id, image_model, share_token, thinking_budget, subagent_thinking_budget
          FROM conversations
          WHERE share_token = ?",
     )
@@ -323,12 +323,12 @@ mod tests {
         .unwrap();
         assert_eq!(conv.user_id, user_id);
         assert_eq!(conv.title, "My Chat");
-        assert!(conv.provider.is_none());
+        assert!(conv.provider_id.is_none());
         assert!(conv.model_name.is_none());
         assert!(conv.system_prompt_override.is_none());
         assert!(!conv.deep_thinking);
         assert!(!conv.id.is_empty());
-        assert!(conv.image_provider.is_none());
+        assert!(conv.image_provider_id.is_none());
         assert!(conv.image_model.is_none());
     }
 
@@ -372,7 +372,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(conv.provider.as_deref(), Some("openai"));
+        assert_eq!(conv.provider_id.as_deref(), Some("openai"));
         assert_eq!(conv.model_name.as_deref(), Some("gpt-4o"));
         assert!(conv.system_prompt_override.is_none());
     }
@@ -396,10 +396,10 @@ mod tests {
         .unwrap();
         assert_eq!(conv.title, "Full Chat");
         assert_eq!(conv.system_prompt_override.as_deref(), Some("Be helpful."));
-        assert_eq!(conv.provider.as_deref(), Some("anthropic"));
+        assert_eq!(conv.provider_id.as_deref(), Some("anthropic"));
         assert_eq!(conv.model_name.as_deref(), Some("claude-3"));
         assert!(conv.deep_thinking);
-        assert_eq!(conv.image_provider.as_deref(), Some("My Google"));
+        assert_eq!(conv.image_provider_id.as_deref(), Some("My Google"));
         assert_eq!(
             conv.image_model.as_deref(),
             Some("gemini-3-pro-image-preview")
@@ -480,14 +480,14 @@ mod tests {
         assert!(updated.is_some());
         let updated = updated.unwrap();
         assert_eq!(updated.title, "New Title");
-        assert_eq!(updated.provider.as_deref(), Some("openai"));
+        assert_eq!(updated.provider_id.as_deref(), Some("openai"));
         assert_eq!(updated.model_name.as_deref(), Some("gpt-4"));
         assert_eq!(
             updated.system_prompt_override.as_deref(),
             Some("You are helpful.")
         );
         assert!(updated.deep_thinking);
-        assert_eq!(updated.image_provider.as_deref(), Some("My Google"));
+        assert_eq!(updated.image_provider_id.as_deref(), Some("My Google"));
         assert_eq!(updated.image_model.as_deref(), Some("gemini-img"));
     }
 

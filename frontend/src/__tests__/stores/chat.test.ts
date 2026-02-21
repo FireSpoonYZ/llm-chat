@@ -170,6 +170,26 @@ describe('chat store - editMessage', () => {
     })
   })
 
+  it('submits edit even when content is unchanged', () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    store.currentConversationId = 'conv-1'
+    store.messages = [
+      makeMessage({ id: 'msg-1', role: 'user', content: 'Same content' }),
+      makeMessage({ id: 'msg-2', role: 'assistant', content: 'Hi there' }),
+    ]
+
+    store.editMessage('msg-1', 'Same content')
+
+    expect(store.isWaiting).toBe(true)
+    expect(mockWs.send).toHaveBeenCalledWith({
+      type: 'edit_message',
+      message_id: 'msg-1',
+      content: 'Same content',
+    })
+  })
+
   it('should not allow editing assistant messages', () => {
     const store = useChatStore()
     store.currentConversationId = 'conv-1'
@@ -384,6 +404,32 @@ describe('chat store - mutation confirmation flow', () => {
     expect(store.isWaiting).toBe(true)
   })
 
+  it('applies unchanged edit after messages_truncated confirmation', () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const truncateHandler = getWsHandler(mockWs, 'messages_truncated')!
+    store.currentConversationId = 'conv-1'
+    store.messages = [
+      makeMessage({ id: 'msg-1', role: 'user', content: 'Same content' }),
+      makeMessage({ id: 'msg-2', role: 'assistant', content: 'Hi there' }),
+      makeMessage({ id: 'msg-3', role: 'user', content: 'Follow up' }),
+    ]
+
+    store.editMessage('msg-1', 'Same content')
+    expect(store.isWaiting).toBe(true)
+
+    truncateHandler({
+      type: 'messages_truncated',
+      after_message_id: 'msg-1',
+      updated_content: 'Same content',
+    })
+
+    expect(store.messages).toHaveLength(1)
+    expect(store.messages[0].content).toBe('Same content')
+    expect(store.isWaiting).toBe(true)
+  })
+
   it('applies regenerate only after messages_truncated confirmation', () => {
     const store = useChatStore()
     store.connectWs()
@@ -436,6 +482,175 @@ describe('chat store - mutation confirmation flow', () => {
     expect(store.isWaiting).toBe(false)
     expect(store.messages).toEqual(reloaded)
     expect(convApi.listMessages).toHaveBeenCalledWith('conv-1')
+  })
+
+  it('clears waiting and reloads messages on unchanged-edit error', async () => {
+    const store = useChatStore()
+    store.connectWs()
+    const mockWs = mockWsInstances[mockWsInstances.length - 1]
+    const errorHandler = getWsHandler(mockWs, 'error')!
+    const reloaded = [makeMessage({ id: 'server-1', role: 'user', content: 'Server state' })]
+    vi.mocked(convApi.listMessages).mockResolvedValueOnce({ messages: reloaded, total: 1 })
+    store.currentConversationId = 'conv-1'
+    store.messages = [
+      makeMessage({ id: 'msg-1', role: 'user', content: 'Same content' }),
+      makeMessage({ id: 'msg-2', role: 'assistant', content: 'Hi there' }),
+    ]
+
+    store.editMessage('msg-1', 'Same content')
+    expect(store.isWaiting).toBe(true)
+
+    errorHandler({
+      type: 'error',
+      code: 'edit_failed',
+      message: 'Failed to apply edit. Please try again.',
+    })
+    await Promise.resolve()
+
+    expect(store.isWaiting).toBe(false)
+    expect(store.messages).toEqual(reloaded)
+    expect(convApi.listMessages).toHaveBeenCalledWith('conv-1')
+  })
+
+  it('stops waiting when no response starts after truncate confirmation', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useChatStore()
+      store.connectWs()
+      const mockWs = mockWsInstances[mockWsInstances.length - 1]
+      const truncateHandler = getWsHandler(mockWs, 'messages_truncated')!
+      const reloaded = [makeMessage({ id: 'server-1', role: 'user', content: 'Server state' })]
+      vi.mocked(convApi.listMessages).mockResolvedValueOnce({ messages: reloaded, total: 1 })
+      store.currentConversationId = 'conv-1'
+      store.messages = [
+        makeMessage({ id: 'msg-1', role: 'user', content: 'Hello' }),
+        makeMessage({ id: 'msg-2', role: 'assistant', content: 'Hi there' }),
+      ]
+
+      store.editMessage('msg-1', 'Updated')
+      truncateHandler({
+        type: 'messages_truncated',
+        after_message_id: 'msg-1',
+        updated_content: 'Updated',
+      })
+      expect(store.isWaiting).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(20000)
+      await Promise.resolve()
+
+      expect(store.isWaiting).toBe(false)
+      expect(convApi.listMessages).toHaveBeenCalledWith('conv-1')
+      expect(store.messages).toEqual(reloaded)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('still times out if only container connected arrives after truncate confirmation', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useChatStore()
+      store.connectWs()
+      const mockWs = mockWsInstances[mockWsInstances.length - 1]
+      const truncateHandler = getWsHandler(mockWs, 'messages_truncated')!
+      const containerStatusHandler = getWsHandler(mockWs, 'container_status')!
+      const reloaded = [makeMessage({ id: 'server-2', role: 'user', content: 'Synced state' })]
+      vi.mocked(convApi.listMessages).mockResolvedValueOnce({ messages: reloaded, total: 1 })
+      store.currentConversationId = 'conv-1'
+      store.messages = [
+        makeMessage({ id: 'msg-1', role: 'user', content: 'Hello' }),
+        makeMessage({ id: 'msg-2', role: 'assistant', content: 'Hi there' }),
+      ]
+
+      store.editMessage('msg-1', 'Updated')
+      truncateHandler({
+        type: 'messages_truncated',
+        after_message_id: 'msg-1',
+        updated_content: 'Updated',
+      })
+      containerStatusHandler({
+        type: 'container_status',
+        status: 'connected',
+      })
+
+      await vi.advanceTimersByTimeAsync(20000)
+      await Promise.resolve()
+
+      expect(store.isWaiting).toBe(false)
+      expect(convApi.listMessages).toHaveBeenCalledWith('conv-1')
+      expect(store.messages).toEqual(reloaded)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancels timeout when first follow-up event is tool_result', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useChatStore()
+      store.connectWs()
+      const mockWs = mockWsInstances[mockWsInstances.length - 1]
+      const truncateHandler = getWsHandler(mockWs, 'messages_truncated')!
+      const toolResultHandler = getWsHandler(mockWs, 'tool_result')!
+      store.currentConversationId = 'conv-1'
+      store.messages = [
+        makeMessage({ id: 'msg-1', role: 'user', content: 'Hello' }),
+        makeMessage({ id: 'msg-2', role: 'assistant', content: 'Hi there' }),
+      ]
+
+      store.editMessage('msg-1', 'Updated')
+      truncateHandler({
+        type: 'messages_truncated',
+        after_message_id: 'msg-1',
+        updated_content: 'Updated',
+      })
+      toolResultHandler({
+        type: 'tool_result',
+        tool_call_id: 'tc-1',
+        is_error: false,
+        result: { kind: 'text', text: 'ok', success: true },
+      })
+
+      await vi.advanceTimersByTimeAsync(20000)
+
+      expect(convApi.listMessages).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancels timeout when first follow-up event is question', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useChatStore()
+      store.connectWs()
+      const mockWs = mockWsInstances[mockWsInstances.length - 1]
+      const truncateHandler = getWsHandler(mockWs, 'messages_truncated')!
+      const questionHandler = getWsHandler(mockWs, 'question')!
+      store.currentConversationId = 'conv-1'
+      store.messages = [
+        makeMessage({ id: 'msg-1', role: 'user', content: 'Hello' }),
+        makeMessage({ id: 'msg-2', role: 'assistant', content: 'Hi there' }),
+      ]
+
+      store.editMessage('msg-1', 'Updated')
+      truncateHandler({
+        type: 'messages_truncated',
+        after_message_id: 'msg-1',
+        updated_content: 'Updated',
+      })
+      questionHandler({
+        type: 'question',
+        questionnaire_id: 'q-1',
+        questions: [{ id: 'a', question: 'Need detail?', options: ['yes'] }],
+      })
+
+      await vi.advanceTimersByTimeAsync(20000)
+
+      expect(convApi.listMessages).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -506,9 +721,9 @@ describe('chat store - createConversation', () => {
 
   it('should call API with title and system prompt only', async () => {
     const mockConv = {
-      id: 'conv-1', title: 'Test', provider: null, model_name: null,
+      id: 'conv-1', title: 'Test', provider_id: null, model_name: null,
       system_prompt_override: 'Be helpful', deep_thinking: false, created_at: '', updated_at: '',
-      image_provider: null, image_model: null, share_token: null, thinking_budget: null,
+      image_provider_id: null, image_model: null, share_token: null, thinking_budget: null,
     }
     vi.mocked(convApi.createConversation).mockResolvedValueOnce(mockConv)
     const store = useChatStore()
@@ -529,11 +744,11 @@ describe('chat store - createConversation', () => {
     expect(store.conversations).toHaveLength(1)
   })
 
-  it('should pass provider and model to API', async () => {
+  it('should pass provider_id and model to API', async () => {
     const mockConv = {
-      id: 'conv-2', title: 'New Conversation', provider: 'openai', model_name: 'gpt-4o',
+      id: 'conv-2', title: 'New Conversation', provider_id: 'openai', model_name: 'gpt-4o',
       system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '',
-      image_provider: null, image_model: null, share_token: null, thinking_budget: null,
+      image_provider_id: null, image_model: null, share_token: null, thinking_budget: null,
     }
     vi.mocked(convApi.createConversation).mockResolvedValueOnce(mockConv)
     const store = useChatStore()
@@ -550,32 +765,32 @@ describe('chat store - createConversation', () => {
       undefined,
       undefined,
     )
-    expect(result.provider).toBe('openai')
+    expect(result.provider_id).toBe('openai')
     expect(result.model_name).toBe('gpt-4o')
   })
 
   it('should prepend new conversation to list', async () => {
     const mockConv = {
-      id: 'conv-3', title: 'Third', provider: null, model_name: null,
+      id: 'conv-3', title: 'Third', provider_id: null, model_name: null,
       system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '',
-      image_provider: null, image_model: null, share_token: null, thinking_budget: null,
+      image_provider_id: null, image_model: null, share_token: null, thinking_budget: null,
     }
     vi.mocked(convApi.createConversation).mockResolvedValueOnce(mockConv)
     const store = useChatStore()
     store.conversations = [
-      { id: 'existing', title: 'Old', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, thinking_budget: null, created_at: '', updated_at: '', image_provider: null, image_model: null, share_token: null },
+      { id: 'existing', title: 'Old', provider_id: null, model_name: null, system_prompt_override: null, deep_thinking: false, thinking_budget: null, created_at: '', updated_at: '', image_provider_id: null, image_model: null, share_token: null },
     ]
     await store.createConversation()
     expect(store.conversations).toHaveLength(2)
     expect(store.conversations[0].id).toBe('conv-3')
   })
 
-  it('should pass subagent provider and model to API', async () => {
+  it('should pass subagent provider_id and model to API', async () => {
     const mockConv = {
-      id: 'conv-4', title: 'Subagent Chat', provider: 'openai', model_name: 'gpt-4o',
-      subagent_provider: 'openai', subagent_model: 'gpt-4.1-mini',
+      id: 'conv-4', title: 'Subagent Chat', provider_id: 'openai', model_name: 'gpt-4o',
+      subagent_provider_id: 'openai', subagent_model: 'gpt-4.1-mini',
       system_prompt_override: null, deep_thinking: false, created_at: '', updated_at: '',
-      image_provider: null, image_model: null, share_token: null, thinking_budget: null,
+      image_provider_id: null, image_model: null, share_token: null, thinking_budget: null,
     }
     vi.mocked(convApi.createConversation).mockResolvedValueOnce(mockConv)
     const store = useChatStore()
@@ -601,7 +816,7 @@ describe('chat store - createConversation', () => {
       undefined,
       undefined,
     )
-    expect(result.subagent_provider).toBe('openai')
+    expect(result.subagent_provider_id).toBe('openai')
     expect(result.subagent_model).toBe('gpt-4.1-mini')
   })
 })
@@ -1401,8 +1616,8 @@ describe('chat store - deleteConversation', () => {
     vi.mocked(convApi.deleteConversation).mockResolvedValueOnce(undefined)
     const store = useChatStore()
     store.conversations = [
-      { id: 'conv-1', title: 'A', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, thinking_budget: null, created_at: '', updated_at: '', image_provider: null, image_model: null, share_token: null },
-      { id: 'conv-2', title: 'B', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, thinking_budget: null, created_at: '', updated_at: '', image_provider: null, image_model: null, share_token: null },
+      { id: 'conv-1', title: 'A', provider_id: null, model_name: null, system_prompt_override: null, deep_thinking: false, thinking_budget: null, created_at: '', updated_at: '', image_provider_id: null, image_model: null, share_token: null },
+      { id: 'conv-2', title: 'B', provider_id: null, model_name: null, system_prompt_override: null, deep_thinking: false, thinking_budget: null, created_at: '', updated_at: '', image_provider_id: null, image_model: null, share_token: null },
     ]
 
     await store.deleteConversation('conv-1')
@@ -1417,7 +1632,7 @@ describe('chat store - deleteConversation', () => {
     store.currentConversationId = 'conv-1'
     store.messages = [makeMessage()]
     store.conversations = [
-      { id: 'conv-1', title: 'A', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, thinking_budget: null, created_at: '', updated_at: '', image_provider: null, image_model: null, share_token: null },
+      { id: 'conv-1', title: 'A', provider_id: null, model_name: null, system_prompt_override: null, deep_thinking: false, thinking_budget: null, created_at: '', updated_at: '', image_provider_id: null, image_model: null, share_token: null },
     ]
 
     await store.deleteConversation('conv-1')
@@ -1432,8 +1647,8 @@ describe('chat store - deleteConversation', () => {
     store.currentConversationId = 'conv-1'
     store.messages = [makeMessage()]
     store.conversations = [
-      { id: 'conv-1', title: 'A', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, thinking_budget: null, created_at: '', updated_at: '', image_provider: null, image_model: null, share_token: null, subagent_provider: null, subagent_model: null },
-      { id: 'conv-2', title: 'B', provider: null, model_name: null, system_prompt_override: null, deep_thinking: false, thinking_budget: null, created_at: '', updated_at: '', image_provider: null, image_model: null, share_token: null, subagent_provider: null, subagent_model: null },
+      { id: 'conv-1', title: 'A', provider_id: null, model_name: null, system_prompt_override: null, deep_thinking: false, thinking_budget: null, created_at: '', updated_at: '', image_provider_id: null, image_model: null, share_token: null, subagent_provider_id: null, subagent_model: null },
+      { id: 'conv-2', title: 'B', provider_id: null, model_name: null, system_prompt_override: null, deep_thinking: false, thinking_budget: null, created_at: '', updated_at: '', image_provider_id: null, image_model: null, share_token: null, subagent_provider_id: null, subagent_model: null },
     ]
 
     await expect(store.deleteConversation('conv-1')).rejects.toThrow('delete failed')

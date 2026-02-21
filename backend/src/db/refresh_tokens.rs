@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 use sqlx::prelude::FromRow;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RefreshToken {
@@ -29,6 +29,27 @@ pub async fn create_refresh_token(
     .bind(token_hash)
     .bind(expires_at)
     .fetch_one(pool)
+    .await
+}
+
+pub async fn create_refresh_token_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    user_id: &str,
+    token_hash: &str,
+    expires_at: &str,
+) -> Result<RefreshToken, sqlx::Error> {
+    let id = uuid::Uuid::new_v4().to_string();
+
+    sqlx::query_as::<_, RefreshToken>(
+        "INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) \
+         VALUES (?, ?, ?, ?) \
+         RETURNING id, user_id, token_hash, expires_at, created_at",
+    )
+    .bind(&id)
+    .bind(user_id)
+    .bind(token_hash)
+    .bind(expires_at)
+    .fetch_one(&mut **tx)
     .await
 }
 

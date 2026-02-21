@@ -49,10 +49,10 @@ fn tool_result_text_from_value(value: &serde_json::Value) -> String {
     if let Some(s) = value.as_str() {
         return s.to_string();
     }
-    if let Some(obj) = value.as_object() {
-        if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
-            return text.to_string();
-        }
+    if let Some(obj) = value.as_object()
+        && let Some(text) = obj.get("text").and_then(|v| v.as_str())
+    {
+        return text.to_string();
     }
     if let Some(arr) = value.as_array() {
         let joined = arr
@@ -167,6 +167,8 @@ pub fn legacy_message_to_parts(message: &crate::db::messages::Message) -> Vec<Ne
     content_blocks_to_parts(&message.content, parsed_tool_calls.as_ref())
 }
 
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_message_v2(
     pool: &SqlitePool,
     message_id: Option<&str>,
@@ -196,6 +198,7 @@ pub async fn create_message_v2(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_message_with_parts(
     pool: &SqlitePool,
     message_id: Option<&str>,
@@ -299,6 +302,7 @@ pub async fn upsert_message_text_part(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn get_message_v2(
     pool: &SqlitePool,
     message_id: &str,
@@ -313,6 +317,7 @@ pub async fn get_message_v2(
     .await
 }
 
+#[allow(dead_code)]
 pub async fn list_messages_v2(
     pool: &SqlitePool,
     conversation_id: &str,

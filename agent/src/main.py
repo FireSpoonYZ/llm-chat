@@ -32,6 +32,28 @@ BACKEND_WS_URL = os.environ.get(
 )
 CONTAINER_TOKEN = os.environ.get("CONTAINER_TOKEN", "")
 MAX_RECONNECT_ATTEMPTS = 5
+DEFAULT_MAX_WS_MESSAGE_BYTES = 8 * 1024 * 1024
+
+
+def _read_max_ws_message_bytes() -> int:
+    raw = os.environ.get("MAX_WS_MESSAGE_BYTES")
+    if raw is None:
+        return DEFAULT_MAX_WS_MESSAGE_BYTES
+    try:
+        value = int(raw)
+        if value <= 0:
+            raise ValueError("must be positive")
+        return value
+    except ValueError:
+        logger.warning(
+            "Invalid MAX_WS_MESSAGE_BYTES=%r; falling back to default=%d",
+            raw,
+            DEFAULT_MAX_WS_MESSAGE_BYTES,
+        )
+        return DEFAULT_MAX_WS_MESSAGE_BYTES
+
+
+MAX_WS_MESSAGE_BYTES = _read_max_ws_message_bytes()
 
 
 class AgentSession:
@@ -51,7 +73,7 @@ class AgentSession:
         logger.info("Connecting to backend: %s", self.ws_url)
 
         try:
-            async with websockets.connect(url) as ws:
+            async with websockets.connect(url, max_size=MAX_WS_MESSAGE_BYTES) as ws:
                 self.ws = ws
                 await ws.send(json.dumps({"type": "ready"}))
                 logger.info("Agent ready, waiting for messages...")
@@ -60,6 +82,13 @@ class AgentSession:
                     if self._shutdown:
                         break
                     await self._handle_message(raw)
+        except websockets.ConnectionClosedError as exc:
+            logger.warning(
+                "Internal WS closed (code=%s, reason=%s)",
+                getattr(exc, "code", "unknown"),
+                getattr(exc, "reason", ""),
+            )
+            raise
         finally:
             await self.mcp_manager.shutdown()
 
@@ -291,8 +320,13 @@ async def main() -> None:
 
     try:
         await _connect_with_retry()
-    except (websockets.ConnectionClosedError, ConnectionRefusedError):
-        logger.error("Max reconnection attempts reached, exiting")
+    except (websockets.ConnectionClosedError, ConnectionRefusedError) as exc:
+        logger.error(
+            "Max reconnection attempts reached, exiting (error=%s, code=%s, reason=%s)",
+            exc,
+            getattr(exc, "code", "n/a"),
+            getattr(exc, "reason", ""),
+        )
         sys.exit(1)
     except asyncio.CancelledError:
         logger.info("Shutting down")

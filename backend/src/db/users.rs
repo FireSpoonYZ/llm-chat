@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 use sqlx::prelude::FromRow;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct User {
@@ -13,6 +13,7 @@ pub struct User {
     pub updated_at: String,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn create_user(
     pool: &SqlitePool,
     username: &str,
@@ -31,6 +32,27 @@ pub async fn create_user(
     .bind(email)
     .bind(password_hash)
     .fetch_one(pool)
+    .await
+}
+
+pub async fn create_user_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    username: &str,
+    email: &str,
+    password_hash: &str,
+) -> Result<User, sqlx::Error> {
+    let id = uuid::Uuid::new_v4().to_string();
+
+    sqlx::query_as::<_, User>(
+        "INSERT INTO users (id, username, email, password_hash)
+         VALUES (?, ?, ?, ?)
+         RETURNING id, username, email, password_hash, is_admin, created_at, updated_at",
+    )
+    .bind(&id)
+    .bind(username)
+    .bind(email)
+    .bind(password_hash)
+    .fetch_one(&mut **tx)
     .await
 }
 

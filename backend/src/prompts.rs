@@ -28,6 +28,12 @@ pub fn builtin_presets() -> Vec<SystemPromptPreset> {
             description: "Software engineering focused prompt based on Claude Code CLI.",
             content: include_str!("prompts_content/claude_code.txt"),
         },
+        SystemPromptPreset {
+            id: "claude-cowork",
+            name: "Claude Cowork",
+            description: "Task-execution focused prompt inspired by Claude Cowork style.",
+            content: include_str!("prompts_content/claude_cowork.txt"),
+        },
     ]
 }
 
@@ -39,6 +45,10 @@ pub fn get_preset(id: &str) -> Option<SystemPromptPreset> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn escape_sql_literal(raw: &str) -> String {
+        raw.replace('\'', "''")
+    }
 
     #[test]
     fn test_builtin_presets_not_empty() {
@@ -86,5 +96,26 @@ mod tests {
     fn test_claude_code_preset_exists() {
         let preset = get_preset("claude-code").unwrap();
         assert!(preset.content.contains("<claude_code_behavior>"));
+    }
+
+    #[test]
+    fn test_claude_cowork_preset_exists() {
+        let preset = get_preset("claude-cowork").unwrap();
+        assert!(preset.content.contains("<behavior_instructions>"));
+        assert!(preset.content.contains("Available Tools"));
+        assert!(
+            !preset
+                .content
+                .contains("Claude uses bash, read, write, edit")
+        );
+    }
+
+    #[test]
+    fn test_cowork_content_in_backfill_migration_matches_backend_template() {
+        let cowork = include_str!("prompts_content/claude_cowork.txt").trim();
+        let escaped = escape_sql_literal(cowork);
+        let migration =
+            include_str!("../../migrations/20241101000000_builtin_preset_ids_and_backfill_all.sql");
+        assert!(migration.contains(&escaped));
     }
 }

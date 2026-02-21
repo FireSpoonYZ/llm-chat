@@ -15,6 +15,10 @@ use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+fn serialize_models(models: &[&str]) -> String {
+    serde_json::to_string(models).unwrap()
+}
+
 fn test_config() -> Config {
     Config {
         database_url: "sqlite::memory:".into(),
@@ -128,7 +132,53 @@ async fn register_user2(state: &Arc<AppState>) -> String {
     body["access_token"].as_str().unwrap().to_string()
 }
 
+fn token_user_id(state: &Arc<AppState>, token: &str) -> String {
+    claude_chat_backend::auth::verify_access_token(token, &state.config.jwt_secret)
+        .unwrap()
+        .sub
+}
+
+async fn seed_provider(
+    state: &Arc<AppState>,
+    user_id: &str,
+    id: &str,
+    provider_type: &str,
+    models: &[&str],
+) {
+    let encrypted =
+        claude_chat_backend::crypto::encrypt("seed-key", &state.config.encryption_key).unwrap();
+    let models_json = serialize_models(models);
+    db::providers::upsert_provider(
+        &state.db,
+        Some(id),
+        user_id,
+        provider_type,
+        &encrypted,
+        None,
+        models.first().copied(),
+        false,
+        Some(models_json.as_str()),
+        Some(id),
+        Some("[]"),
+    )
+    .await
+    .unwrap();
+}
+
+async fn seed_standard_providers(state: &Arc<AppState>, token: &str) {
+    let user_id = token_user_id(state, token);
+    seed_provider(
+        state,
+        &user_id,
+        "openai",
+        "openai",
+        &["gpt-4o", "gpt-4.1-mini"],
+    )
+    .await;
+}
+
 async fn create_conv(state: &Arc<AppState>, token: &str) -> String {
+    seed_standard_providers(state, token).await;
     let resp = app(state.clone())
         .oneshot(
             Request::builder()
@@ -136,7 +186,9 @@ async fn create_conv(state: &Arc<AppState>, token: &str) -> String {
                 .uri("/api/conversations")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {}", token))
-                .body(Body::from(r#"{"title":"Test Chat"}"#))
+                .body(Body::from(
+                    r#"{"title":"Test Chat","provider_id":"openai","model_name":"gpt-4o","subagent_provider_id":"openai","subagent_model":"gpt-4.1-mini"}"#,
+                ))
                 .unwrap(),
         )
         .await

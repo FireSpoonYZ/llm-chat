@@ -2,6 +2,7 @@ pub mod conversations;
 pub mod mcp_servers;
 pub mod messages;
 pub mod messages_v2;
+pub mod model_defaults;
 pub mod presets;
 pub mod providers;
 pub mod refresh_tokens;

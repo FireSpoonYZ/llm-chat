@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 use sqlx::prelude::FromRow;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct UserPreset {
@@ -9,6 +9,7 @@ pub struct UserPreset {
     pub name: String,
     pub description: String,
     pub content: String,
+    pub builtin_id: Option<String>,
     pub is_default: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -19,7 +20,7 @@ pub async fn list_presets(
     user_id: &str,
 ) -> Result<Vec<UserPreset>, sqlx::Error> {
     sqlx::query_as::<_, UserPreset>(
-        "SELECT id, user_id, name, description, content, is_default, \
+        "SELECT id, user_id, name, description, content, builtin_id, is_default, \
          created_at, updated_at FROM user_presets \
          WHERE user_id = ? ORDER BY created_at ASC",
     )
@@ -28,7 +29,8 @@ pub async fn list_presets(
     .await
 }
 
-pub async fn count_presets(pool: &SqlitePool, user_id: &str) -> Result<i64, sqlx::Error> {
+#[cfg(test)]
+async fn count_presets(pool: &SqlitePool, user_id: &str) -> Result<i64, sqlx::Error> {
     Ok(
         sqlx::query_scalar::<_, i32>("SELECT COUNT(*) FROM user_presets WHERE user_id = ?")
             .bind(user_id)
@@ -55,9 +57,10 @@ pub async fn create_preset(
     }
 
     sqlx::query_as::<_, UserPreset>(
-        "INSERT INTO user_presets (id, user_id, name, description, content, is_default) \
-         VALUES (?, ?, ?, ?, ?, ?) \
-         RETURNING id, user_id, name, description, content, is_default, created_at, updated_at",
+        "INSERT INTO user_presets (id, user_id, name, description, content, builtin_id, is_default) \
+         VALUES (?, ?, ?, ?, ?, NULL, ?) \
+         RETURNING id, user_id, name, description, content, builtin_id, \
+         is_default, created_at, updated_at",
     )
     .bind(&id)
     .bind(user_id)
@@ -79,7 +82,7 @@ pub async fn update_preset(
     is_default: Option<bool>,
 ) -> Result<Option<UserPreset>, sqlx::Error> {
     let existing = sqlx::query_as::<_, UserPreset>(
-        "SELECT id, user_id, name, description, content, is_default, \
+        "SELECT id, user_id, name, description, content, builtin_id, is_default, \
          created_at, updated_at FROM user_presets WHERE id = ? AND user_id = ?",
     )
     .bind(id)
@@ -108,7 +111,8 @@ pub async fn update_preset(
         "UPDATE user_presets SET name = ?, description = ?, content = ?, \
          is_default = ?, updated_at = datetime('now') \
          WHERE id = ? AND user_id = ? \
-         RETURNING id, user_id, name, description, content, is_default, created_at, updated_at",
+         RETURNING id, user_id, name, description, content, builtin_id, \
+         is_default, created_at, updated_at",
     )
     .bind(new_name)
     .bind(new_desc)
@@ -133,21 +137,61 @@ pub async fn delete_preset(
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn seed_builtin_presets(pool: &SqlitePool, user_id: &str) -> Result<(), sqlx::Error> {
-    if count_presets(pool, user_id).await? > 0 {
-        return Ok(());
-    }
+#[cfg_attr(not(test), allow(dead_code))]
+pub async fn ensure_builtin_presets_for_user(
+    pool: &SqlitePool,
+    user_id: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    ensure_builtin_presets_for_user_in_tx(&mut tx, user_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn ensure_builtin_presets_for_user_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    user_id: &str,
+) -> Result<(), sqlx::Error> {
     let builtins = crate::prompts::builtin_presets();
+    let mut has_default = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM user_presets WHERE user_id = ? AND is_default = 1",
+    )
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await?
+        > 0;
+
     for preset in &builtins {
-        let is_default = preset.id == "default";
-        create_preset(
-            pool,
-            user_id,
-            preset.name,
-            preset.description,
-            preset.content,
-            is_default,
+        let is_default = preset.id == "default" && !has_default;
+        let inserted = sqlx::query(
+            "INSERT OR IGNORE INTO user_presets \
+             (id, user_id, name, description, content, builtin_id, is_default) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(user_id)
+        .bind(preset.name)
+        .bind(preset.description)
+        .bind(preset.content)
+        .bind(preset.id)
+        .bind(is_default)
+        .execute(&mut **tx)
+        .await?;
+
+        if is_default && inserted.rows_affected() > 0 {
+            has_default = true;
+        }
+    }
+
+    if !has_default {
+        sqlx::query(
+            "UPDATE user_presets SET is_default = 1 \
+             WHERE user_id = ? AND builtin_id = 'default' \
+             AND NOT EXISTS (SELECT 1 FROM user_presets WHERE user_id = ? AND is_default = 1)",
+        )
+        .bind(user_id)
+        .bind(user_id)
+        .execute(&mut **tx)
         .await?;
     }
     Ok(())
@@ -176,6 +220,7 @@ mod tests {
         let all = list_presets(&pool, &uid).await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].name, "Test");
+        assert!(all[0].builtin_id.is_none());
     }
 
     #[tokio::test]
@@ -216,16 +261,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_seed_builtin_presets() {
+    async fn test_ensure_builtin_presets_for_user() {
         let (pool, uid) = setup().await;
-        seed_builtin_presets(&pool, &uid).await.unwrap();
+        ensure_builtin_presets_for_user(&pool, &uid).await.unwrap();
         let all = list_presets(&pool, &uid).await.unwrap();
-        assert!(all.len() >= 3);
+        assert!(all.len() >= 4);
+        assert!(all.iter().any(|p| p.name == "Claude Cowork"));
+        assert!(
+            all.iter()
+                .any(|p| p.builtin_id.as_deref() == Some("default"))
+        );
+        assert!(
+            all.iter()
+                .any(|p| p.builtin_id.as_deref() == Some("claude-ai"))
+        );
+        assert!(
+            all.iter()
+                .any(|p| p.builtin_id.as_deref() == Some("claude-code"))
+        );
+        assert!(
+            all.iter()
+                .any(|p| p.builtin_id.as_deref() == Some("claude-cowork"))
+        );
         let defaults: Vec<_> = all.iter().filter(|p| p.is_default).collect();
         assert_eq!(defaults.len(), 1);
         assert_eq!(defaults[0].name, "Default");
-        // Seeding again should be a no-op
-        seed_builtin_presets(&pool, &uid).await.unwrap();
+        // Ensuring again should be a no-op
+        ensure_builtin_presets_for_user(&pool, &uid).await.unwrap();
         assert_eq!(list_presets(&pool, &uid).await.unwrap().len(), all.len());
     }
 
@@ -305,17 +367,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_seed_does_not_overwrite_existing() {
+    async fn test_ensure_builtin_presets_does_not_overwrite_existing_default() {
         let (pool, uid) = setup().await;
         // Create a custom preset first
         create_preset(&pool, &uid, "Custom", "my desc", "my content", true)
             .await
             .unwrap();
-        // Seeding should be a no-op since count > 0
-        seed_builtin_presets(&pool, &uid).await.unwrap();
+        // Ensuring should preserve the custom default and add missing built-ins.
+        ensure_builtin_presets_for_user(&pool, &uid).await.unwrap();
         let all = list_presets(&pool, &uid).await.unwrap();
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].name, "Custom");
+        assert!(all.len() >= 5);
+        let custom = all.iter().find(|p| p.name == "Custom").unwrap();
+        assert!(custom.is_default);
+        assert!(all.iter().any(|p| p.name == "Default"));
+        assert!(all.iter().any(|p| p.name == "Claude AI"));
+        assert!(all.iter().any(|p| p.name == "Claude Code"));
+        assert!(all.iter().any(|p| p.name == "Claude Cowork"));
+
+        let defaults: Vec<_> = all.iter().filter(|p| p.is_default).collect();
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].name, "Custom");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_builtin_presets_is_idempotent_by_builtin_id() {
+        let (pool, uid) = setup().await;
+        ensure_builtin_presets_for_user(&pool, &uid).await.unwrap();
+        ensure_builtin_presets_for_user(&pool, &uid).await.unwrap();
+        ensure_builtin_presets_for_user(&pool, &uid).await.unwrap();
+
+        let builtin_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM user_presets WHERE user_id = ? AND builtin_id IS NOT NULL",
+        )
+        .bind(&uid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(builtin_count, 4);
     }
 
     #[tokio::test]
@@ -333,5 +421,21 @@ mod tests {
         assert_eq!(updated.description, "desc");
         assert_eq!(updated.content, "content");
         assert!(!updated.is_default);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_preset_names_allowed_per_user() {
+        let (pool, uid) = setup().await;
+        let first = create_preset(&pool, &uid, "Same Name", "v1", "content1", false)
+            .await
+            .unwrap();
+        let second = create_preset(&pool, &uid, "Same Name", "v2", "content2", false)
+            .await
+            .unwrap();
+
+        assert_ne!(first.id, second.id);
+        let all = list_presets(&pool, &uid).await.unwrap();
+        let same_name: Vec<_> = all.into_iter().filter(|p| p.name == "Same Name").collect();
+        assert_eq!(same_name.len(), 2);
     }
 }

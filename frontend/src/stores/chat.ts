@@ -89,6 +89,7 @@ export const useChatStore = defineStore('chat', () => {
 
   const MAX_PENDING_SUBAGENT_TRACE_EVENTS = 256
   const MUTATION_CONFIRM_TIMEOUT_MS = 8000
+  const MUTATION_RESPONSE_START_TIMEOUT_MS = 20000
   const EXPECTED_RECONNECT_WINDOW_MS = 15000
   const EXPLORE_TOOL_NAMES = new Set(['explore'])
   const LEGACY_TASK_TOOL_NAMES = new Set(['task'])
@@ -126,6 +127,7 @@ export const useChatStore = defineStore('chat', () => {
   const pendingSubagentTraceByToolCallId = new Map<string, BufferedTraceDelta[]>()
   const pendingLegacyTaskTraceByToolCallId = new Map<string, BufferedTraceDelta[]>()
   const pendingMutation = ref<PendingMutation | null>(null)
+  let mutationResponseStartTimeoutId: ReturnType<typeof setTimeout> | null = null
 
   function isExploreToolName(toolName: string): boolean {
     return EXPLORE_TOOL_NAMES.has(toolName)
@@ -242,6 +244,23 @@ export const useChatStore = defineStore('chat', () => {
     pendingMutation.value = null
   }
 
+  function clearMutationResponseStartTimeout() {
+    if (!mutationResponseStartTimeoutId) return
+    clearTimeout(mutationResponseStartTimeoutId)
+    mutationResponseStartTimeoutId = null
+  }
+
+  function armMutationResponseStartTimeout() {
+    clearMutationResponseStartTimeout()
+    mutationResponseStartTimeoutId = setTimeout(() => {
+      mutationResponseStartTimeoutId = null
+      if (!isWaiting.value || isStreaming.value) return
+      isWaiting.value = false
+      ElMessage.error(t('chat.messages.operationTimeout'))
+      void reloadCurrentConversationMessages()
+    }, MUTATION_RESPONSE_START_TIMEOUT_MS)
+  }
+
   function parseMessageParts(raw: unknown): MessagePart[] | undefined {
     if (!Array.isArray(raw)) return undefined
     const parsed: MessagePart[] = []
@@ -279,6 +298,7 @@ export const useChatStore = defineStore('chat', () => {
     const pending = pendingMutation.value
     if (!pending) return
     clearPendingMutation()
+    clearMutationResponseStartTimeout()
     if (!isStreaming.value) {
       isWaiting.value = false
     }
@@ -295,6 +315,7 @@ export const useChatStore = defineStore('chat', () => {
     expectedAfterMessageId: string,
   ) {
     clearPendingMutation()
+    clearMutationResponseStartTimeout()
     const mutationId = generateUUID()
     const timeoutId = setTimeout(() => {
       if (!pendingMutation.value || pendingMutation.value.id !== mutationId) return
@@ -316,6 +337,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function connectWs() {
     if (ws) ws.disconnect()
+    clearMutationResponseStartTimeout()
     expectedReconnectUntil = 0
     expectedReconnectReason = ''
     pendingSubagentTraceByToolCallId.clear()
@@ -340,6 +362,7 @@ export const useChatStore = defineStore('chat', () => {
     })
 
     ws.on('assistant_delta', (msg: WsMessage) => {
+      clearMutationResponseStartTimeout()
       if (isWaiting.value) isWaiting.value = false
       if (!isStreaming.value) isStreaming.value = true
       const last = streamingBlocks.value[streamingBlocks.value.length - 1]
@@ -352,6 +375,7 @@ export const useChatStore = defineStore('chat', () => {
     })
 
     ws.on('thinking_delta', (msg: WsMessage) => {
+      clearMutationResponseStartTimeout()
       if (isWaiting.value) isWaiting.value = false
       if (!isStreaming.value) isStreaming.value = true
       const delta = (msg.delta as string) || ''
@@ -364,6 +388,7 @@ export const useChatStore = defineStore('chat', () => {
     })
 
     ws.on('tool_call', (msg: WsMessage) => {
+      clearMutationResponseStartTimeout()
       if (isWaiting.value) isWaiting.value = false
       const block: ToolCallBlock = {
         type: 'tool_call',
@@ -383,6 +408,7 @@ export const useChatStore = defineStore('chat', () => {
     })
 
     ws.on('tool_result', (msg: WsMessage) => {
+      clearMutationResponseStartTimeout()
       const normalized = normalizeToolResult(msg.result)
       const tc = streamingBlocks.value.find(
         (b): b is ContentBlock & { type: 'tool_call' } =>
@@ -416,6 +442,7 @@ export const useChatStore = defineStore('chat', () => {
     })
 
     ws.on('question', (msg: WsMessage) => {
+      clearMutationResponseStartTimeout()
       const questionnaireId = typeof msg.questionnaire_id === 'string'
         ? msg.questionnaire_id
         : ''
@@ -492,6 +519,7 @@ export const useChatStore = defineStore('chat', () => {
     ws.on('task_trace_delta', handleTaskTraceDelta)
 
     ws.on('complete', (msg: WsMessage) => {
+      clearMutationResponseStartTimeout()
       // Prefer backend tool_calls (matches DB) over local streamingBlocks
       let toolCallsJson: string | null = null
       if (msg.tool_calls != null) {
@@ -528,6 +556,7 @@ export const useChatStore = defineStore('chat', () => {
     })
 
     ws.on('error', (msg: WsMessage) => {
+      clearMutationResponseStartTimeout()
       console.error('WS error:', msg.message)
       const errorCode = typeof msg.code === 'string' ? msg.code : ''
       if (
@@ -547,6 +576,9 @@ export const useChatStore = defineStore('chat', () => {
       const errorMessage = typeof msg.message === 'string' && msg.message
         ? msg.message
         : t('store.unknownError')
+      if (errorCode === 'conversation_model_config_invalid') {
+        ElMessage.error(errorMessage)
+      }
       const hasContent = streamingBlocks.value.length > 0
       if (hasContent) {
         const hasBlocks = streamingBlocks.value.some(b => b.type === 'tool_call' || b.type === 'thinking')
@@ -629,6 +661,7 @@ export const useChatStore = defineStore('chat', () => {
         pendingMutation.value.expectedAfterMessageId === afterMessageId
       ) {
         clearPendingMutation()
+        armMutationResponseStartTimeout()
       }
     })
 
@@ -637,6 +670,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function disconnectWs() {
     clearPendingMutation()
+    clearMutationResponseStartTimeout()
     expectedReconnectUntil = 0
     expectedReconnectReason = ''
     ws?.disconnect()
@@ -653,11 +687,11 @@ export const useChatStore = defineStore('chat', () => {
   async function createConversation(
     title?: string,
     systemPromptOverride?: string,
-    provider?: string,
+    providerId?: string,
     modelName?: string,
-    imageProvider?: string,
+    imageProviderId?: string,
     imageModel?: string,
-    subagentProvider?: string,
+    subagentProviderId?: string,
     subagentModel?: string,
     thinkingBudget?: number | null,
     subagentThinkingBudget?: number | null,
@@ -665,11 +699,11 @@ export const useChatStore = defineStore('chat', () => {
     const conv = await convApi.createConversation(
       title,
       systemPromptOverride,
-      provider,
+      providerId,
       modelName,
-      imageProvider,
+      imageProviderId,
       imageModel,
-      subagentProvider,
+      subagentProviderId,
       subagentModel,
       thinkingBudget,
       subagentThinkingBudget,
@@ -680,6 +714,7 @@ export const useChatStore = defineStore('chat', () => {
 
   async function selectConversation(id: string) {
     clearPendingMutation()
+    clearMutationResponseStartTimeout()
     const requestId = ++lastSelectRequestId
     currentConversationId.value = id
     activeQuestionnaire.value = null
@@ -766,6 +801,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function clearStream() {
     clearPendingMutation()
+    clearMutationResponseStartTimeout()
     streamingBlocks.value = []
     pendingSubagentTraceByToolCallId.clear()
     pendingLegacyTaskTraceByToolCallId.clear()
@@ -781,7 +817,6 @@ export const useChatStore = defineStore('chat', () => {
     const idx = messages.value.findIndex(m => m.id === messageId)
     if (idx < 0) return
     if (messages.value[idx].role !== 'user') return
-    if (newContent === messages.value[idx].content) return
 
     startPendingMutation('edit', messageId)
     isWaiting.value = true

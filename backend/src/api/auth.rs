@@ -210,9 +210,11 @@ async fn register(
         .map_err(|e| AppError::Internal(e.to_string()))?
         .map_err(AppError::from)?;
 
-    let user = db::users::create_user(&state.db, &req.username, &req.email, &password_hash)
+    let mut tx = state.db.begin().await?;
+    let user = db::users::create_user_in_tx(&mut tx, &req.username, &req.email, &password_hash)
         .await
         .map_err(map_user_create_error)?;
+    db::presets::ensure_builtin_presets_for_user_in_tx(&mut tx, &user.id).await?;
 
     let access_token = auth::create_access_token(
         &user.id,
@@ -226,13 +228,14 @@ async fn register(
     let (refresh_token, token_hash) = generate_refresh_token();
     let expires_at =
         chrono::Utc::now() + chrono::Duration::days(state.config.refresh_token_ttl_days);
-    db::refresh_tokens::create_refresh_token(
-        &state.db,
+    db::refresh_tokens::create_refresh_token_in_tx(
+        &mut tx,
         &user.id,
         &token_hash,
         &expires_at.to_rfc3339(),
     )
     .await?;
+    tx.commit().await?;
 
     let mut response = Json(auth_response(
         &user,
@@ -249,9 +252,11 @@ async fn register(
     Ok(response)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct LoginRequest {
+    #[validate(length(min = 1, message = "Username is required"))]
     pub username: String,
+    #[validate(length(min = 1, message = "Password is required"))]
     pub password: String,
 }
 
@@ -259,6 +264,9 @@ async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Response, AppError> {
+    req.validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
     let user = db::users::get_user_by_username(&state.db, &req.username)
         .await?
         .ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;

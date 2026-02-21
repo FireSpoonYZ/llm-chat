@@ -19,9 +19,9 @@ pub struct Claims {
     /// Whether the user has admin privileges.
     pub is_admin: bool,
     /// Expiry time as a UTC Unix timestamp.
-    pub exp: usize,
+    pub exp: u64,
     /// Issued-at time as a UTC Unix timestamp.
-    pub iat: usize,
+    pub iat: u64,
 }
 
 /// Claims embedded in a container-scoped JWT token.
@@ -32,9 +32,9 @@ pub struct ContainerClaims {
     /// The user who owns the conversation.
     pub user_id: String,
     /// Expiry time as a UTC Unix timestamp.
-    pub exp: usize,
+    pub exp: u64,
     /// Issued-at time as a UTC Unix timestamp.
-    pub iat: usize,
+    pub iat: u64,
 }
 
 /// Create an access token for a user with the given TTL in seconds.
@@ -45,12 +45,12 @@ pub fn create_access_token(
     secret: &str,
     ttl_secs: u64,
 ) -> Result<String, jsonwebtoken::errors::Error> {
-    let now = Utc::now().timestamp() as usize;
+    let now = Utc::now().timestamp() as u64;
     let claims = Claims {
         sub: user_id.to_owned(),
         username: username.to_owned(),
         is_admin,
-        exp: now + ttl_secs as usize,
+        exp: now + ttl_secs,
         iat: now,
     };
     encode(
@@ -67,11 +67,11 @@ pub fn create_container_token(
     secret: &str,
     ttl_secs: u64,
 ) -> Result<String, jsonwebtoken::errors::Error> {
-    let now = Utc::now().timestamp() as usize;
+    let now = Utc::now().timestamp() as u64;
     let claims = ContainerClaims {
         sub: conversation_id.to_owned(),
         user_id: user_id.to_owned(),
-        exp: now + ttl_secs as usize,
+        exp: now + ttl_secs,
         iat: now,
     };
     encode(

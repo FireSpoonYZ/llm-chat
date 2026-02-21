@@ -7,6 +7,8 @@ use bollard::container::{
     StartContainerOptions, StopContainerOptions,
 };
 use bollard::models::{EndpointSettings, HostConfig};
+use dashmap::DashMap;
+use tokio::sync::Mutex;
 
 use super::registry::ContainerRegistry;
 use crate::auth;
@@ -27,6 +29,8 @@ pub struct DockerManager {
     docker: Docker,
     registry: Arc<ContainerRegistry>,
     config: config::Config,
+    /// Per-conversation lock to prevent TOCTOU races in start_container.
+    start_locks: DashMap<String, Arc<Mutex<()>>>,
 }
 
 impl DockerManager {
@@ -36,6 +40,7 @@ impl DockerManager {
             docker,
             registry,
             config,
+            start_locks: DashMap::new(),
         }
     }
 
@@ -49,6 +54,7 @@ impl DockerManager {
             docker,
             registry,
             config,
+            start_locks: DashMap::new(),
         }
     }
 
@@ -58,7 +64,17 @@ impl DockerManager {
         conversation_id: &str,
         user_id: &str,
     ) -> Result<String, DockerError> {
-        // Check if already running
+        // Acquire per-conversation lock to prevent TOCTOU races where two
+        // concurrent callers both pass the registry.get() check and create
+        // duplicate containers.
+        let lock = self
+            .start_locks
+            .entry(conversation_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+
+        // Check if already running (under lock)
         if let Some(info) = self.registry.get(conversation_id).await {
             self.registry.touch(conversation_id).await;
             return Ok(info.container_id);
@@ -94,7 +110,10 @@ impl DockerManager {
                 .to_string()
         };
 
-        let container_name = format!("claude-chat-agent-{}", &conversation_id[..8]);
+        let container_name = format!(
+            "claude-chat-agent-{}",
+            conversation_id.get(..8).unwrap_or(conversation_id)
+        );
 
         // Remove any existing container with the same name (e.g. from a previous crash)
         let _ = self
@@ -218,33 +237,42 @@ impl DockerManager {
             .get_idle_containers(self.config.container_idle_timeout_secs)
             .await;
 
-        for info in idle {
+        if idle.is_empty() {
+            return;
+        }
+
+        // Remove from WsState AND registry before touching Docker, so any
+        // concurrent send_to_container returns false AND start_container
+        // creates a fresh container instead of returning the stale one.
+        for info in &idle {
             tracing::info!(
                 "Stopping idle container {} for conversation {}",
                 info.container_id,
                 info.conversation_id
             );
-            // Remove from WsState AND registry before touching Docker, so any
-            // concurrent send_to_container returns false AND start_container
-            // creates a fresh container instead of returning the stale one.
             ws_state.remove_container(&info.conversation_id).await;
             self.registry.unregister(&info.conversation_id).await;
-
-            let _ = self
-                .docker
-                .stop_container(&info.container_id, Some(StopContainerOptions { t: 10 }))
-                .await;
-            let _ = self
-                .docker
-                .remove_container(
-                    &info.container_id,
-                    Some(RemoveContainerOptions {
-                        force: true,
-                        ..Default::default()
-                    }),
-                )
-                .await;
         }
+
+        // Stop and remove containers in parallel.
+        let futs = idle.into_iter().map(|info| {
+            let docker = self.docker.clone();
+            async move {
+                let _ = docker
+                    .stop_container(&info.container_id, Some(StopContainerOptions { t: 10 }))
+                    .await;
+                let _ = docker
+                    .remove_container(
+                        &info.container_id,
+                        Some(RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await;
+            }
+        });
+        futures_util::future::join_all(futs).await;
     }
 
     /// List all running containers.
@@ -313,7 +341,7 @@ mod tests {
         registry.register("conv1", "c1", "user1").await;
 
         let ws_state = WsState::new();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::ws::WS_CHANNEL_CAPACITY);
         ws_state.add_container("conv1", tx).await;
 
         // Use 0-second timeout so everything is idle
@@ -334,7 +362,7 @@ mod tests {
         registry.register("conv1", "c1", "user1").await;
 
         let ws_state = WsState::new();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::ws::WS_CHANNEL_CAPACITY);
         ws_state.add_container("conv1", tx).await;
 
         let mut config = config::Config::from_env();

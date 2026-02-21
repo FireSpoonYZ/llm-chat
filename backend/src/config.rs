@@ -72,6 +72,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         dotenvy::dotenv().ok();
-        envy::from_env::<Config>().expect("Failed to parse config from environment")
+        envy::from_env::<Config>()
+            .unwrap_or_else(|e| panic!("Failed to parse config from environment: {e}"))
     }
 }

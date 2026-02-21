@@ -14,9 +14,9 @@ export interface AuthResponse {
 export interface Conversation {
   id: string
   title: string
-  provider: string | null
+  provider_id: string | null
   model_name: string | null
-  subagent_provider?: string | null
+  subagent_provider_id?: string | null
   subagent_model?: string | null
   system_prompt_override: string | null
   deep_thinking: boolean
@@ -24,7 +24,7 @@ export interface Conversation {
   subagent_thinking_budget?: number | null
   created_at: string
   updated_at: string
-  image_provider: string | null
+  image_provider_id: string | null
   image_model: string | null
   share_token: string | null
 }
@@ -69,6 +69,15 @@ export interface ProviderConfig {
   image_models: string[]
   is_default: boolean
   has_api_key: boolean
+}
+
+export interface ModelDefaults {
+  chat_provider_id: string | null
+  chat_model: string | null
+  subagent_provider_id: string | null
+  subagent_model: string | null
+  image_provider_id: string | null
+  image_model: string | null
 }
 
 export interface McpServer {

@@ -12,7 +12,11 @@ pub const WS_MAX_HISTORY_MESSAGES: i64 = 1000;
 /// Number of recent messages to send to a container on init.
 pub const CONTAINER_INIT_HISTORY_LIMIT: i64 = 50;
 
-pub type WsSender = mpsc::UnboundedSender<String>;
+pub type WsSender = mpsc::Sender<String>;
+
+/// Capacity for outbound WS message channels. If the sink falls behind by
+/// this many messages the channel will apply backpressure.
+pub const WS_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Default)]
 pub struct WsState {
@@ -51,8 +55,13 @@ impl WsState {
         let conns = self.client_connections.read().await;
         if let Some(user_conns) = conns.get(user_id)
             && let Some(sender) = user_conns.get(conversation_id)
+            && sender.try_send(msg.to_string()).is_err()
         {
-            let _ = sender.send(msg.to_string());
+            tracing::warn!(
+                user_id = %user_id,
+                conversation_id = %conversation_id,
+                "Client WS channel full or closed; dropping message"
+            );
         }
     }
 
@@ -84,7 +93,17 @@ impl WsState {
     pub async fn send_to_container(&self, conversation_id: &str, msg: &str) -> bool {
         let conns = self.container_connections.read().await;
         if let Some((sender, _)) = conns.get(conversation_id) {
-            sender.send(msg.to_string()).is_ok()
+            match sender.try_send(msg.to_string()) {
+                Ok(()) => true,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        conversation_id = %conversation_id,
+                        "Container WS channel full; dropping message"
+                    );
+                    false
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            }
         } else {
             false
         }
@@ -105,10 +124,14 @@ impl WsState {
 mod tests {
     use super::*;
 
+    fn test_channel() -> (mpsc::Sender<String>, mpsc::Receiver<String>) {
+        mpsc::channel(WS_CHANNEL_CAPACITY)
+    }
+
     #[tokio::test]
     async fn test_add_and_remove_client() {
         let state = WsState::new();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = test_channel();
 
         state.add_client("user1", "conv1", tx).await;
 
@@ -128,7 +151,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_to_client() {
         let state = WsState::new();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = test_channel();
 
         state.add_client("user1", "conv1", tx).await;
         state.send_to_client("user1", "conv1", "hello").await;
@@ -147,7 +170,7 @@ mod tests {
     #[tokio::test]
     async fn test_add_and_remove_container() {
         let state = WsState::new();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = test_channel();
 
         state.add_container("conv1", tx).await;
 
@@ -167,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_to_container() {
         let state = WsState::new();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = test_channel();
 
         state.add_container("conv1", tx).await;
         let sent = state.send_to_container("conv1", "test msg").await;
@@ -187,8 +210,8 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_clients_same_user() {
         let state = WsState::new();
-        let (tx1, mut rx1) = mpsc::unbounded_channel();
-        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        let (tx1, mut rx1) = test_channel();
+        let (tx2, mut rx2) = test_channel();
 
         state.add_client("user1", "conv1", tx1).await;
         state.add_client("user1", "conv2", tx2).await;
@@ -260,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_container_if_gen_matching() {
         let state = WsState::new();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = test_channel();
 
         let generation = state.add_container("conv1", tx).await;
         assert!(state.remove_container_if_gen("conv1", generation).await);
@@ -271,11 +294,11 @@ mod tests {
     async fn test_remove_container_if_gen_stale() {
         let state = WsState::new();
 
-        let (tx_old, _rx_old) = mpsc::unbounded_channel();
+        let (tx_old, _rx_old) = test_channel();
         let gen_old = state.add_container("conv1", tx_old).await;
 
         // New container replaces old one (simulates model switch + new container start)
-        let (tx_new, mut rx_new) = mpsc::unbounded_channel();
+        let (tx_new, mut rx_new) = test_channel();
         let gen_new = state.add_container("conv1", tx_new).await;
         assert_ne!(gen_old, gen_new);
 
@@ -297,9 +320,9 @@ mod tests {
     async fn test_generation_increments() {
         let state = WsState::new();
 
-        let (tx1, _) = mpsc::unbounded_channel();
-        let (tx2, _) = mpsc::unbounded_channel();
-        let (tx3, _) = mpsc::unbounded_channel();
+        let (tx1, _) = test_channel();
+        let (tx2, _) = test_channel();
+        let (tx3, _) = test_channel();
 
         let g1 = state.add_container("a", tx1).await;
         let g2 = state.add_container("b", tx2).await;

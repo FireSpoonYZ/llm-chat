@@ -193,10 +193,12 @@ pub async fn set_conversation_mcp_servers(
     conversation_id: &str,
     server_ids: &[String],
 ) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
     // Delete existing associations
     sqlx::query("DELETE FROM conversation_mcp_servers WHERE conversation_id = ?")
         .bind(conversation_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
     // Insert new associations
@@ -207,10 +209,11 @@ pub async fn set_conversation_mcp_servers(
         )
         .bind(conversation_id)
         .bind(server_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
 
+    tx.commit().await?;
     Ok(())
 }
 

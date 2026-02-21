@@ -322,6 +322,122 @@ async fn concurrent_register_same_email_one_conflict() {
     );
 }
 
+#[tokio::test]
+async fn register_rolls_back_when_builtin_preset_insert_fails() {
+    let state = test_state().await;
+
+    sqlx::query(
+        "CREATE TRIGGER fail_register_preset_insert
+         BEFORE INSERT ON user_presets
+         BEGIN
+             SELECT RAISE(FAIL, 'forced preset insert failure');
+         END;",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let app = auth_app(state.clone());
+    let resp = app
+        .oneshot(post_json(
+            "/api/auth/register",
+            r#"{"username":"register_tx_preset_fail","email":"register_tx_preset_fail@example.com","password":"password123"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    sqlx::query("DROP TRIGGER fail_register_preset_insert")
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let user_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE username = ?")
+        .bind("register_tx_preset_fail")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(user_count, 0);
+
+    let preset_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM user_presets
+         WHERE user_id IN (SELECT id FROM users WHERE username = ?)",
+    )
+    .bind("register_tx_preset_fail")
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(preset_count, 0);
+
+    let refresh_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM refresh_tokens
+         WHERE user_id IN (SELECT id FROM users WHERE username = ?)",
+    )
+    .bind("register_tx_preset_fail")
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(refresh_count, 0);
+}
+
+#[tokio::test]
+async fn register_rolls_back_when_refresh_token_insert_fails() {
+    let state = test_state().await;
+
+    sqlx::query(
+        "CREATE TRIGGER fail_register_refresh_insert
+         BEFORE INSERT ON refresh_tokens
+         BEGIN
+             SELECT RAISE(FAIL, 'forced register refresh insert failure');
+         END;",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let app = auth_app(state.clone());
+    let resp = app
+        .oneshot(post_json(
+            "/api/auth/register",
+            r#"{"username":"register_tx_refresh_fail","email":"register_tx_refresh_fail@example.com","password":"password123"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    sqlx::query("DROP TRIGGER fail_register_refresh_insert")
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let user_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE username = ?")
+        .bind("register_tx_refresh_fail")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(user_count, 0);
+
+    let preset_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM user_presets
+         WHERE user_id IN (SELECT id FROM users WHERE username = ?)",
+    )
+    .bind("register_tx_refresh_fail")
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(preset_count, 0);
+
+    let refresh_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM refresh_tokens
+         WHERE user_id IN (SELECT id FROM users WHERE username = ?)",
+    )
+    .bind("register_tx_refresh_fail")
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(refresh_count, 0);
+}
+
 // ── Login ──
 
 #[tokio::test]

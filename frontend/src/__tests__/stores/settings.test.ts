@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useSettingsStore } from '../../stores/settings'
-import type { SystemPromptPreset } from '../../types'
+import type { ModelDefaults, SystemPromptPreset } from '../../types'
 
 const mockPresets: SystemPromptPreset[] = [
   {
@@ -36,6 +36,15 @@ vi.mock('../../api/users', () => ({
   upsertProvider: vi.fn().mockResolvedValue({}),
   deleteProvider: vi.fn().mockResolvedValue(undefined),
   listMcpServers: vi.fn().mockResolvedValue([]),
+  getModelDefaults: vi.fn().mockResolvedValue({
+    chat_provider_id: null,
+    chat_model: null,
+    subagent_provider_id: null,
+    subagent_model: null,
+    image_provider_id: null,
+    image_model: null,
+  }),
+  updateModelDefaults: vi.fn().mockResolvedValue({}),
 }))
 
 import * as presetsApi from '../../api/prompts'
@@ -131,6 +140,14 @@ const mockProviders: ProviderConfig[] = [
 const mockMcpServers: McpServer[] = [
   { id: 'mcp-1', name: 'Server A', description: 'Test server', transport: 'stdio', is_enabled: true },
 ]
+const mockModelDefaults: ModelDefaults = {
+  chat_provider_id: 'prov-1',
+  chat_model: 'gpt-4o',
+  subagent_provider_id: 'prov-2',
+  subagent_model: 'claude-3-opus',
+  image_provider_id: null,
+  image_model: null,
+}
 
 describe('settings store - providers', () => {
   beforeEach(() => {
@@ -148,18 +165,37 @@ describe('settings store - providers', () => {
 
   it('should call upsertProvider and reload on saveProvider', async () => {
     vi.mocked(usersApi.listProviders).mockResolvedValue(mockProviders)
+    vi.mocked(usersApi.getModelDefaults).mockResolvedValue(mockModelDefaults)
     const store = useSettingsStore()
-    await store.saveProvider('Test', 'openai', 'sk-xxx', undefined, ['gpt-4o'], false, [])
-    expect(usersApi.upsertProvider).toHaveBeenCalledWith('Test', 'openai', 'sk-xxx', undefined, ['gpt-4o'], false, [])
+    await store.saveProvider(undefined, 'Test', 'openai', 'sk-xxx', undefined, ['gpt-4o'], undefined, [])
+    expect(usersApi.upsertProvider).toHaveBeenCalledWith(undefined, 'Test', 'openai', 'sk-xxx', undefined, ['gpt-4o'], undefined, [])
     expect(usersApi.listProviders).toHaveBeenCalled()
+    expect(usersApi.getModelDefaults).toHaveBeenCalled()
   })
 
   it('should call deleteProvider and reload on removeProvider', async () => {
     vi.mocked(usersApi.listProviders).mockResolvedValue(mockProviders)
+    vi.mocked(usersApi.getModelDefaults).mockResolvedValue(mockModelDefaults)
     const store = useSettingsStore()
-    await store.removeProvider('OpenAI')
-    expect(usersApi.deleteProvider).toHaveBeenCalledWith('OpenAI')
+    await store.removeProvider('prov-1')
+    expect(usersApi.deleteProvider).toHaveBeenCalledWith('prov-1')
     expect(usersApi.listProviders).toHaveBeenCalled()
+    expect(usersApi.getModelDefaults).toHaveBeenCalled()
+  })
+
+  it('should load model defaults from API', async () => {
+    vi.mocked(usersApi.getModelDefaults).mockResolvedValue(mockModelDefaults)
+    const store = useSettingsStore()
+    await store.loadModelDefaults()
+    expect(store.modelDefaults).toEqual(mockModelDefaults)
+  })
+
+  it('should save model defaults through API', async () => {
+    vi.mocked(usersApi.updateModelDefaults).mockResolvedValue(mockModelDefaults)
+    const store = useSettingsStore()
+    await store.saveModelDefaults(mockModelDefaults)
+    expect(usersApi.updateModelDefaults).toHaveBeenCalledWith(mockModelDefaults)
+    expect(store.modelDefaults).toEqual(mockModelDefaults)
   })
 })
 
